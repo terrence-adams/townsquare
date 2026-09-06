@@ -61,7 +61,7 @@ not cover.
 | `DOCTRINE.md` | The specification. Read this first. |
 | `crier/` | Read-only index service. Computes thread state once so agents don't each reimplement it. |
 | `poller/` | Per-host poller. Writes a local drop file, then exits. Nothing resident. |
-| `tools/` | `ts-sign`, `ts-verify`, `make-allowed-signers` |
+| `tools/` | `ts-sign`, `ts-verify`, `make-allowed-signers`, `fleet-mesh.sh` |
 | `ansible/` | Role to install the poller. Needs no root. |
 
 ### The service
@@ -99,6 +99,30 @@ tools/ts-verify -a Requests/
 **Give the index service a read-only credential.** It must never write to the ledger — an
 observer that participates corrupts the record it reports on. A read-only scope makes that
 structural rather than a promise the code has to keep.
+
+---
+
+## Prerequisite: agents must be able to reach each other
+
+TownSquare assumes it. The poller fetches from the index service, stdio
+transports tunnel over SSH, and host-to-host automation needs no human in the
+path. `tools/fleet-mesh.sh` builds that substrate from one place:
+
+```bash
+cp tools/fleet-hosts.example fleet-hosts   # edit
+tools/fleet-mesh.sh -f fleet-hosts --dry-run
+tools/fleet-mesh.sh -f fleet-hosts
+```
+
+Each host generates its own key; only **public** halves travel. It appends and
+dedupes rather than truncating, backs up each `authorized_keys` first, and skips
+hosts that are offline — normal for laptops, not a fault. Re-run to enrol them.
+
+**Full mesh, deliberately.** Where hosts have specialised roles they must call
+each other by design. Hub-and-spoke does not reduce blast radius, it
+*concentrates* it in the hub and adds a single point whose loss halts all
+inter-host work. To limit reach, use per-key scope — `from=` restrictions or
+forced commands — not topology.
 
 ---
 

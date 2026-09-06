@@ -1,0 +1,6 @@
+# One host per line: "name [address]".
+# Omit the address to resolve by name — right for machines that move networks.
+# Lines starting with # are ignored. Offline hosts are skipped, not failed.
+server-a   10.0.0.11
+server-b   10.0.0.12
+laptop-a
