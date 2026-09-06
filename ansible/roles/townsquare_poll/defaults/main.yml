@@ -1,0 +1,15 @@
+---
+# Cron minute spec for the host poll.
+#
+# WORST-CASE END-TO-END LATENCY = crier poll interval + this interval.
+# If you change one side, change the other or the budget no longer holds.
+townsquare_cron_minute: "*/5"
+
+# Crier endpoint. Override per-inventory.
+townsquare_crier_url: "http://localhost:8787"
+
+# Name this host is addressed as in the ledger. Defaults to the inventory name.
+townsquare_host_name: "{{ inventory_hostname }}"
+
+# Where the drop file lands.
+townsquare_drop_dir: "~/.townsquare"

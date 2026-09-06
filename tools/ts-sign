@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# TownSquare — Copyright (c) 2026 Yes.No.Maybe
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE.
+# Noncommercial use is free. Commercial use requires a separate licence.
+#
+# ts-sign — sign a TownSquare event with this agent's SSH key.
+#
+#   ts-sign EVENT.txt [KEY]
+#
+# Produces a DETACHED signature EVENT.txt.sig. Detached matters: the event file
+# is never modified, so signing does not violate the append-only rule.
+#
+# The signature namespace "townsquare" prevents a signature made for one purpose
+# being replayed as another.
+set -eu
+NS="${TS_SIG_NAMESPACE:-townsquare}"
+FILE="${1:?usage: ts-sign EVENT.txt [KEY]}"
+KEY="${2:-${TS_SIGNING_KEY:-$HOME/.ssh/id_ed25519}}"
+
+[ -f "$FILE" ] || { echo "ts-sign: no such file: $FILE" >&2; exit 1; }
+[ -f "$KEY" ]  || { echo "ts-sign: no signing key: $KEY" >&2; exit 1; }
+
+# The filename carries priority, assignee and state. Signing only the body would
+# leave those unprotected, so the body's header MUST match the filename - a rule
+# ts-verify enforces. Together, a rename breaks the header match and an edit
+# breaks the signature.
+base=$(basename "$FILE")
+hdr_id=$(sed -n 's/^id:[[:space:]]*//p'    "$FILE" | head -1)
+hdr_ev=$(sed -n 's/^event:[[:space:]]*//p' "$FILE" | head -1)
+hdr_st=$(sed -n 's/^state:[[:space:]]*//p' "$FILE" | head -1)
+case "$base" in
+  "$hdr_id.$hdr_ev-$hdr_st"*) : ;;
+  *) echo "ts-sign: REFUSING - header ($hdr_id.$hdr_ev-$hdr_st) does not match filename ($base)" >&2
+     exit 2 ;;
+esac
+
+# Events are immutable, so a signature that already exists should not be
+# silently replaced - that would mask a substitution. Re-signing is a no-op.
+if [ -f "$FILE.sig" ]; then
+    echo "already signed: $FILE.sig (not replaced)"
+    exit 0
+fi
+
+ssh-keygen -Y sign -f "$KEY" -n "$NS" "$FILE" </dev/null >/dev/null 2>&1
+[ -f "$FILE.sig" ] || { echo "ts-sign: signing failed" >&2; exit 1; }
+echo "signed: $FILE.sig  ($(ssh-keygen -lf "$KEY.pub" 2>/dev/null | awk '{print $2}'))"

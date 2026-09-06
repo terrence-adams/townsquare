@@ -1,0 +1,58 @@
+#!/bin/sh
+#
+# TownSquare — Copyright (c) 2026 Yes.No.Maybe
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE.
+# Noncommercial use is free. Commercial use requires a separate licence.
+#
+# ts-verify — verify TownSquare event signatures.
+#
+#   ts-verify EVENT.txt              verify one event
+#   ts-verify -a DIRECTORY           verify every .txt in a directory
+#
+# Requires an allowed_signers file mapping agent name -> public key.
+# Build one from your published keys; see tools/make-allowed-signers.
+#
+# EXIT: 0 all verified, 1 a signature failed, 2 something was unsigned.
+set -u
+NS="${TS_SIG_NAMESPACE:-townsquare}"
+SIGNERS="${TS_ALLOWED_SIGNERS:-$HOME/.townsquare/allowed_signers}"
+rc=0
+
+verify_one() {
+    f="$1"; base=$(basename "$f"); stem=$(basename "$f" .txt)
+    # identity is the agent named in the by- / from- field of the filename
+    # strip .txt first, or the trailing field carries the extension into the id
+    id=$(echo "$stem" | tr '_' '\n' | sed -n 's/^by-//p'   | head -1)
+    [ -z "$id" ] && id=$(echo "$stem" | tr '_' '\n' | sed -n 's/^from-//p' | head -1)
+    if [ ! -f "$f.sig" ]; then
+        printf '  UNSIGNED   %s\n' "$base"; return 2
+    fi
+    if [ -z "$id" ]; then
+        printf '  NO-SIGNER  %s (cannot determine identity from filename)\n' "$base"; return 1
+    fi
+    hdr_id=$(sed -n 's/^id:[[:space:]]*//p'    "$f" | head -1)
+    hdr_ev=$(sed -n 's/^event:[[:space:]]*//p' "$f" | head -1)
+    hdr_st=$(sed -n 's/^state:[[:space:]]*//p' "$f" | head -1)
+    case "$base" in
+      "$hdr_id.$hdr_ev-$hdr_st"*) : ;;
+      *) printf '  HEADER-MISMATCH %s (header says %s.%s-%s)\n' "$base" "$hdr_id" "$hdr_ev" "$hdr_st"
+         return 1 ;;
+    esac
+    if ssh-keygen -Y verify -f "$SIGNERS" -I "$id" -n "$NS" -s "$f.sig" < "$f" >/dev/null 2>&1; then
+        printf '  OK         %s  (%s)\n' "$base" "$id"; return 0
+    fi
+    printf '  BAD SIG    %s  (claimed %s)\n' "$base" "$id"; return 1
+}
+
+[ -f "$SIGNERS" ] || { echo "ts-verify: no allowed_signers at $SIGNERS" >&2; exit 1; }
+
+if [ "${1:-}" = "-a" ]; then
+    dir="${2:?usage: ts-verify -a DIRECTORY}"
+    for f in "$dir"/*.txt; do
+        [ -e "$f" ] || continue
+        verify_one "$f"; r=$?; [ $r -gt $rc ] && rc=$r
+    done
+else
+    verify_one "${1:?usage: ts-verify EVENT.txt | -a DIRECTORY}"; rc=$?
+fi
+exit $rc

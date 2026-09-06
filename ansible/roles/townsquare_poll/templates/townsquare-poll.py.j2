@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# {{ ansible_managed }}
+#
+# TownSquare — Copyright (c) 2026 Yes.No.Maybe
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE.
+# Noncommercial use is free. Commercial use requires a separate licence.
+#
+"""
+TownSquare host poller — refreshes this host's work into a local drop file.
+
+Runs for a fraction of a second and exits. Nothing resident, no daemon, no open
+connection, no privilege. Schedule it from the user's own crontab.
+
+Written in Python rather than shell deliberately: an earlier version embedded
+`python -c` inside sh inside a template, and the nested quoting silently mangled
+the output so the drop file rendered EMPTY while reporting success. Every host
+then read "nothing open" when work existed. One language, no quoting boundary.
+"""
+import json
+import os
+import sys
+import urllib.request
+from datetime import datetime, timezone
+
+CRIER = "{{ townsquare_crier_url }}"
+HOST = "{{ townsquare_host_name }}"
+DIR = os.path.expanduser("{{ townsquare_drop_dir }}")
+DROP = os.path.join(DIR, "NEW-EVENTS.txt")
+STATE = os.path.join(DIR, "last_seq")
+TIMEOUT = int(os.environ.get("TS_TIMEOUT", "10"))
+ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def get(path: str):
+    with urllib.request.urlopen(CRIER + path, timeout=TIMEOUT) as r:
+        return json.loads(r.read().decode())
+
+
+def write(lines) -> None:
+    os.makedirs(DIR, exist_ok=True)
+    tmp = DROP + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, DROP)
+
+
+def read_last():
+    try:
+        with open(STATE) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def main() -> int:
+    last = read_last()
+    try:
+        wm = get("/watermark")
+    except Exception as e:  # noqa: BLE001
+        # UNREACHABLE IS NOT "NO WORK". A notification system that fails
+        # silently is worse than none, because it gets trusted.
+        write([
+            "TOWNSQUARE - CRIER UNREACHABLE",
+            f"checked:     {now()}",
+            f"crier:       {CRIER}",
+            f"error:       {type(e).__name__}: {e}",
+            f"last known:  seq {last if last else 'never'}",
+            "",
+            "This is UNKNOWN, not 'no work'. Do not read an empty list as quiet.",
+            "Check the Crier service, or query the ledger directly.",
+        ])
+        return 0
+
+    seq = str(wm.get("seq", ""))
+    changed = f" (CHANGED from {last})" if last is not None and seq != last else ""
+    lines = [
+        f"TOWNSQUARE - open work for {HOST}",
+        f"refreshed:   {now()}",
+        f"watermark:   seq {seq}{changed}",
+        f"crier poll:  {wm.get('last_poll_ok', 'unknown')}",
+        "",
+    ]
+    try:
+        data = get(f"/open?host={HOST}")
+        threads = data.get("threads", [])
+        if not threads:
+            lines.append("  Nothing open addressed to this host.")
+        else:
+            threads.sort(key=lambda t: (ORDER.get(t.get("priority"), 4), t["thread"]))
+            for t in threads:
+                tag = "CLOSE" if t.get("action") == "close" else " WORK"
+                lines.append(
+                    f"  [{tag}] {t.get('priority') or '--'}  {t['thread']}  "
+                    f"{t.get('state', ''):<9} {t.get('subject') or ''}"
+                )
+            lines += ["", f"  Detail:  curl -s {CRIER}/thread/<id>",
+                      f"  In flight elsewhere:  curl -s {CRIER}/active"]
+    except Exception as e:  # noqa: BLE001
+        lines += [f"  Could not fetch open work: {type(e).__name__}: {e}",
+                  "  Treat as UNKNOWN, not as no work."]
+
+    write(lines)
+    os.makedirs(DIR, exist_ok=True)
+    with open(STATE, "w") as f:
+        f.write(seq)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

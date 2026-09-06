@@ -1,0 +1,24 @@
+---
+# Example inventory. Replace names and addresses with your own.
+#
+# Hosts with no ansible_host resolve by name, so machines that move between
+# networks need no address pinned here. A powered-off host is simply skipped —
+# that is normal for laptops, not a fault and not an exclusion.
+all:
+  vars:
+    townsquare_crier_url: "http://crier.example.internal:8787"
+  children:
+    workstations:
+      hosts:
+        laptop-a:
+          ansible_user: youruser
+        laptop-b:
+          ansible_user: youruser
+    servers:
+      hosts:
+        server-a:
+          ansible_host: 10.0.0.11
+          ansible_user: youruser
+        server-b:
+          ansible_host: 10.0.0.12
+          ansible_user: youruser

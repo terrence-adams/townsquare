@@ -1,0 +1,42 @@
+---
+# NO ROOT REQUIRED, deliberately.
+#
+# An earlier version installed system-level systemd units and failed on most
+# hosts with "Timeout waiting for privilege escalation prompt". The only thing
+# root bought was surviving reboot without loginctl enable-linger — and a user
+# crontab gives that for free. Nothing here needs privilege, so nothing asks.
+# Run WITHOUT --ask-become-pass.
+
+- name: Ensure ~/.local/bin and the drop directory exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ ansible_env.HOME }}/.local/bin"
+    - "{{ townsquare_drop_dir | replace('~', ansible_env.HOME) }}"
+
+- name: Install the poll script
+  ansible.builtin.template:
+    src: townsquare-poll.py.j2
+    dest: "{{ ansible_env.HOME }}/.local/bin/townsquare-poll"
+    mode: "0755"
+
+- name: Schedule it in the user's own crontab
+  ansible.builtin.cron:
+    name: "townsquare poll"
+    minute: "{{ townsquare_cron_minute }}"
+    job: "{{ ansible_env.HOME }}/.local/bin/townsquare-poll >/dev/null 2>&1"
+
+- name: Populate the drop file now rather than waiting for the first tick
+  ansible.builtin.command: "{{ ansible_env.HOME }}/.local/bin/townsquare-poll"
+  changed_when: false
+
+- name: Read back what this host has outstanding
+  ansible.builtin.command: "cat {{ townsquare_drop_dir | replace('~', ansible_env.HOME) }}/NEW-EVENTS.txt"
+  register: townsquare_drop
+  changed_when: false
+
+- name: Report
+  ansible.builtin.debug:
+    var: townsquare_drop.stdout_lines

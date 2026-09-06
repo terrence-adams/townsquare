@@ -1,0 +1,9 @@
+---
+# Install the TownSquare poller on every host.
+#   ansible-playbook -i inventory.example.yml townsquare-poll.yml
+# Hosts that are offline are skipped; re-run when they are up. Idempotent.
+- name: TownSquare poller
+  hosts: all
+  gather_facts: true
+  roles:
+    - townsquare_poll

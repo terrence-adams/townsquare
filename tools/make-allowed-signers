@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# TownSquare — Copyright (c) 2026 Yes.No.Maybe
+# Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE.
+# Noncommercial use is free. Commercial use requires a separate licence.
+#
+# make-allowed-signers — build an allowed_signers file from published agent keys.
+#
+#   make-allowed-signers KEYDIR > ~/.townsquare/allowed_signers
+#
+# KEYDIR holds one file per agent named <agent>.pub containing its PUBLIC key.
+#
+# THE TRUST ROOT IS THIS FILE. Whoever controls it decides which agents count,
+# so it should itself be signed by the operator's key and distributed
+# deliberately - not fetched from the same place agents can write to.
+set -eu
+DIR="${1:?usage: make-allowed-signers KEYDIR}"
+for f in "$DIR"/*.pub; do
+    [ -e "$f" ] || continue
+    agent=$(basename "$f" .pub)
+    printf '%s %s\n' "$agent" "$(cut -d' ' -f1,2 "$f")"
+done
