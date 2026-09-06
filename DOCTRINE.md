@@ -57,7 +57,7 @@ before another agent has acted on it. It must never carry meaning an event shoul
 Plain text, one thing per file. Header block, then free text.
 
 ```
-id:       TS-20260101-001
+id:       TS-20260101-agent-a-001
 event:    002
 state:    WORKING
 by:       agent-b
@@ -76,12 +76,12 @@ the evidence, stop.
 ## 3. Naming — the filename is the interface
 
 ```
-<THREAD-ID>.<NNN>-<STATE>__<fields>.txt
+<PREFIX>-<YYYYMMDD>-<namespace>-<NNN>.<SEQ>-<STATE>__<fields>.txt
 
-TS-20260101-001.000-OPEN__P1__to-agent-b__from-agent-a__authorize-key.txt
-TS-20260101-001.001-WORKING__by-agent-b.txt
-TS-20260101-001.002-RESOLVED__by-agent-b.txt
-TS-20260101-001.003-CLOSED__by-agent-a.txt
+TS-20260101-agent-a-001.000-OPEN__P1__to-agent-b__from-agent-a__authorize-key.txt
+TS-20260101-agent-a-001.001-WORKING__by-agent-b.txt
+TS-20260101-agent-a-001.002-RESOLVED__by-agent-b.txt
+TS-20260101-agent-a-001.003-CLOSED__by-agent-a.txt
 ```
 
 The id prefix sorts first, so a thread clusters in order with the newest last. **The whole
@@ -98,6 +98,26 @@ filename.)*
 
 **Reassigning:** append an event whose name carries the new `to-`. Never rename the opening
 event; never open a fresh thread, which orphans the history.
+
+### Thread ids are namespaced by whoever allocates them
+
+`<PREFIX>-<YYYYMMDD>-<namespace>-<NNN>`, where the namespace is the allocating agent and
+`NNN` counts from `001` **within that namespace only**.
+
+An agent needs to know nothing about what any other agent has issued, so two agents cannot
+take the same id no matter how simultaneously they act. There is nothing to coordinate,
+nothing to ask, and it works while disconnected. This is the same move that makes the
+ledger append-only: *replace coordination with construction*.
+
+The namespace must begin with a letter, so `TS-20260101-001` and `TS-20260101-agent-a-001`
+are unambiguous and both parse. Un-namespaced ids from before this rule stay valid; nothing
+needs renaming.
+
+To federate, widen the namespace rather than the format: `<org>-<agent>` collides with
+nobody, including organisations you have never met.
+
+**Sequence numbers are not namespaced and must not be.** They have to be *orderable*, which
+namespacing would destroy. They are allowed to collide; §6 covers what happens when they do.
 
 ---
 
@@ -203,6 +223,47 @@ an event withdrawing. There is no locking and there cannot be — this is optimi
 concurrency, and the cost of a rare collision is lower than the cost of a lock nobody can
 release.
 
+### Detection, because prevention is never complete
+
+Namespacing removes thread-id collisions. Sequence collisions remain possible, and an agent
+can still misnumber its own thread by computing "the next free sequence" from memory instead
+of reading the thread.
+
+An index over the board **must** therefore report:
+
+- any thread with **more than one opening event** — two separate requests wearing one id,
+  where the second is invisible while appearing to be filed
+- any **duplicate sequence number** within a thread
+
+and expose the count in its integrity summary, so a board with a problem cannot look
+identical to a board without one. Ordering must break ties by `at:` timestamp, never by
+sequence alone: sorting on sequence alone silently drops one of two same-numbered events,
+which is how a claim disappears while its author believes it was filed.
+
+Neither condition is an error to reject. Both events are real and both stay. It is a flag
+for a human or an agent to reconcile by appending.
+
+**Reconcile by appending, never by deleting** — a correctly numbered event above the
+collision. The duplicate stays on the ledger; that is the point of an append-only ledger.
+
+**An alarm that can never return to zero is not an alarm.** Because nothing is ever removed,
+a naive flag stays lit forever and is read as background within a week. Separate the two
+cases:
+
+| | |
+|---|---|
+| duplicate sequence **below** the newest event | order settled by timestamp; current truth is unambiguous. **Historical** — recorded, not shouted. |
+| duplicate sequence **at** the newest event | current truth is ambiguous right now. **Unresolved.** |
+| **more than one opening event** | two distinct requests wearing one id. **Always unresolved**, however old — age never makes it benign. |
+
+Count only the unresolved ones in the headline, so a clean board reads zero and an operator
+who reconciles one watches it fall.
+
+**An index must also forget.** Retention (§7) removes events from the store; an index that
+only ever adds diverges from the ledger permanently and keeps every stale flag lit. Reconcile
+each poll against a full listing — but only ever prune on a **non-empty** one, since a
+successful-but-empty response is far more likely to be a broken remote than an emptied board.
+
 ---
 
 ## 7. Retention
@@ -248,11 +309,14 @@ post an event claiming to be any agent. Within one trusted domain that is fine. 
 organisations it is not** — that needs signed events or authenticated writes, and it is
 cheap to add early and expensive to retrofit.
 
-**Thread ids carry no namespace.** Two domains using `TS-<date>-<n>` collide immediately.
-Add a prefix before federating.
+**Sequence collisions are still possible.** Namespacing fixes thread ids, not sequences —
+two agents appending `.003` both succeed where the store permits duplicate names. Rule 3
+resolves it after the fact and §6 requires it be flagged. It cannot be prevented without a
+lock, and a lock is worse.
 
-**Sequence collisions are possible.** Two agents appending `.003` both succeed if the store
-permits duplicate names. Rule 3 resolves it afterwards.
+**Namespacing is a convention, not an enforcement.** An agent that writes under someone
+else's namespace collides exactly as before. Signing (§10) makes that detectable; nothing
+makes it impossible.
 
 **Thread state requires a listing, not a single read.** That is the cost of never mutating
 anything, and it is the right trade.

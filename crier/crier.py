@@ -55,8 +55,20 @@ IN_FLIGHT = ("WORKING", "BLOCKED")
 PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
 
 # <THREAD-ID>.<NNN>-<STATE>__<fields>.txt
+#
+# THREAD IDS ARE NAMESPACED BY THE ALLOCATING AGENT:
+#     TS-20260101-agent-a-001
+# Two agents can then never collide on an id no matter how simultaneously they
+# write, because the namespace segment differs. This replaces coordination with
+# construction - the same reasoning that made the ledger append-only. It also
+# extends to federation: <org>-<agent> namespaces across organisations.
+#
+# The un-namespaced form (TS-20260101-001) is still parsed, because ledgers
+# created before this change contain it. A namespace must start with a letter,
+# so the two forms are unambiguous.
 NAME_RE = re.compile(
-    r"^(?P<thread>(?:TS|BB|SEEK|OFFER|WANT)-\d{8}-\d+)"
+    r"^(?P<thread>(?:TS|BB|SEEK|OFFER|WANT)-\d{8}"
+    r"(?:-(?P<ns>[a-z][a-z0-9-]*))?-\d{3,})"
     r"\.(?P<seq>\d+)-(?P<state>[A-Z]+)"
     r"(?P<rest>__.*)?\.txt$"
 )
@@ -79,7 +91,7 @@ def parse_name(path: str, name: str) -> dict[str, Any] | None:
         return None
     ev: dict[str, Any] = {
         "thread": m.group("thread"), "seq": int(m.group("seq")),
-        "state": m.group("state"),
+        "state": m.group("state"), "ns": m.group("ns"),
         "board": path.split("/")[0] if "/" in path else "",
         "filename": name, "path": path,
         "priority": None, "to": None, "from": None, "by": None, "slug": None,
@@ -133,6 +145,35 @@ def threads_view() -> dict[str, dict[str, Any]]:
         t["from"] = opening.get("from")
         t["subject"] = opening.get("slug")
         t["claimed_by"] = next((e.get("by") for e in reversed(evs) if e.get("by")), None)
+        # COLLISION DETECTION. Neither collision observed in practice triggered
+        # any alarm - both were found by a human noticing a subject looked wrong.
+        # Namespaced ids prevent new thread-id collisions; this surfaces the ones
+        # already on the ledger, and any duplicate sequence.
+        seqs = [e["seq"] for e in evs]
+        dup_seqs = sorted({q for q in seqs if seqs.count(q) > 1})
+        openings = sum(1 for e in evs if e["seq"] == 0)
+        t["collision"] = None
+        if openings > 1 or dup_seqs:
+            # A collision on an APPEND-ONLY ledger can never be un-made: both
+            # events are real and neither may be deleted. So a flag that simply
+            # stays on forever would decay into noise - the exact failure this
+            # detection exists to prevent.
+            #
+            # Split it by whether current truth is still ambiguous:
+            #   duplicate openings  - two distinct requests wearing one id. The
+            #                         second is invisible while looking filed.
+            #                         NEVER benign, however old.
+            #   duplicate seq @ head - the newest event is ambiguous RIGHT NOW.
+            #   duplicate seq below  - both events happened, order settled by
+            #                         timestamp, the thread has moved past it.
+            #                         Historical: worth recording, not shouting.
+            head = max(seqs)
+            t["collision"] = {
+                "duplicate_openings": openings if openings > 1 else 0,
+                "duplicate_sequences": dup_seqs,
+                "unresolved": bool(openings > 1 or head in dup_seqs),
+            }
+        t["namespace"] = opening.get("ns")
         t["signed"] = all(e.get("signed") for e in evs)
         t["verified"] = (None if any(e.get("verified") is None for e in evs)
                          else all(e.get("verified") for e in evs))
@@ -234,15 +275,33 @@ def poll() -> None:
     for ev in pending:
         ev["verified"] = verify_event(ev) if ev["signed"] else None
 
+    # The index must be able to FORGET. poll() previously only ever added, so an
+    # event archived under §7, or withdrawn as a collision artifact, stayed in
+    # the index forever and the index diverged permanently from the ledger. That
+    # also makes the collision flag below stick on after a thread is reconciled,
+    # turning the one alarm that matters into background noise.
+    #
+    # Guarded on a NON-EMPTY listing: a successful-but-empty response is far more
+    # likely to be a broken remote than a genuinely emptied board, and pruning on
+    # it would erase the whole index in one poll.
+    present = {f.get("ID") or f.get("Path") for f in files}
+    gone: list[str] = []
     with _lock:
         for ev in pending:
             _state["seen"][ev["id"]] = ev["filename"]
             _state["events"][ev["id"]] = ev
             new_ids.append(ev["id"])
-        if new_ids:
-            newest = max((_state["events"][i].get("mod_time") or "") for i in new_ids)
-            if not _state["newest_at"] or newest > _state["newest_at"]:
-                _state["newest_at"] = newest
+        if files:
+            gone = [i for i in list(_state["events"]) if i not in present]
+            for i in gone:
+                _state["events"].pop(i, None)
+                _state["seen"].pop(i, None)
+        _state["last_removed"] = len(gone)
+        if new_ids or gone:
+            if new_ids:
+                newest = max((_state["events"][i].get("mod_time") or "") for i in new_ids)
+                if not _state["newest_at"] or newest > _state["newest_at"]:
+                    _state["newest_at"] = newest
             # First run seeds silently; never announce the entire history.
             if _state["seeded"]:
                 _state["seq"] += 1
@@ -363,10 +422,19 @@ def fleet():
         "unverifiable_no_signature": sum(
             1 for e in events if not e.get("signed") and ALLOWED_SIGNERS),
     }
+    collisions = [
+        {"thread": t["thread"], **t["collision"]}
+        for t in ts.values() if t.get("collision")
+    ]
+    # COLLISIONS is the number still ambiguous, so a clean board reads zero and
+    # an operator who reconciles one sees it fall. The historical ones stay in
+    # the list and are counted separately - recorded, not shouted.
+    integrity["COLLISIONS"] = sum(1 for c in collisions if c.get("unresolved"))
+    integrity["collisions_historical"] = len(collisions) - integrity["COLLISIONS"]
     return {"watermark": seq, "last_poll_ok": poll_ok, "threads_total": len(ts),
             "by_state": by_state, "per_host": per_host, "in_flight": in_flight,
             "blocked": blocked, "awaiting_closure": awaiting_closure,
-            "integrity": integrity}
+            "collisions": collisions, "integrity": integrity}
 
 
 @app.get("/events")

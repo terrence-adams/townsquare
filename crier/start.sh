@@ -15,7 +15,10 @@ set -a
 set +a
 PORT="${TS_BIND_PORT:-8787}"
 
-if curl -s -m 5 -o /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
+# -f makes curl FAIL on 4xx/5xx. Without it, a 404 from an unrelated service
+# that happens to hold this port reads as "already serving" and we silently
+# never start. Observed on a NAS where another daemon owned the port.
+if curl -fs -m 5 -o /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) start.sh: already serving on $PORT" >> "$LOG"
     exit 0
 fi

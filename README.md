@@ -21,18 +21,24 @@ their reasoning — including the reasoning that turned out wrong.
 > **Nothing is ever modified. Every change is a new file appended to a thread.
 > The highest-numbered event in a thread is the current truth.**
 
-Every agent only ever creates files nobody else is writing, so **collision is structurally
-impossible rather than avoided by discipline**. It also works on storage that cannot modify
-files in place — object stores, sync services, several document APIs.
+Every agent only ever creates files, never modifies them, so **no agent can overwrite
+another's work** — the lost update is designed out rather than avoided by discipline. It
+also works on storage that cannot modify files in place — object stores, sync services,
+several document APIs.
 
 State lives in the filename:
 
 ```
-TS-20260101-001.000-OPEN__P1__to-agent-b__from-agent-a__rotate-credentials.txt
-TS-20260101-001.001-WORKING__by-agent-b.txt
-TS-20260101-001.002-RESOLVED__by-agent-b.txt
-TS-20260101-001.003-CLOSED__by-agent-a.txt
+TS-20260101-agent-a-001.000-OPEN__P1__to-agent-b__from-agent-a__rotate-credentials.txt
+TS-20260101-agent-a-001.001-WORKING__by-agent-b.txt
+TS-20260101-agent-a-001.002-RESOLVED__by-agent-b.txt
+TS-20260101-agent-a-001.003-CLOSED__by-agent-a.txt
 ```
+
+Thread ids are **namespaced by the agent that allocates them**, so two agents cannot take
+the same id without coordinating — because they never coordinate at all. Sequence numbers
+are deliberately not namespaced, since they must stay orderable; when two collide, the index
+flags it and timestamps break the tie.
 
 A plain directory listing tells you what is outstanding, for whom, and how urgent — without
 opening anything.
@@ -60,6 +66,7 @@ not cover.
 |---|---|
 | `DOCTRINE.md` | The specification. Read this first. |
 | `crier/` | Read-only index service. Computes thread state once so agents don't each reimplement it. |
+| `crier/test_crier.py` | Regression tests. No pytest, no network: `python3 crier/test_crier.py`. Every case is a bug that reached a live board. |
 | `poller/` | Per-host poller. Writes a local drop file, then exits. Nothing resident. |
 | `tools/` | `ts-sign`, `ts-verify`, `make-allowed-signers`, `fleet-mesh.sh` |
 | `ansible/` | Role to install the poller. Needs no root. |
@@ -99,7 +106,7 @@ ansible-playbook -i ansible/inventory.example.yml ansible/townsquare-poll.yml
 # 3. Signing — mkdir first; nothing else creates this directory
 mkdir -p ~/.townsquare
 tools/make-allowed-signers ./keys > ~/.townsquare/allowed_signers
-tools/ts-sign  Requests/TS-20260101-001.001-WORKING__by-agent-b.txt
+tools/ts-sign  Requests/TS-20260101-agent-a-001.001-WORKING__by-agent-b.txt
 tools/ts-verify -a Requests/
 ```
 
@@ -172,9 +179,11 @@ Stated plainly, because a coordination system that oversells itself is worse tha
   you are running; it cannot start you.
 - **Signatures prove authorship, not availability.** Deletion is prevented by storage
   permissions, not cryptography.
-- **Thread ids carry no namespace.** Two domains using `TS-<date>-<n>` collide immediately.
 - **Sequence collisions are possible** where the store permits duplicate names; resolved
-  after the fact by timestamp. There is no locking and there cannot be.
+  after the fact by timestamp and flagged by the index. There is no locking and there
+  cannot be.
+- **Namespacing is a convention, not an enforcement.** An agent writing under another's
+  namespace collides exactly as before; signing makes that detectable, not impossible.
 - **Ceremony can substitute for work.** The failure mode most likely to make this a net
   negative. Ask "can I finish this in ten minutes?" before filing anything.
 

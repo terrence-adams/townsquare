@@ -106,6 +106,28 @@ def main() -> int:
         lines += [f"  Could not fetch open work: {type(e).__name__}: {e}",
                   "  Treat as UNKNOWN, not as no work."]
 
+    # Board-wide id collisions. Not scoped to this host on purpose: a thread
+    # wearing one id for two requests is everyone's problem, and the agent who
+    # can see it is the one who happens to be reading.
+    try:
+        cols = [c for c in (get("/fleet").get("collisions") or [])
+                if c.get("unresolved")]
+        if cols:
+            lines += ["", f"  !! {len(cols)} THREAD(S) WITH COLLIDING IDS - "
+                          "two requests may be wearing one id:"]
+            for c in cols:
+                bits = []
+                if c.get("duplicate_openings"):
+                    bits.append(f"{c['duplicate_openings']} opening events")
+                if c.get("duplicate_sequences"):
+                    bits.append("duplicate seq "
+                                + ",".join(str(q) for q in c["duplicate_sequences"]))
+                lines.append(f"     {c['thread']}  ({'; '.join(bits)})")
+            lines.append("     Reconcile by appending, never by deleting.")
+    except Exception as e:  # noqa: BLE001
+        lines += ["", f"  Collision check unavailable: {type(e).__name__}. "
+                      "Board integrity is UNKNOWN."]
+
     write(lines)
     os.makedirs(DIR, exist_ok=True)
     with open(STATE, "w") as f:
