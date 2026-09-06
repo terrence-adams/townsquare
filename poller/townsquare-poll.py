@@ -92,9 +92,13 @@ def main() -> int:
             threads.sort(key=lambda t: (ORDER.get(t.get("priority"), 4), t["thread"]))
             for t in threads:
                 tag = "CLOSE" if t.get("action") == "close" else " WORK"
+                # Surface integrity here: this drop file is what agents read.
+                # Verification a consumer never sees buys nothing.
+                v = t.get("verified")
+                mark = "sig-ok " if v is True else ("SIG-BAD " if v is False else "unsigned")
                 lines.append(
                     f"  [{tag}] {t.get('priority') or '--'}  {t['thread']}  "
-                    f"{t.get('state', ''):<9} {t.get('subject') or ''}"
+                    f"{t.get('state', ''):<9} {mark}  {t.get('subject') or ''}"
                 )
             lines += ["", f"  Detail:  curl -s {CRIER}/thread/<id>",
                       f"  In flight elsewhere:  curl -s {CRIER}/active"]

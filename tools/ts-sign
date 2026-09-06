@@ -25,15 +25,35 @@ KEY="${2:-${TS_SIGNING_KEY:-$HOME/.ssh/id_ed25519}}"
 # leave those unprotected, so the body's header MUST match the filename - a rule
 # ts-verify enforces. Together, a rename breaks the header match and an edit
 # breaks the signature.
-base=$(basename "$FILE")
-hdr_id=$(sed -n 's/^id:[[:space:]]*//p'    "$FILE" | head -1)
-hdr_ev=$(sed -n 's/^event:[[:space:]]*//p' "$FILE" | head -1)
-hdr_st=$(sed -n 's/^state:[[:space:]]*//p' "$FILE" | head -1)
+base=$(basename "$FILE" .txt)
+hdr_id=$(sed -n 's/^id:[[:space:]]*//p'       "$FILE" | head -1)
+hdr_ev=$(sed -n 's/^event:[[:space:]]*//p'    "$FILE" | head -1)
+hdr_st=$(sed -n 's/^state:[[:space:]]*//p'    "$FILE" | head -1)
+hdr_pri=$(sed -n 's/^priority:[[:space:]]*//p' "$FILE" | head -1)
+hdr_to=$(sed -n 's/^to:[[:space:]]*//p'        "$FILE" | head -1)
+
 case "$base" in
   "$hdr_id.$hdr_ev-$hdr_st"*) : ;;
   *) echo "ts-sign: REFUSING - header ($hdr_id.$hdr_ev-$hdr_st) does not match filename ($base)" >&2
      exit 2 ;;
 esac
+
+# EVERY ROUTING FIELD THE FILENAME CARRIES MUST BE BOUND BY THE SIGNED BODY.
+# Binding only id/event/state leaves __P<n>__ and __to-<host>__ - priority and
+# assignee - forgeable by rename: a signed P3 for one host becomes a "verified"
+# P0 for another with a copy. Demonstrated 2026-09-06.
+name_pri=$(echo "$base" | tr '_' '\n' | grep -E '^P[0-3]$' | head -1)
+name_to=$(echo "$base"  | tr '_' '\n' | sed -n 's/^to-//p'  | head -1)
+if [ -n "$name_pri" ] && [ "$name_pri" != "$hdr_pri" ]; then
+    echo "ts-sign: REFUSING - filename says priority $name_pri, header says '${hdr_pri:-none}'" >&2
+    echo "  add 'priority: $name_pri' to the header, or the name is unbound." >&2
+    exit 2
+fi
+if [ -n "$name_to" ] && [ "$name_to" != "$hdr_to" ]; then
+    echo "ts-sign: REFUSING - filename says to-$name_to, header says '${hdr_to:-none}'" >&2
+    echo "  add 'to: $name_to' to the header, or the name is unbound." >&2
+    exit 2
+fi
 
 # Events are immutable, so a signature that already exists should not be
 # silently replaced - that would mask a substitution. Re-signing is a no-op.

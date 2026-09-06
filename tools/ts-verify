@@ -30,14 +30,28 @@ verify_one() {
     if [ -z "$id" ]; then
         printf '  NO-SIGNER  %s (cannot determine identity from filename)\n' "$base"; return 1
     fi
-    hdr_id=$(sed -n 's/^id:[[:space:]]*//p'    "$f" | head -1)
-    hdr_ev=$(sed -n 's/^event:[[:space:]]*//p' "$f" | head -1)
-    hdr_st=$(sed -n 's/^state:[[:space:]]*//p' "$f" | head -1)
+    hdr_id=$(sed -n 's/^id:[[:space:]]*//p'        "$f" | head -1)
+    hdr_ev=$(sed -n 's/^event:[[:space:]]*//p'     "$f" | head -1)
+    hdr_st=$(sed -n 's/^state:[[:space:]]*//p'     "$f" | head -1)
+    hdr_pri=$(sed -n 's/^priority:[[:space:]]*//p' "$f" | head -1)
+    hdr_to=$(sed -n 's/^to:[[:space:]]*//p'        "$f" | head -1)
     case "$base" in
       "$hdr_id.$hdr_ev-$hdr_st"*) : ;;
       *) printf '  HEADER-MISMATCH %s (header says %s.%s-%s)\n' "$base" "$hdr_id" "$hdr_ev" "$hdr_st"
          return 1 ;;
     esac
+    # priority and assignee must also be bound by the signed body, or a rename
+    # silently re-routes and re-prioritises a validly signed event.
+    name_pri=$(echo "$stem" | tr '_' '\n' | grep -E '^P[0-3]$' | head -1)
+    name_to=$(echo "$stem"  | tr '_' '\n' | sed -n 's/^to-//p'  | head -1)
+    if [ -n "$name_pri" ] && [ "$name_pri" != "$hdr_pri" ]; then
+        printf '  FIELD-MISMATCH  %s (name priority %s, header %s)\n' "$base" "$name_pri" "${hdr_pri:-none}"
+        return 1
+    fi
+    if [ -n "$name_to" ] && [ "$name_to" != "$hdr_to" ]; then
+        printf '  FIELD-MISMATCH  %s (name to-%s, header %s)\n' "$base" "$name_to" "${hdr_to:-none}"
+        return 1
+    fi
     if ssh-keygen -Y verify -f "$SIGNERS" -I "$id" -n "$NS" -s "$f.sig" < "$f" >/dev/null 2>&1; then
         printf '  OK         %s  (%s)\n' "$base" "$id"; return 0
     fi
@@ -50,7 +64,10 @@ if [ "${1:-}" = "-a" ]; then
     dir="${2:?usage: ts-verify -a DIRECTORY}"
     for f in "$dir"/*.txt; do
         [ -e "$f" ] || continue
-        verify_one "$f"; r=$?; [ $r -gt $rc ] && rc=$r
+        # A FORGERY OUTRANKS AN UNSIGNED FILE. rc=max() made UNSIGNED(2) mask
+        # BAD SIG(1), so CI reading "2 = merely unsigned" would pass a forgery.
+        verify_one "$f"; r=$?
+        case "$r" in 1) rc=1 ;; 2) [ "$rc" -eq 0 ] && rc=2 ;; esac
     done
 else
     verify_one "${1:?usage: ts-verify EVENT.txt | -a DIRECTORY}"; rc=$?

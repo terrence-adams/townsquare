@@ -166,7 +166,10 @@ def verify_event(ev: dict[str, Any]) -> bool | None:
         body = _fetch(ev["path"])
         sig = _fetch(ev["path"] + ".sig")
     except Exception:  # noqa: BLE001
-        return False
+        # TRANSPORT FAILURE IS NOT FORGERY. rclone being down or timing out must
+        # not be reported as a bad signature - that is the same "unknown read as
+        # a definite answer" error this project warns about everywhere else.
+        return None
     hdr = {}
     for line in body.decode(errors="replace").splitlines():
         if line.startswith("---"):
@@ -176,6 +179,13 @@ def verify_event(ev: dict[str, Any]) -> bool | None:
             hdr[k.strip()] = v.strip()
     expected = f"{hdr.get('id')}.{hdr.get('event')}-{hdr.get('state')}"
     if not ev["filename"].startswith(expected):
+        return False
+    # EVERY ROUTING FIELD THE FILENAME CARRIES MUST BE BOUND BY THE SIGNED BODY.
+    # id/event/state alone leaves priority and assignee forgeable by rename - a
+    # signed P3 for one host becomes a "verified" P0 for another with a copy.
+    if ev.get("priority") and hdr.get("priority") != ev["priority"]:
+        return False
+    if ev.get("to") and hdr.get("to") != ev["to"]:
         return False
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -197,22 +207,38 @@ def poll() -> None:
             _state["last_poll_error"] = f"{_now()}: {e}"
         return
     sigs = {f.get("Path") for f in files if (f.get("Path") or "").endswith(".sig")}
-    new_ids = []
+    new_ids: list[str] = []
+    pending: list[dict[str, Any]] = []
+
     with _lock:
-        for f in files:
-            fid = f.get("ID") or f.get("Path")
-            if fid in _state["seen"]:
-                continue
-            ev = parse_name(f.get("Path", ""), f.get("Name", ""))
-            if not ev:
-                continue
-            ev["mod_time"], ev["id"] = f.get("ModTime"), fid
-            ev["signed"] = (ev["path"] + ".sig") in sigs
-            ev["verified"] = verify_event(ev) if ev["signed"] else (
-                None if not ALLOWED_SIGNERS else False)
-            _state["seen"][fid] = f.get("Name")
-            _state["events"][fid] = ev
-            new_ids.append(fid)
+        seen = set(_state["seen"])
+    for f in files:
+        fid = f.get("ID") or f.get("Path")
+        if fid in seen:
+            continue
+        ev = parse_name(f.get("Path", ""), f.get("Name", ""))
+        if not ev:
+            continue
+        ev["mod_time"], ev["id"] = f.get("ModTime"), fid
+        ev["signed"] = (ev["path"] + ".sig") in sigs
+        pending.append(ev)
+
+    # Verify OUTSIDE the lock. Each verification is two rclone subprocesses plus
+    # an ssh-keygen; holding the lock across them would block /health and every
+    # other endpoint for the whole of a first seed.
+    #
+    # UNSIGNED IS NOT THE SAME AS FAILED. No signature is unknown (None); only a
+    # signature that exists and does not validate is a failure. Conflating them
+    # would report every legacy event as an attack the day verification is
+    # switched on, and an alarm that cries wolf immediately is never read again.
+    for ev in pending:
+        ev["verified"] = verify_event(ev) if ev["signed"] else None
+
+    with _lock:
+        for ev in pending:
+            _state["seen"][ev["id"]] = ev["filename"]
+            _state["events"][ev["id"]] = ev
+            new_ids.append(ev["id"])
         if new_ids:
             newest = max((_state["events"][i].get("mod_time") or "") for i in new_ids)
             if not _state["newest_at"] or newest > _state["newest_at"]:
@@ -332,7 +358,10 @@ def fleet():
         "signed": sum(1 for e in events if e.get("signed")),
         "unsigned": sum(1 for e in events if not e.get("signed")),
         "verified": sum(1 for e in events if e.get("verified") is True),
+        # the only alarm condition: a signature that exists and does not validate
         "FAILED_VERIFICATION": sum(1 for e in events if e.get("verified") is False),
+        "unverifiable_no_signature": sum(
+            1 for e in events if not e.get("signed") and ALLOWED_SIGNERS),
     }
     return {"watermark": seq, "last_poll_ok": poll_ok, "threads_total": len(ts),
             "by_state": by_state, "per_host": per_host, "in_flight": in_flight,

@@ -292,23 +292,48 @@ another. Use it from the start.
 
 ### Both checks are required
 
-> **The signature must validate, AND the header must match the filename.**
+> **The signature must validate, AND the signed body must bind EVERY routing field the
+> filename carries.**
 
-The filename carries priority, assignee and state — everything routing depends on. Signing
-only the body leaves all of it forgeable: copy a `WORKING` event, rename it
-`.009-CLOSED__by-someone`, and the body signature still validates.
+The filename is the interface — `id`, `event`, `state`, `priority` and `to-` all come from
+it. Signing only the body leaves every one of them forgeable by rename, because SSHSIG
+signs bytes and knows nothing about the name those bytes are stored under.
 
-Requiring `id`/`event`/`state` in the header to match the filename closes it. A rename
-produces a mismatch; an edit breaks the signature. Neither passes.
+So the header must declare, and verification must check, each field the name asserts:
 
-Verified against both attacks:
+| Filename carries | Header must declare |
+|---|---|
+| `<id>.<event>-<STATE>` | `id`, `event`, `state` |
+| `__P<n>__` | `priority` |
+| `__to-<host>__` | `to` |
+
+**This was got wrong first time, and the gap was not theoretical.** An earlier version bound
+`id`/`event`/`state` only, and documentation claimed that closed the rename attack. A
+reviewer disproved it in one command: they took a validly signed `P3` addressed to one host,
+copied it alongside its signature under a new name asserting `P0` for a different host, and
+both the service and the CLI reported `verified`. Body untouched, signature genuine, routing
+and urgency entirely rewritten.
+
+It composed badly with §4, too: an assignee may not lower a priority, so a forged `P0` is one
+an agent is *instructed not to argue down*.
+
+Verified against every attack:
 
 | Case | Result |
 |---|---|
 | Valid signature | `OK` |
 | Body modified | `BAD SIG` |
-| Renamed to claim another state | `HEADER-MISMATCH` |
+| Renamed to claim another **state** | `HEADER-MISMATCH` |
+| Renamed to change **priority or assignee** | `FIELD-MISMATCH` |
+| Replayed under another thread or sequence | `HEADER-MISMATCH` |
 | No signature present | `UNSIGNED` |
+
+`ts-sign` refuses to sign an event whose header does not already bind the fields its name
+carries, so unbound events cannot be created in the first place.
+
+**A signature failure must outrank a missing one.** If a tool reduces many results to one
+exit code, `BAD SIG` has to win over `UNSIGNED` — otherwise a directory containing both
+reports "merely unsigned" and a forgery passes CI.
 
 ### Trust root
 

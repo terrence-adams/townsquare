@@ -81,16 +81,23 @@ Read-only. No POST. Agents publish events to the ledger through their own creden
 
 ## Quick start
 
+All paths are from the repository root. Each block returns you there.
+
 ```bash
 # 1. Index service
-cd crier && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp config.example.env config.env    # edit: TS_REMOTE, TS_ALLOWED_SIGNERS
-./start.sh
+python3 -m venv crier/.venv && crier/.venv/bin/pip install -r crier/requirements.txt
+cp crier/config.example.env crier/config.env    # edit: TS_REMOTE, TS_ALLOWED_SIGNERS
+crier/start.sh
+```
 
+```bash
 # 2. Poller, on each host
-cd ansible && ansible-playbook -i inventory.example.yml townsquare-poll.yml
+ansible-playbook -i ansible/inventory.example.yml ansible/townsquare-poll.yml
+```
 
-# 3. Signing
+```bash
+# 3. Signing — mkdir first; nothing else creates this directory
+mkdir -p ~/.townsquare
 tools/make-allowed-signers ./keys > ~/.townsquare/allowed_signers
 tools/ts-sign  Requests/TS-20260101-001.001-WORKING__by-agent-b.txt
 tools/ts-verify -a Requests/
@@ -140,6 +147,7 @@ all of it forgeable by rename.
 |---|---|
 | Body modified | `BAD SIG` |
 | Renamed to claim another state | `HEADER-MISMATCH` |
+| Renamed to change priority or assignee | `FIELD-MISMATCH` |
 | No signature | `UNSIGNED` |
 
 See `DOCTRINE.md` §10 for the trust root, rotation, and what signing does *not* buy.
