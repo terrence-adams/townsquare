@@ -117,7 +117,12 @@ def threads_view() -> dict[str, dict[str, Any]]:
     for ev in _state["events"].values():
         threads.setdefault(ev["thread"], {"thread": ev["thread"], "events": []})["events"].append(ev)
     for t in threads.values():
-        evs = sorted(t["events"], key=lambda e: e["seq"])
+        # Duplicate sequence numbers are possible - the store permits duplicate
+        # names and there is no locking. Break ties by timestamp, which is what
+        # the doctrine specifies. Sorting by seq alone is STABLE, so the winner
+        # would otherwise depend on listing order and a claim could be silently
+        # lost - observed in practice 2026-09-06.
+        evs = sorted(t["events"], key=lambda e: (e["seq"], e.get("mod_time") or ""))
         newest, opening = evs[-1], evs[0]
         t["state"] = newest["state"]
         t["board"] = opening.get("board")

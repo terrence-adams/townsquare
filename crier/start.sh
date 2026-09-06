@@ -7,7 +7,12 @@
 # indicates "already serving".
 DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG="${TS_LOG:-$DIR/crier.log}"
+# set -a exports everything sourced. Without it, "." sets shell variables that
+# crier.py (which reads os.environ) never sees, and every setting is silently
+# ignored in favour of defaults.
+set -a
 [ -f "$DIR/config.env" ] && . "$DIR/config.env"
+set +a
 PORT="${TS_BIND_PORT:-8787}"
 
 if curl -s -m 5 -o /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null; then
