@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""ts-welfare - cheap TownSquare staleness check for an in-session agent.
+
+TWO TIERS, because the endpoints are not equally priced:
+
+  /watermark        87 bytes   - is anything new at all?
+  /events?since=N   40 KB      - what is new. IGNORES `since`; always the whole
+                                 board. Measured 2026-09-08: since=0, 27 and 29
+                                 all return count=55. `since` only sets the
+                                 `changed` flag.
+
+So: poll the 87-byte endpoint, and pay the 40 KB only when it says something
+moved - and then diff it HERE so the caller sees five lines, not the ledger.
+
+WHY NOT /open?host=<me>: it returns only threads addressed to this host.
+Bulletin Board posts to-all do not appear in it. Doctrine v1.4 shipped as a
+to-all bulletin; an agent watching /open all day would not have seen it.
+Measured: `curl /open?host=wolverine | grep -c Bulletin` -> 0.
+
+State is separate from townsquare-poll's; this does not touch its files.
+"""
+import json
+import os
+import sys
+import urllib.request
+from datetime import datetime, timezone
+
+CRIER = os.environ.get("TS_CRIER", "http://192.168.2.3:8787")
+HOST = os.environ.get("TS_HOST", "wolverine")
+STATE = os.path.expanduser("~/.claude/townsquare/welfare_state.json")
+TIMEOUT = 10
+
+
+def get(path):
+    with urllib.request.urlopen(CRIER + path, timeout=TIMEOUT) as r:
+        return json.loads(r.read().decode())
+
+
+def load():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"seq": None, "known": []}
+
+
+def save(seq, known):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"seq": seq, "known": sorted(known)}, f)
+    os.replace(tmp, STATE)
+
+
+def filenames(payload):
+    out = {}
+    for t in payload.get("threads", []):
+        for e in t.get("events", []):
+            fn = e.get("filename")
+            if fn:
+                out[fn] = t.get("board", "?")
+    return out
+
+
+def main():
+    stamp = datetime.now(timezone.utc).strftime("%H:%MZ")
+    st = load()
+
+    try:
+        wm = get("/watermark")
+    except Exception as e:
+        # UNREACHABLE IS NOT "NO WORK". Say UNKNOWN and mean it.
+        print("TOWNSQUARE UNKNOWN - crier unreachable at %s (%s)" % (CRIER, e))
+        print("  Do not treat this as 'nothing new'. Retry or read Drive directly.")
+        return 2
+
+    seq = wm.get("seq")
+    if st["seq"] == seq:
+        print("no change  seq=%s  checked %s" % (seq, stamp))
+        return 0
+
+    # Something moved. Pay the 40 KB once, hand back only the delta.
+    try:
+        payload = get("/events?since=%s" % (st["seq"] if st["seq"] is not None else 0))
+    except Exception as e:
+        print("seq moved %s -> %s but /events failed (%s) - DELTA UNKNOWN" % (st["seq"], seq, e))
+        return 2
+
+    seen = filenames(payload)
+    known = set(st["known"])
+    new = sorted(f for f in seen if f not in known)
+
+    if st["seq"] is None:
+        save(seq, seen.keys())
+        print("baseline seeded  seq=%s  %d events known  %s" % (seq, len(seen), stamp))
+    else:
+        print("CHANGED  seq %s -> %s  %d new event(s)  %s" % (st["seq"], seq, len(new), stamp))
+        for f in new:
+            board = seen[f]
+            mark = "  BULLETIN  " if board == "Bulletin Board" else "  %-9s " % board
+            print(mark + f)
+        save(seq, seen.keys())
+
+    try:
+        mine = get("/open?host=%s" % HOST)
+    except Exception:
+        print("  (open-work check failed; delta above still stands)")
+        return 0
+    print("open for %s: %d thread(s), %d need work, %d awaiting closure"
+          % (HOST, mine.get("count", 0), mine.get("work", 0), mine.get("awaiting_closure", 0)))
+    for t in mine.get("threads", []):
+        print("  %s  %-28s %-8s %s" % (t.get("priority"), t.get("thread"),
+                                       t.get("state"), t.get("subject")))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
