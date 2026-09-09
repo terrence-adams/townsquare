@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""ts-notify - one poll cycle of the shared notification contract. REAL ENTRY POINT.
+
+TS-20260909-wolverine-018. This is the process the fleet would actually run:
+it decides via notify_candidate and persists via notify_store, and it exits.
+Each invocation is a genuinely separate OS process with no carried state, which
+is what Logan asked for in .008/.010 - a Store reopened inside one process is
+not a restart.
+
+TRANSPORT-AGNOSTIC BY DESIGN. This runner performs NO network I/O. It reads a
+payload document and writes the result. That is not a testing convenience: it
+is what lets the same entry point be driven by a live fetch, by a recorded
+fixture, or by another host's adapter, and be verified identically in each
+case. The live HTTP adapter is a separate, thin piece and is NOT this file.
+
+  ts-notify --dir DIR --payload FILE [--agent NAME] [--ack FILENAME]...
+
+PAYLOAD, a JSON document:
+  {"watermark": "11", "sweep": "ok"|"failed", "threads": [...]}
+
+EXIT 0 always on a completed cycle, including a failed sweep - a failed sweep
+is a recorded outcome, not a crash. Non-zero only when the cycle could not run.
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import notify_candidate as nc          # noqa: E402
+from notify_store import Store         # noqa: E402
+
+
+def main(argv):
+    p = argparse.ArgumentParser(add_help=True)
+    p.add_argument("--dir", required=True)
+    p.add_argument("--payload", required=True)
+    p.add_argument("--host", default="fixture")
+    p.add_argument("--agent", default=None)
+    p.add_argument("--ack", action="append", default=[])
+    p.add_argument("--stamp", default="-")
+    a = p.parse_args(argv[1:])
+
+    try:
+        with open(a.payload) as f:
+            payload = json.load(f)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write("cannot read payload: %s\n" % exc)
+        return 2
+
+    store = Store(a.dir)
+    seen = store.load_seen()
+
+    decision = nc.consume(
+        seen, store.load_watermark(), payload.get("watermark"),
+        payload.get("sweep", nc.SWEEP_OK), payload.get("threads"),
+        a.host, agent=a.agent, prior_receipts=store.load_receipts(),
+        acknowledged=a.ack, is_cold=not seen)
+
+    store.apply(decision, header=["TOWNSQUARE - %s" % a.host], stamp=a.stamp)
+
+    # Report what happened to stdout so an invoking process can act on it
+    # without parsing the drop file.
+    print("watermark_advanced=%s" % (decision.watermark is not None))
+    print("logged=%d" % len(decision.log_appends))
+    print("receipts=%s" % sorted(decision.receipts))
+    for n in decision.notes:
+        print("note: %s" % n)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
