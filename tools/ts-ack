@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""ts-ack - a reader records its OWN consumption. The acknowledgement interface.
+
+TS-20260909-wolverine-018. Logan, .019: "A label supplied by another process
+cannot supply my acknowledgment." Correct, and that is the whole point of this
+file. --agent on ts-notify says who a notice is FOR; running ts-ack says who
+actually READ it, and only the reader can run it for itself.
+
+  ts-ack --dir DIR --agent NAME --notice FILENAME [--notice ...]
+  ts-ack --dir DIR --agent NAME --list        show what is outstanding
+
+REFUSES TO ACKNOWLEDGE WHAT WAS NEVER DELIVERED. A notice absent from the
+seen-set cannot be consumed, because consuming something the host never
+received would make the receipt a lie. That check is the reason this is a
+separate command rather than a flag.
+
+No network. Writes one per-agent receipt file and nothing else.
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from notify_store import Store          # noqa: E402
+
+
+def main(argv):
+    p = argparse.ArgumentParser()
+    p.add_argument("--dir", required=True)
+    p.add_argument("--agent", required=True)
+    p.add_argument("--notice", action="append", default=[])
+    p.add_argument("--list", action="store_true")
+    a = p.parse_args(argv[1:])
+
+    store = Store(a.dir)
+    seen = store.load_seen()
+    receipts = store.load_receipts()
+    mine = set(receipts.get(a.agent, ()))
+
+    if a.list or not a.notice:
+        outstanding = sorted(seen - mine)
+        print("agent=%s delivered=%d consumed=%d outstanding=%d"
+              % (a.agent, len(seen), len(mine), len(outstanding)))
+        for fn in outstanding[:20]:
+            print("  %s" % fn)
+        if len(outstanding) > 20:
+            print("  ... and %d more" % (len(outstanding) - 20))
+        return 0
+
+    unknown = [n for n in a.notice if n not in seen]
+    if unknown:
+        sys.stderr.write("REFUSED - not delivered to this host, so it cannot "
+                         "be consumed:\n")
+        for n in unknown:
+            sys.stderr.write("  %s\n" % n)
+        return 2
+
+    already = [n for n in a.notice if n in mine]
+    fresh = [n for n in a.notice if n not in mine]
+
+    if fresh:
+        os.makedirs(store.receipt_dir, exist_ok=True)
+        path = os.path.join(store.receipt_dir, "%s.json" % a.agent)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(sorted(mine | set(fresh)), f, indent=2)
+        os.replace(tmp, path)
+
+    print("agent=%s acknowledged=%d already_held=%d total_consumed=%d"
+          % (a.agent, len(fresh), len(already), len(mine | set(fresh))))
+    print("receipt=%s" % os.path.join(store.receipt_dir, "%s.json" % a.agent))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
