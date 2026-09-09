@@ -1,0 +1,6 @@
+{
+  "_comment": "Step 2: upstream has moved to 11 and the sweep FAILS. The watermark on disk must stay 10 and A must remain visible as unread.",
+  "watermark": "11",
+  "sweep": "failed",
+  "threads": null
+}

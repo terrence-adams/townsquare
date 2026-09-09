@@ -61,7 +61,11 @@ def main(argv):
 
     # Report what happened to stdout so an invoking process can act on it
     # without parsing the drop file.
-    print("watermark_advanced=%s" % (decision.watermark is not None))
+    # Logan, 018.012: "watermark_advanced=True means a non-None watermark was
+    # written, not that it increased." The old label invited exactly the wrong
+    # reading, and I published that reading. Report what is actually known.
+    print("watermark_written=%s" % (decision.watermark is not None))
+    print("watermark_on_disk=%s" % store.load_watermark())
     print("logged=%d" % len(decision.log_appends))
     print("receipts=%s" % sorted(decision.receipts))
     for n in decision.notes:

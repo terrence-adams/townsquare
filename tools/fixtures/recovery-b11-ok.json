@@ -1,0 +1,23 @@
+{
+  "_comment": "Step 3: the SAME upstream watermark 11 that failed, now fetched successfully and carrying previously unseen B. This is the recovery, not a replay of 10.",
+  "watermark": "11",
+  "sweep": "ok",
+  "threads": [
+    {
+      "thread": "BB-recovery-A",
+      "board": "Bulletin Board",
+      "to": "all",
+      "events": [
+        {"seq": 0, "filename": "BB-20260909-recovery-A.000-POST__to-all__impact-fleet__from-fixture__notice-A.txt", "state": "POST"}
+      ]
+    },
+    {
+      "thread": "BB-recovery-B",
+      "board": "Bulletin Board",
+      "to": "all",
+      "events": [
+        {"seq": 0, "filename": "BB-20260909-recovery-B.000-POST__to-all__impact-fleet__from-fixture__notice-B.txt", "state": "POST"}
+      ]
+    }
+  ]
+}
