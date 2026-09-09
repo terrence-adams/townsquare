@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""ts-integration - the shared contract checked against ACTUAL FILES ON DISK.
+
+TS-20260909-wolverine-018 milestone 3. ts-conformance checks the decision
+layer; Logan's .006 is right that "a returned log_appends list does not
+establish a durable file write". This drives consume() through notify_store
+against a real temp directory, and REOPENS THE STORE between polls so every
+assertion is made against what actually survived, not against in-memory state.
+
+No network, no host contact, no subprocess. Temp directories only, removed on
+exit. Exit 0 only when every check passes.
+"""
+import os
+import shutil
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Selectable target, for the same reason ts-conformance has one: a suite that
+# has only ever been run against the code it was written for has not been shown
+# to discriminate. Against notify_core these checks must FAIL.
+_TARGET = sys.argv[1] if len(sys.argv) > 1 else "candidate"
+if _TARGET == "core":
+    import notify_core as nc           # noqa: E402
+else:
+    import notify_candidate as nc      # noqa: E402
+from notify_store import Store         # noqa: E402
+
+FN = ("BB-20260909-fixture-001.000-POST__to-all__impact-fleet"
+      "__from-fixture__conformance-probe.txt")
+THREADS = [{"thread": "BB-20260909-fixture-001", "board": "Bulletin Board",
+            "to": "all", "events": [{"seq": 0, "filename": FN, "state": "POST"}]}]
+
+
+def poll(d, watermark, sweep=nc.SWEEP_OK, threads=THREADS, agent=None,
+         acknowledged=None, stamp="-"):
+    """One full cycle: reopen the store from disk, decide, write. No state
+    is carried across calls in memory - that is the point."""
+    s = Store(d)
+    kw = dict(agent=agent, is_cold=not s.load_seen())
+    try:
+        dec = nc.consume(s.load_seen(), s.load_watermark(), watermark, sweep,
+                         threads, "fixture",
+                         prior_receipts=s.load_receipts(),
+                         acknowledged=acknowledged, **kw)
+    except TypeError:
+        # notify_core has no receipt/acknowledgement concept at all. Fall back
+        # so the OTHER criteria still get exercised against it rather than the
+        # whole suite dying on one missing parameter.
+        dec = nc.consume(s.load_seen(), s.load_watermark(), watermark, sweep,
+                         threads, "fixture", **kw)
+    s.apply(dec, stamp=stamp)
+    return Store(d)
+
+
+def t_cold_history():
+    d = tempfile.mkdtemp()
+    try:
+        s = poll(d, "10", stamp="t1")
+        lines = s.log_lines()
+        if any(FN in l for l in lines):
+            return True, "BULLETINS.log on disk contains the discovery: %r" % lines
+        return False, "cold poll left no durable log on disk (%r)" % lines
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def t_failed_sweep_retries():
+    d = tempfile.mkdtemp()
+    try:
+        poll(d, "10", stamp="t1")
+        before = Store(d).load_watermark()
+        s = poll(d, "11", sweep=nc.SWEEP_FAILED, threads=None, stamp="t2")
+        after = s.load_watermark()
+        if before == after:
+            return True, ("watermark on disk unchanged at %r after a failed "
+                          "sweep, so the next poll retries it" % after)
+        return False, "watermark on disk advanced %r -> %r despite failure" % (
+            before, after)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def t_survives_restart():
+    d = tempfile.mkdtemp()
+    try:
+        poll(d, "10", agent="reader", stamp="t1")
+        poll(d, "11", agent="reader", stamp="t2")
+        s = poll(d, "12", agent="reader", stamp="t3")   # three separate opens
+        text = s.drop_text()
+        if FN in text and "BULLETINS.log" in text:
+            return True, ("after three polls and three store reopens the notice "
+                          "is still named in the drop and still points at the log")
+        return False, ("the unacknowledged notice did not survive: drop=%r"
+                       % text)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def t_no_duplicate_on_disk():
+    d = tempfile.mkdtemp()
+    try:
+        poll(d, "10", stamp="t1")
+        poll(d, "11", stamp="t2")
+        s = poll(d, "12", stamp="t3")
+        n = sum(1 for l in s.log_lines() if FN in l)
+        if n == 1:
+            return True, "exactly one durable log entry after three polls"
+        return False, "the same bulletin is on disk %d times" % n
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def t_uninvoked_reader_leaves_no_receipt():
+    """The failure this whole system exists to remove: an agent that never
+    ran must not look like one that read."""
+    d = tempfile.mkdtemp()
+    try:
+        poll(d, "10", agent="reader", stamp="t1")
+        s = poll(d, "11", agent="reader", stamp="t2")
+        rec = s.load_receipts()
+        if rec.get("reader"):
+            return False, ("a receipt exists on disk for a reader that "
+                           "acknowledged nothing: %r" % rec)
+        if FN not in s.drop_text():
+            return False, "notice vanished without ever being acknowledged"
+        return True, ("no receipt file for the non-acknowledging reader, and "
+                      "the notice is still visible to it")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def t_receipts_are_per_agent_on_disk():
+    d = tempfile.mkdtemp()
+    try:
+        poll(d, "10", agent="wolverine-claude", stamp="t1")
+        s = poll(d, "11", agent="wolverine-claude", acknowledged=[FN], stamp="t2")
+        rec = s.load_receipts()
+        if FN not in rec.get("wolverine-claude", []):
+            return False, "acknowledgement did not persist: %r" % rec
+        if rec.get("logan"):
+            return False, ("wolverine-claude's acknowledgement created a receipt "
+                           "for logan: %r" % rec)
+        s2 = poll(d, "12", agent="logan", stamp="t3")
+        if FN not in s2.drop_text():
+            return False, ("logan was silently treated as having consumed a "
+                           "notice it never acknowledged")
+        return True, ("wolverine-claude's receipt is on disk and logan is still "
+                      "shown the notice as unconsumed")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+CHECKS = [
+    ("1", "COLD HISTORY on disk", t_cold_history),
+    ("2", "FAILED SWEEP retries at unchanged watermark", t_failed_sweep_retries),
+    ("3", "PERSISTENCE across repeated polls and store restart", t_survives_restart),
+    ("4", "DUPLICATE SUPPRESSION in the durable log", t_no_duplicate_on_disk),
+    ("5", "UNINVOKED READER leaves no receipt", t_uninvoked_reader_leaves_no_receipt),
+    ("6", "PER-AGENT RECEIPTS on disk", t_receipts_are_per_agent_on_disk),
+]
+
+
+def main():
+    print("ts-integration  notify_candidate + notify_store, real files")
+    print("=" * 72)
+    failed = 0
+    for key, name, fn in CHECKS:
+        try:
+            ok, detail = fn()
+        except Exception as exc:  # noqa: BLE001
+            ok, detail = False, "error: %s: %s" % (type(exc).__name__, exc)
+        print("[%s] %s  %s" % ("PASS" if ok else "FAIL", key, name))
+        print("       %s" % detail)
+        if not ok:
+            failed += 1
+    print("=" * 72)
+    print("%d of %d integration checks failing" % (failed, len(CHECKS)))
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
