@@ -46,11 +46,20 @@ class Decision(object):
 
 
 def consume(prior_seen, prior_watermark, watermark, sweep_status, threads,
-            host, agent=None, is_cold=None, prior_receipts=None):
+            host, agent=None, is_cold=None, prior_receipts=None,
+            acknowledged=None):
     """Decide what a poll should record.
 
     prior_receipts   {agent: [filenames]} already consumed, per agent
-    agent            the identity doing the consuming, if the caller knows one
+    agent            WHO the notice is for. Knowing this is DELIVERY ONLY.
+    acknowledged     filenames this agent has EXPLICITLY acknowledged reading.
+                     Receipts derive from here and nowhere else.
+
+    L-003, found by Logan on 018.006: an earlier version minted a receipt
+    whenever an agent name and unconsumed filenames were both present. That
+    made "the poller knows who it is for" equivalent to "that agent read it",
+    which defeats the delivered/consumed split this module exists to create.
+    An identified reader that never starts must accumulate NO receipts.
     """
     d = Decision()
     prior_seen = set(prior_seen or ())
@@ -115,11 +124,17 @@ def consume(prior_seen, prior_watermark, watermark, sweep_status, threads,
                                 "until an identity is provided.")
             d.notes.append("delivered but no agent identity; consumption unprovable")
 
-    if agent and unconsumed:
-        # A receipt is recorded for THIS agent only, and only for what it was
-        # actually shown. It never speaks for a co-resident agent.
-        d.receipts = {agent: sorted(mine | set(unconsumed))}
-        d.notes.append("receipt recorded for %s over %d notice(s)"
-                       % (agent, len(unconsumed)))
+    # RECEIPTS COME ONLY FROM AN EXPLICIT ACKNOWLEDGEMENT. Being the intended
+    # recipient is delivery; reading it is consumption; nothing here may
+    # promote the first into the second. A receipt is recorded for THIS agent
+    # only and never speaks for a co-resident agent.
+    acked = set(acknowledged or ()) & set(applicable)
+    if agent and acked:
+        d.receipts = {agent: sorted(mine | acked)}
+        d.notes.append("receipt recorded for %s over %d acknowledged notice(s)"
+                       % (agent, len(acked)))
+    elif agent and unconsumed:
+        d.notes.append("%s has %d unconsumed notice(s) and acknowledged none; "
+                       "no receipt minted" % (agent, len(unconsumed)))
 
     return d

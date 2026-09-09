@@ -113,6 +113,21 @@ def check_e():
                        "recorded, let alone distinguished from delivery.")
     anon = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture")
 
+    # L-003, Logan on 018.006: an identified reader that never runs must NOT
+    # accumulate receipts. Knowing who a notice is for is DELIVERY. Anything
+    # that promotes that into consumption defeats the whole criterion, and the
+    # first candidate did exactly that.
+    if unread.receipts:
+        return False, ("a receipt was minted for a reader that acknowledged "
+                       "NOTHING (%r). Being the intended recipient is not "
+                       "reading." % unread.receipts)
+    later = nc.consume({"older.txt"}, "10", "11", nc.SWEEP_OK, THREADS,
+                       "fixture", agent="reader")
+    if not any(fn in ln for ln in later.drop_lines):
+        return False, ("after a further poll the never-acknowledged notice is "
+                       "no longer visible to its intended reader (%r)"
+                       % later.drop_lines)
+
     if unread.drop_lines == read.drop_lines:
         return False, ("output is IDENTICAL whether or not the reader has a "
                        "receipt (%r). A bulletin nobody read looks the same as "
@@ -125,10 +140,26 @@ def check_e():
 
 
 def check_f():
-    a = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture",
-                   agent="wolverine-claude")
-    b = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture",
-                   agent="logan")
+    """Two agents on one host keep separate receipts - and only on their own
+    acknowledgement. Under L-003 an agent name alone mints nothing, so this
+    check must supply an EXPLICIT acknowledgement to see a receipt at all.
+    It must also show that one agent acknowledging leaves the other unread.
+    """
+    fn = THREADS[0]["events"][0]["filename"]
+    try:
+        a = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture",
+                       agent="wolverine-claude", acknowledged=[fn])
+        b = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture",
+                       agent="logan", acknowledged=[fn])
+    except TypeError:
+        return False, ("the module has no acknowledgement parameter, so a "
+                       "receipt cannot be tied to an agent actually reading.")
+    # one agent's acknowledgement must not consume on the other's behalf
+    cross = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture",
+                       agent="logan", prior_receipts={"wolverine-claude": [fn]})
+    if cross.receipts.get("logan"):
+        return False, ("wolverine-claude's receipt marked the notice consumed "
+                       "for logan too (%r)" % cross.receipts)
     if a.receipts and b.receipts and a.receipts != b.receipts:
         return True, "distinct receipts recorded: %r vs %r" % (a.receipts, b.receipts)
     return False, ("no per-agent receipts (%r / %r). On a shared host the two "
