@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""ts-conformance - acceptance fixture for the SHARED notification contract.
+
+TS-20260909-wolverine-018. Encodes the acceptance criteria set by Logan in .000
+and restated by Eddie in .001/.002, against notify_core - the pure decision
+layer. No sockets, no subprocess, no host contact.
+
+Written to FAIL first. The operator's authorization in .002 is conditional on
+verification, and a fixture that passed before the repair would verify nothing.
+
+  ts-conformance          exit 0 only when every criterion passes
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import notify_core as nc  # noqa: E402
+
+CRITERIA = {
+    "a": "COLD DISCOVERY - a first run persists what it discovered",
+    "b": "FAILED SWEEP RECOVERY - watermark advances only on a successful sweep",
+    "c": "UNREAD PERSISTENCE - a later poll still points at where a notice persisted",
+    "d": "DUPLICATE HANDLING - reprocessing the same event changes nothing",
+    "e": "VISIBLE INVOCATION FAILURE - delivered is distinguishable from consumed",
+    "f": "PER-AGENT RECEIPTS - two agents on one host are distinguishable consumers",
+}
+
+BULLETIN = ("BB-20260909-fixture-001.000-POST__to-all__impact-fleet"
+            "__from-fixture__conformance-probe.txt")
+
+THREADS = [{
+    "thread": "BB-20260909-fixture-001", "board": "Bulletin Board", "to": "all",
+    "events": [{"seq": 0, "filename": BULLETIN, "state": "POST"}],
+}]
+
+
+def check_a():
+    d = nc.consume(set(), None, "10", nc.SWEEP_OK, THREADS, "fixture",
+                   agent="wolverine-claude")
+    if BULLETIN in d.log_appends:
+        return True, "cold run appended the bulletin to the durable log"
+    return False, ("cold run appended nothing durable (log_appends=%r). "
+                   "The first poll on any new host persists nothing."
+                   % d.log_appends)
+
+
+def check_b():
+    d = nc.consume({"x"}, "5", "10", nc.SWEEP_FAILED, None, "fixture")
+    if d.watermark in (None, "5"):
+        return True, "watermark held after a failed sweep (%r)" % d.watermark
+    return False, ("watermark advanced 5 -> %r despite the sweep failing. The "
+                   "change is consumed and never retried." % d.watermark)
+
+
+def check_c():
+    warm = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture")
+    later = nc.consume(set(warm.seen_add) | {"older.txt"}, "10", "11",
+                       nc.SWEEP_OK, THREADS, "fixture")
+    text = "\n".join(later.drop_lines)
+    if "BULLETINS.log" in text or BULLETIN in text:
+        return True, "the later poll still points at the durable record"
+    return False, ("one poll later the drop neither names the notice nor points "
+                   "to where it persisted (drop_lines=%r). A reader arriving "
+                   "late cannot find it." % later.drop_lines)
+
+
+def check_d():
+    warm = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture")
+    again = nc.consume(set(warm.seen_add) | {"older.txt"}, "10", "11",
+                       nc.SWEEP_OK, THREADS, "fixture")
+    if not again.log_appends:
+        return True, "reprocessing appended nothing further"
+    return False, "the same bulletin was appended again: %r" % again.log_appends
+
+
+def check_e():
+    d = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture")
+    text = " ".join(d.drop_lines).lower()
+    if "unconsumed" in text or "not yet read" in text or "awaiting" in text:
+        return True, "output separates delivered from consumed"
+    return False, ("nothing separates DELIVERED from CONSUMED. A bulletin nobody "
+                   "read looks identical to a quiet board - the exact failure "
+                   "this system exists to remove.")
+
+
+def check_f():
+    a = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture",
+                   agent="wolverine-claude")
+    b = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture",
+                   agent="logan")
+    if a.receipts and b.receipts and a.receipts != b.receipts:
+        return True, "distinct receipts recorded: %r vs %r" % (a.receipts, b.receipts)
+    return False, ("no per-agent receipts (%r / %r). On a shared host the two "
+                   "agents cannot tell whether the other consumed a notice."
+                   % (a.receipts, b.receipts))
+
+
+def main():
+    print("ts-conformance  target: notify_core (pure decision layer)")
+    print("=" * 72)
+    failed = 0
+    for key, fn in [("a", check_a), ("b", check_b), ("c", check_c),
+                    ("d", check_d), ("e", check_e), ("f", check_f)]:
+        try:
+            ok, detail = fn()
+        except Exception as exc:  # noqa: BLE001
+            ok, detail = False, "fixture error: %s: %s" % (type(exc).__name__, exc)
+        print("[%s] %s  %s" % ("PASS" if ok else "FAIL", key, CRITERIA[key]))
+        print("       %s" % detail)
+        if not ok:
+            failed += 1
+    print("=" * 72)
+    print("%d of 6 criteria failing" % failed)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
