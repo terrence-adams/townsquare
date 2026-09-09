@@ -8,10 +8,12 @@ This module is the candidate that should pass ts-conformance. Both are kept so
 the fixture can be run against each and the difference shown, rather than
 asking anyone to take a repair on trust.
 
-UNVERIFIED. The pre-execution guard on this host refuses to execute the
-fixture, so neither module has been run. Under TS-20260909-wolverine-018.002
-the operator's authorization is conditional on raw passing results, so this is
-a CANDIDATE and nothing is applied anywhere.
+STATUS. Both fixtures have been run, by wolverine and independently reproduced
+by Eddie Brock at revision b2e4cb3. The earlier note here saying the guard
+refused execution was true when written and is now STALE - it was Logan's
+control defect L-002 and was removed. Under TS-20260909-wolverine-018.002 the
+operator's authorization is still conditional on verification of the INTEGRATED
+path, so this remains a CANDIDATE and nothing is applied to any host.
 
 THE FIVE REPAIRS
   D1 cold run now appends to the durable log. Seeding the seen-set is a
@@ -31,6 +33,13 @@ THE FIVE REPAIRS
 
 SWEEP_OK = "ok"
 SWEEP_FAILED = "failed"
+
+
+def mine_of(prior_receipts, agent):
+    """What THIS agent has acknowledged. Never another agent's receipts."""
+    if not agent:
+        return set()
+    return set((prior_receipts or {}).get(agent, ()))
 
 
 class Decision(object):
@@ -66,20 +75,42 @@ def consume(prior_seen, prior_watermark, watermark, sweep_status, threads,
     prior_receipts = dict(prior_receipts or {})
     if is_cold is None:
         is_cold = not prior_seen
+    mine = mine_of(prior_receipts, agent)
 
     # D2: a failed sweep consumes nothing. The watermark is the record of what
     # has been SUCCESSFULLY examined, not of what the crier last reported.
     if sweep_status == SWEEP_FAILED:
         d.watermark = None
-        d.drop_lines.append("  Bulletin sweep FAILED. Fleet-wide notices are "
-                            "UNKNOWN, not absent. Watermark held at %r so the "
-                            "next poll retries without waiting for the board "
-                            "to move." % prior_watermark)
-        d.notes.append("sweep failed; watermark deliberately not advanced")
+        d.drop_lines.append("  Bulletin sweep FAILED. FRESH notices are UNKNOWN, "
+                            "not absent. Watermark held at %r so the next poll "
+                            "retries without waiting for the board to move."
+                            % prior_watermark)
+        # E-002, found by Eddie on 018.009: drop_lines REPLACES the drop file,
+        # so returning only the failure message erased every previously known
+        # unread notice from the reader's view. A failed sweep must not consume
+        # work that was already discovered - losing sight of known unread items
+        # is the exact failure this system exists to remove, and a transport
+        # error is no excuse for it.
+        known_unread = sorted(set(prior_seen) - mine_of(prior_receipts, agent))
+        if known_unread:
+            d.drop_lines.append("  ** %d PREVIOUSLY DISCOVERED, STILL NOT "
+                                "CONSUMED%s (freshness unknown this poll):"
+                                % (len(known_unread),
+                                   " by %s" % agent if agent else ""))
+            for fn in known_unread:
+                d.drop_lines.append("     %s" % fn)
+            d.drop_lines.append("     Durable record: BULLETINS.log (never truncated)")
+        d.notes.append("sweep failed; watermark not advanced; %d known-unread "
+                       "notice(s) preserved" % len(known_unread))
         return d
 
     d.watermark = watermark
 
+    # E-001, found by Eddie on 018.009: a filename repeated twice WITHIN one
+    # sweep produced two identical log entries and two seen_add values.
+    # Across-poll idempotence never covered within-sweep repetition, and the
+    # duplicate reached disk. Deduplicated here rather than assuming an
+    # upstream uniqueness contract nobody has stated.
     applicable = []
     for t in threads or []:
         if t.get("board") != "Bulletin Board":
@@ -88,11 +119,11 @@ def consume(prior_seen, prior_watermark, watermark, sweep_status, threads,
             continue
         for e in t.get("events", []):
             fn = e.get("filename")
-            if fn:
+            if fn and fn not in applicable:
                 applicable.append(fn)
 
-    fresh = [fn for fn in applicable if fn not in prior_seen]
-    d.seen_add = sorted(fresh)
+    fresh = sorted({fn for fn in applicable if fn not in prior_seen})
+    d.seen_add = fresh
 
     # D1: whatever was discovered is written durably, cold run included.
     d.log_appends = sorted(fresh)
@@ -102,9 +133,9 @@ def consume(prior_seen, prior_watermark, watermark, sweep_status, threads,
                             % len(fresh))
 
     # D4/D5: delivery is knowing the filename. Consumption is THIS agent having
-    # a receipt for it. Anything without one stays visible on every poll.
-    mine = set(prior_receipts.get(agent, ())) if agent else set()
-    unconsumed = sorted(set(applicable) - mine)
+    # a receipt for it. Anything without one stays visible on every poll -
+    # including items discovered on an EARLIER poll, not just this sweep's.
+    unconsumed = sorted((set(applicable) | prior_seen) - mine)
 
     if unconsumed:
         d.drop_lines.append("  ** %d BULLETIN(S) DELIVERED AND NOT YET CONSUMED"

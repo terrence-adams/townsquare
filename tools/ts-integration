@@ -152,6 +152,47 @@ def t_receipts_are_per_agent_on_disk():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def t_within_sweep_duplicate():
+    """E-001, Eddie on 018.009: the same filename twice in ONE sweep.
+
+    Across-poll idempotence never covered this, and Eddie showed the duplicate
+    reached disk as two log entries.
+    """
+    d = tempfile.mkdtemp()
+    try:
+        doubled = [{"thread": "BB-20260909-fixture-001",
+                    "board": "Bulletin Board", "to": "all",
+                    "events": [{"seq": 0, "filename": FN, "state": "POST"},
+                               {"seq": 0, "filename": FN, "state": "POST"}]}]
+        s = poll(d, "10", threads=doubled, stamp="t1")
+        n = sum(1 for l in s.log_lines() if FN in l)
+        if n == 1:
+            return True, "one durable entry despite the filename appearing twice"
+        return False, "a within-sweep duplicate persisted %d log entries" % n
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def t_failed_sweep_keeps_known_unread():
+    """E-002, Eddie on 018.009: drop_lines REPLACES the drop file, so a failed
+    sweep returning only its error message erased every known unread notice
+    from the reader's view. A transport error must not lose discovered work.
+    """
+    d = tempfile.mkdtemp()
+    try:
+        poll(d, "10", agent="reader", stamp="t1")
+        s = poll(d, "11", sweep=nc.SWEEP_FAILED, threads=None,
+                 agent="reader", stamp="t2")
+        text = s.drop_text()
+        if FN in text and "BULLETINS.log" in text:
+            return True, ("after a failed sweep the drop still names the known "
+                          "unread notice and points at the durable log")
+        return False, ("a failed sweep erased the known unread notice from the "
+                       "drop: %r" % text)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 CHECKS = [
     ("1", "COLD HISTORY on disk", t_cold_history),
     ("2", "FAILED SWEEP retries at unchanged watermark", t_failed_sweep_retries),
@@ -159,11 +200,17 @@ CHECKS = [
     ("4", "DUPLICATE SUPPRESSION in the durable log", t_no_duplicate_on_disk),
     ("5", "UNINVOKED READER leaves no receipt", t_uninvoked_reader_leaves_no_receipt),
     ("6", "PER-AGENT RECEIPTS on disk", t_receipts_are_per_agent_on_disk),
+    ("7", "WITHIN-SWEEP DUPLICATE suppressed (E-001)", t_within_sweep_duplicate),
+    ("8", "FAILED SWEEP keeps known unread visible (E-002)",
+     t_failed_sweep_keeps_known_unread),
 ]
 
 
 def main():
-    print("ts-integration  notify_candidate + notify_store, real files")
+    # Logan, 018.008: the core run still printed the candidate's name. A
+    # banner that misreports its target makes every result below it unsafe
+    # to quote.
+    print("ts-integration  target: %s + notify_store, real files" % nc.__name__)
     print("=" * 72)
     failed = 0
     for key, name, fn in CHECKS:
