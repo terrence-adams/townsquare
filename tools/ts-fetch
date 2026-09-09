@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""ts-fetch - the live transport adapter. The ONLY piece that touches the network.
+
+TS-20260909-wolverine-018. ts-notify decides and persists and performs no I/O
+of its own; this fetches one payload from the Crier and writes it to a file in
+exactly the shape ts-notify reads. Keeping the network in one small, separately
+runnable file is what lets the entry point be verified identically whether it
+is driven live, from a recorded fixture, or by another host's adapter.
+
+  ts-fetch --crier URL --since N --out FILE
+
+A FAILED FETCH IS A RESULT, NOT A CRASH. It writes {"sweep": "failed"} with the
+watermark it was told to expect, so the reader records the failure, holds its
+watermark and retries - which is the recovery path proven in 018.013. Exiting
+non-zero and writing nothing would let the caller mistake a transport error for
+a quiet board, the exact conflation this whole Request exists to remove.
+"""
+import argparse
+import json
+import sys
+import urllib.error
+import urllib.request
+
+
+def get(crier, path, timeout):
+    with urllib.request.urlopen(crier + path, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def main(argv):
+    p = argparse.ArgumentParser()
+    p.add_argument("--crier", default="http://192.168.2.3:8787")
+    p.add_argument("--since", default="0")
+    p.add_argument("--out", required=True)
+    p.add_argument("--timeout", type=int, default=10)
+    a = p.parse_args(argv[1:])
+
+    payload = {"watermark": None, "sweep": "ok", "threads": []}
+
+    try:
+        wm = get(a.crier, "/watermark", a.timeout)
+        payload["watermark"] = str(wm.get("seq", ""))
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        # Cannot even establish the watermark: report UNKNOWN, not empty.
+        payload["sweep"] = "failed"
+        payload["error"] = "%s: %s" % (type(exc).__name__, exc)
+        with open(a.out, "w") as f:
+            json.dump(payload, f, indent=2)
+        print("sweep=failed stage=watermark %s" % payload["error"])
+        return 0
+
+    try:
+        ev = get(a.crier, "/events?since=%s" % a.since, a.timeout)
+        payload["threads"] = ev.get("threads", [])
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        payload["sweep"] = "failed"
+        payload["threads"] = None
+        payload["error"] = "%s: %s" % (type(exc).__name__, exc)
+        with open(a.out, "w") as f:
+            json.dump(payload, f, indent=2)
+        print("sweep=failed stage=events watermark=%s %s"
+              % (payload["watermark"], payload["error"]))
+        return 0
+
+    with open(a.out, "w") as f:
+        json.dump(payload, f, indent=2)
+    print("sweep=ok watermark=%s threads=%d"
+          % (payload["watermark"], len(payload["threads"])))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
