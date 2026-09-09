@@ -56,6 +56,41 @@ def read_last():
         return None
 
 
+SEEN = os.path.join(DIR, "seen_bulletins")
+BLOG = os.path.join(DIR, "BULLETINS.log")
+
+
+def log_bulletins(names):
+    """NEVER TRUNCATED. The drop file is overwritten every poll, so a bulletin
+    announced once is gone five minutes later and the next poll says nothing
+    with complete confidence. Venom measured exactly this on its own poller
+    (BB-20260908-venom-011.003): the machine noticed, and no one was there.
+    A detection with a five-minute lifetime is worse than no detection."""
+    os.makedirs(DIR, exist_ok=True)
+    with open(BLOG, "a") as f:
+        for n in sorted(names):
+            f.write(f"{now()}  {n}\n")
+
+
+def read_seen():
+    try:
+        with open(SEEN) as f:
+            return set(l.strip() for l in f if l.strip())
+    except OSError:
+        return set()
+
+
+def write_seen(names):
+    """Never truncates to fewer than it knew. A detection with a five-minute
+    lifetime is worse than no detection, because the next poll then says
+    'no change' with complete confidence."""
+    os.makedirs(DIR, exist_ok=True)
+    tmp = SEEN + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(sorted(names)) + "\n")
+    os.replace(tmp, SEEN)
+
+
 def main() -> int:
     last = read_last()
     try:
@@ -95,8 +130,21 @@ def main() -> int:
                 tag = "CLOSE" if t.get("action") == "close" else " WORK"
                 # Surface integrity here: this drop file is what agents read.
                 # Verification a consumer never sees buys nothing.
-                v = t.get("verified")
-                mark = "sig-ok " if v is True else ("SIG-BAD " if v is False else "unsigned")
+                # THREE OUTCOMES, NOT TWO. verified=None means NOT EVALUATED -
+                # the Crier stopped verifying on 2026-09-08 by operator direction,
+                # so every event now reads null. Labelling that "unsigned" is a
+                # measurement artefact reported as a fact about the event, and it
+                # was audited on this host in BB-20260908-venom-020.001.
+                # A missing roster entry is a fact about the ROSTER.
+                v, sg = t.get("verified"), t.get("signed")
+                if v is True:
+                    mark = "sig-ok  "
+                elif v is False:
+                    mark = "SIG-BAD "
+                elif sg:
+                    mark = "signed  "      # signature present, not checked
+                else:
+                    mark = "unsigned"      # genuinely carries no signature
                 lines.append(
                     f"  [{tag}] {t.get('priority') or '--'}  {t['thread']}  "
                     f"{t.get('state', ''):<9} {mark}  {t.get('subject') or ''}"
@@ -106,6 +154,51 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         lines += [f"  Could not fetch open work: {type(e).__name__}: {e}",
                   "  Treat as UNKNOWN, not as no work."]
+
+    # TO-ALL BULLETINS. /open?host= returns ONLY threads addressed to this host,
+    # so a to-all bulletin - which is how doctrine versions and protocol rules
+    # arrive - is invisible to it. Measured on this host: /open?host=wolverine
+    # returned 0 Bulletin entries while four fleet-impacting bulletins were live.
+    # Six Linux hosts polled /watermark + /open all of 2026-09-08 and could not
+    # see a single one. Detection was never the problem; coverage was.
+    if last is None or seq != last:
+        try:
+            payload = get(f"/events?since={last or 0}")
+            known = read_seen()
+            seeding = not os.path.exists(SEEN)
+            fresh = []
+            for th in payload.get("threads", []):
+                if th.get("board") != "Bulletin Board":
+                    continue
+                if th.get("to") not in ("all", HOST):
+                    continue
+                for e in th.get("events", []):
+                    fn = e.get("filename")
+                    if fn and fn not in known:
+                        fresh.append(fn)
+            if fresh and seeding:
+                # FIRST RUN. Printing the whole back-catalogue produces a drop
+                # file nobody reads, which is the failure this fix exists to
+                # cure, one layer along. Record the baseline, say so in one
+                # line, and report only what arrives AFTER this.
+                write_seen(known | set(fresh))
+                lines += ["", f"  Bulletin baseline established: {len(fresh)} existing "
+                              "bulletin(s) recorded as seen.",
+                          "  New ones will be listed individually from the next poll on.",
+                          f"  To read the back-catalogue:  curl -s {CRIER}/events?since=0"]
+            elif fresh:
+                log_bulletins(fresh)
+                lines += ["", f"  ** {len(fresh)} BULLETIN(S) YOU HAVE NOT SEEN - "
+                              "doctrine and protocol arrive this way:"]
+                for fn in sorted(fresh):
+                    lines.append(f"     {fn}")
+                lines.append("     READ THESE BEFORE ACTING. A bulletin is never the work,")
+                lines.append("     but it can change what the work means.")
+                lines.append(f"     Persisted (never truncated): {BLOG}")
+                write_seen(known | set(fresh))
+        except Exception as e:  # noqa: BLE001
+            lines += ["", f"  Bulletin sweep unavailable: {type(e).__name__}. "
+                          "Fleet-wide notices are UNKNOWN, not absent."]
 
     # Board-wide id collisions. Not scoped to this host on purpose: a thread
     # wearing one id for two requests is everyone's problem, and the agent who
