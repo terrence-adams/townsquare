@@ -84,13 +84,44 @@ def check_d():
 
 
 def check_e():
-    d = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture")
-    text = " ".join(d.drop_lines).lower()
-    if "unconsumed" in text or "not yet read" in text or "awaiting" in text:
-        return True, "output separates delivered from consumed"
-    return False, ("nothing separates DELIVERED from CONSUMED. A bulletin nobody "
-                   "read looks identical to a quiet board - the exact failure "
-                   "this system exists to remove.")
+    """Delivered must be distinguishable from consumed - tested BEHAVIOURALLY.
+
+    An earlier version of this check searched the drop text for three specific
+    words. That tests wording, not the property, and it failed the candidate
+    for saying "not yet consumed" instead of "unconsumed". Rewritten after
+    seeing it fail - which needs saying out loud, because changing a test to
+    make your own code pass is exactly how a fixture stops meaning anything.
+    It still discriminates: the baseline ignores receipts entirely, so its two
+    outputs are identical and it fails.
+
+    LIMIT, stated rather than papered over: a pure decision layer cannot
+    OBSERVE an invocation. The closest true property is that a notice with no
+    receipt stays visible and is reported differently from one with a receipt,
+    and that a missing agent identity is called out rather than silently
+    treated as consumption.
+    """
+    fn = THREADS[0]["events"][0]["filename"]
+    unread = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS,
+                        "fixture", agent="reader")
+    try:
+        read = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS,
+                          "fixture", agent="reader",
+                          prior_receipts={"reader": [fn]})
+    except TypeError:
+        return False, ("the module has NO CONCEPT of a receipt - consume() will "
+                       "not accept prior_receipts - so consumption cannot be "
+                       "recorded, let alone distinguished from delivery.")
+    anon = nc.consume({"older.txt"}, "9", "10", nc.SWEEP_OK, THREADS, "fixture")
+
+    if unread.drop_lines == read.drop_lines:
+        return False, ("output is IDENTICAL whether or not the reader has a "
+                       "receipt (%r). A bulletin nobody read looks the same as "
+                       "one that was read." % unread.drop_lines)
+    if not any("agent" in ln.lower() for ln in anon.drop_lines):
+        return False, ("with no agent identity the output does not say so, so "
+                       "an uninvoked reader is silently treated as a consumer.")
+    return True, ("unread and read produce different output, and a missing "
+                  "agent identity is called out explicitly")
 
 
 def check_f():
