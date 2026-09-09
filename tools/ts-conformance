@@ -14,7 +14,17 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import notify_core as nc  # noqa: E402
+
+# Target is selectable so the SAME criteria can be run against the current
+# behaviour and against the proposed repair, and the difference shown. Nobody
+# should have to take a repair on trust.
+#   ts-conformance            -> notify_core       (expected: 5 failing)
+#   ts-conformance candidate  -> notify_candidate  (expected: 0 failing)
+_TARGET = sys.argv[1] if len(sys.argv) > 1 else "core"
+if _TARGET == "candidate":
+    import notify_candidate as nc  # noqa: E402
+else:
+    import notify_core as nc  # noqa: E402
 
 CRITERIA = {
     "a": "COLD DISCOVERY - a first run persists what it discovered",
@@ -96,7 +106,7 @@ def check_f():
 
 
 def main():
-    print("ts-conformance  target: notify_core (pure decision layer)")
+    print("ts-conformance  target: %s" % nc.__name__)
     print("=" * 72)
     failed = 0
     for key, fn in [("a", check_a), ("b", check_b), ("c", check_c),
