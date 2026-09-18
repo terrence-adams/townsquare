@@ -21,6 +21,11 @@ KEY="${2:-${TS_SIGNING_KEY:-$HOME/.ssh/id_ed25519}}"
 [ -f "$FILE" ] || { echo "ts-sign: no such file: $FILE" >&2; exit 1; }
 [ -f "$KEY" ]  || { echo "ts-sign: no signing key: $KEY" >&2; exit 1; }
 
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+python3 "$ROOT/registrar/app/filename.py" --check "$FILE" >/dev/null || {
+    echo "ts-sign: REFUSING - filename/header binding failed (parser v1)" >&2; exit 2;
+}
+
 # The filename carries priority, assignee and state. Signing only the body would
 # leave those unprotected, so the body's header MUST match the filename - a rule
 # ts-verify enforces. Together, a rename breaks the header match and an edit
@@ -65,3 +70,4 @@ fi
 ssh-keygen -Y sign -f "$KEY" -n "$NS" "$FILE" </dev/null >/dev/null 2>&1
 [ -f "$FILE.sig" ] || { echo "ts-sign: signing failed" >&2; exit 1; }
 echo "signed: $FILE.sig  ($(ssh-keygen -lf "$KEY.pub" 2>/dev/null | awk '{print $2}'))"
+echo "parser-schema: 1"

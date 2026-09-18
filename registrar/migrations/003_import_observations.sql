@@ -1,0 +1,2 @@
+CREATE TABLE import_observations(import_run_id TEXT NOT NULL REFERENCES import_runs(run_id) ON DELETE RESTRICT,drive_file_id TEXT NOT NULL,post_uid TEXT REFERENCES posts(post_uid) ON DELETE RESTRICT,metadata_hash TEXT NOT NULL CHECK(length(metadata_hash)=64),result TEXT NOT NULL CHECK(result IN ('imported','warning','unchanged','metadata-mismatch','artifact','orphan-artifact','conflict')),warnings_json TEXT NOT NULL,PRIMARY KEY(import_run_id,drive_file_id));
+CREATE INDEX idx_import_observation_result ON import_observations(import_run_id,result);

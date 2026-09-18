@@ -73,6 +73,13 @@ check("namespace is extracted",
       v.get("TS-20260101-agent-a-001", {}).get("namespace") == "agent-a")
 check("legacy id has no namespace", v.get("TS-20260101-001", {}).get("namespace") is None)
 
+print("\nregistrar pid and break-glass fields")
+pid = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+parsed = crier.parse_name(R + f"TS-20260101-agent-a-001.001-WORKING__by-agent-a__pid-{pid}.txt",
+                          f"TS-20260101-agent-a-001.001-WORKING__by-agent-a__pid-{pid}.txt")
+check("pid is typed, not a slug", parsed["pid"] == pid and parsed["slug"] is None)
+check("duplicate typed fields are rejected", crier.parse_name(R + "x", f"TS-20260101-agent-a-001.001-WORKING__by-a__by-b__pid-{pid}.txt") is None)
+
 # Two agents both appended .002. Sorting on sequence alone silently dropped one,
 # so a reviewer's claim showed as unclaimed. Ties must break on timestamp.
 print("\nduplicate sequence at the head of a thread")

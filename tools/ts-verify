@@ -17,9 +17,13 @@ set -u
 NS="${TS_SIG_NAMESPACE:-townsquare}"
 SIGNERS="${TS_ALLOWED_SIGNERS:-$HOME/.townsquare/allowed_signers}"
 rc=0
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 verify_one() {
     f="$1"; base=$(basename "$f"); stem=$(basename "$f" .txt)
+    if ! python3 "$ROOT/registrar/app/filename.py" --check "$f" >/dev/null 2>&1; then
+        printf '  FIELD-MISMATCH  %s (parser schema v1)\n' "$base"; return 1
+    fi
     # identity is the agent named in the by- / from- field of the filename
     # strip .txt first, or the trailing field carries the extension into the id
     id=$(echo "$stem" | tr '_' '\n' | sed -n 's/^by-//p'   | head -1)

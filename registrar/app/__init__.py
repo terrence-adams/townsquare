@@ -1,0 +1,1 @@
+"""Town Registrar application package."""

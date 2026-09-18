@@ -23,9 +23,13 @@ import re
 import subprocess
 import threading
 import time
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from registrar.app.filename import FilenameError, check_header, parse_filename
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
@@ -86,30 +90,20 @@ def _now() -> str:
 
 def parse_name(path: str, name: str) -> dict[str, Any] | None:
     """The filename IS the interface: routing, priority and state live here."""
-    m = NAME_RE.match(name)
-    if not m:
+    try:
+        parsed = parse_filename(name, path)
+    except FilenameError:
         return None
     ev: dict[str, Any] = {
-        "thread": m.group("thread"), "seq": int(m.group("seq")),
-        "state": m.group("state"), "ns": m.group("ns"),
+        "thread": parsed["thread"], "seq": parsed["seq"],
+        "state": parsed["state"], "ns": parsed["namespace"],
         "board": path.split("/")[0] if "/" in path else "",
         "filename": name, "path": path,
         "priority": None, "to": None, "from": None, "by": None, "slug": None,
     }
-    for f in (f for f in (m.group("rest") or "").split("__") if f):
-        if re.fullmatch(r"P[0-3]", f):
-            ev["priority"] = f
-        elif f.startswith("to-"):
-            ev["to"] = f[3:]
-        elif f.startswith("from-"):
-            ev["from"] = f[5:]
-        elif f.startswith("by-"):
-            ev["by"] = f[3:]
-        elif f.startswith(("impact-", "cap-", "cat-", "host-")):
-            k, v = f.split("-", 1)
-            ev[k] = v
-        else:
-            ev["slug"] = f
+    for key in ("priority","to","from","by","for","impact","cap","cat","mode","pid","slug"):
+        if parsed.get(key) is not None:
+            ev[key] = parsed[key]
     return ev
 
 
@@ -178,7 +172,7 @@ def threads_view() -> dict[str, dict[str, Any]]:
         t["verified"] = (None if any(e.get("verified") is None for e in evs)
                          else all(e.get("verified") for e in evs))
         t["events"] = [{k: e.get(k) for k in
-                        ("seq", "state", "filename", "by", "priority", "to",
+                        ("seq", "state", "filename", "pid", "mode", "by", "priority", "to",
                          "signed", "verified")} for e in evs]
     return threads
 
@@ -218,15 +212,9 @@ def verify_event(ev: dict[str, Any]) -> bool | None:
         if ":" in line:
             k, v = line.split(":", 1)
             hdr[k.strip()] = v.strip()
-    expected = f"{hdr.get('id')}.{hdr.get('event')}-{hdr.get('state')}"
-    if not ev["filename"].startswith(expected):
-        return False
-    # EVERY ROUTING FIELD THE FILENAME CARRIES MUST BE BOUND BY THE SIGNED BODY.
-    # id/event/state alone leaves priority and assignee forgeable by rename - a
-    # signed P3 for one host becomes a "verified" P0 for another with a copy.
-    if ev.get("priority") and hdr.get("priority") != ev["priority"]:
-        return False
-    if ev.get("to") and hdr.get("to") != ev["to"]:
+    try:
+        check_header(parse_filename(ev["filename"]), hdr)
+    except FilenameError:
         return False
     import tempfile
     with tempfile.TemporaryDirectory() as td:

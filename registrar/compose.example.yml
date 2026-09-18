@@ -1,0 +1,55 @@
+name: townsquare-registrar
+services:
+  registrar:
+    # LOCAL PROTOTYPE ONLY. Replace with the verified digest before any later rollout.
+    image: town-registrar:local
+    build: {context: ., dockerfile: Dockerfile}
+    restart: unless-stopped
+    init: true
+    user: "${REGISTRAR_UID:?set NAS account UID}:${REGISTRAR_GID:?set NAS account GID}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      REGISTRAR_ENV: prototype
+      REGISTRAR_DB: /var/lib/town-registrar/registrar.db
+      # No automatic Drive verification or import in this prototype.
+      REGISTRAR_EXPERIMENTAL_VERIFICATION: "0"
+      REGISTRAR_TOKEN_PEPPER_FILE: /run/secrets/token_pepper
+      REGISTRAR_CURSOR_KEY_FILE: /run/secrets/cursor_signing_key
+      # Set to the exact TLS proxy peer, never a LAN range.
+      REGISTRAR_TRUSTED_PROXY: tls-proxy
+    secrets: [token_pepper, cursor_signing_key]
+    volumes:
+      # Must be NAS-local durable storage: never SMB/NFS/Drive/rclone.
+      - type: bind
+        source: ${REGISTRAR_DATA_DIR:?set a NAS-local REGISTRAR_DATA_DIR}
+        target: /var/lib/town-registrar
+      - type: bind
+        source: ${REGISTRAR_BACKUP_DIR:?set a NAS-local REGISTRAR_BACKUP_DIR}
+        target: /var/backups/town-registrar
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    ports:
+      # Prototype HTTP is loopback-only. LAN clients must use an authenticated SSH tunnel.
+      - "127.0.0.1:8790:8790"
+    networks: [registrar-internal]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/health/ready', timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 30s
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "5"}
+networks:
+  registrar-internal: {internal: true}
+secrets:
+  token_pepper:
+    file: ${REGISTRAR_TOKEN_PEPPER_FILE:?set REGISTRAR_TOKEN_PEPPER_FILE}
+  cursor_signing_key:
+    file: ${REGISTRAR_CURSOR_KEY_FILE:?set REGISTRAR_CURSOR_KEY_FILE}
