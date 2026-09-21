@@ -375,12 +375,10 @@ signed bytes, which D30 (`BB-20260911-forge-001.028`) puts out of scope for any 
    them. *Alternative — adopt as-is: costs nothing today, and guarantees the next reviewer
    re-raises the topic, which is the behaviour D30 exists to stop.*
 
-**4. Does rule 1 supersede D33, and how far?** Interpretation note C scopes rule 1 to enabled
-Registrar-compliant writes and leaves D33 (`BB-20260911-forge-001.033`) in force for everything
-else. **Recommendation: adopt note C as written.** Scoping his own ruling is the operator's call,
-not the crew's, and rule 1 as drafted forbids the algorithm D33 requires. *If instead he reads
-D33 as his durable preference for agent-side allocation, rule 1 cannot stand and the amendment's
-premise needs rework before anything else proceeds.*
+**4. Does rule 1 supersede D33, and how far? — CONFIRMED by the operator, 2026-09-21.** Interpretation
+note C scopes rule 1 to enabled Registrar-compliant writes and leaves D33 (`BB-20260911-forge-001.033`)
+in force for everything else. The operator confirmed this scoping matches his intent for D33; no
+rework of the amendment's premise is needed. Note C above stands as written.
 
 ## Handoff if adopted
 
