@@ -7,11 +7,11 @@
 [server]
 headless = true
 port = 8502
-# The viewer is reached from other LAN hosts by name (NASOneMic.local), not
-# only from the origin Streamlit expects, so CORS/XSRF defaults would reject
-# it. This is a read-only dashboard on a trusted LAN with no write path.
-enableCORS = false
-enableXsrfProtection = false
+# enableCORS and enableXsrfProtection are left at their secure defaults on
+# purpose. Direct LAN access by hostname does not need them relaxed — that is
+# a reverse-proxy workaround, and there is no proxy in front of this. If a
+# proxy is ever added and the websocket fails to connect, those two are the
+# knobs, and turning them off should be a decision with a reason attached.
 
 [browser]
 gatherUsageStats = false
