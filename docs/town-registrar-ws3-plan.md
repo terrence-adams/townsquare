@@ -2,6 +2,8 @@
 
 **Author:** ip-man · **Date:** 2026-09-22 · **Branch:** `internal` · **Status:** proposal, pending jigoro-kano review before any Implement line
 
+**Path note (2026-09-22):** all row-level JSON artifacts (`inventory.json`, every `report*.json`, the raw `lsjson-*.json` collector passes, the flag-count-delta and adjudication-decision-sheet files) were moved from `C:\Workspace\townsquare-registrar-dryrun\` directly into `C:\Workspace\townsquare-registrar-dryrun\reference\` to declutter the working directory. Every path to one of these files quoted earlier in this document (before this note) is now stale by that one path segment — read `reference\<same filename>` instead. Synthetic test fixtures (`wsb2-fixtures\`) and the collector scripts (`collector\`) were left in place, unmoved.
+
 ## Problem
 
 WS2 proved the corpus can be classified deterministically. WS3 turns that classification into rows in `townsquare-registrar-registrar-1`'s live SQLite database — the first irreversible write in this project, into a schema with no delete API and `ON DELETE RESTRICT` on every ledger-derived table. Everything below is aimed at one question: **what has to be true before that promotion, and what is enterprise habit we can drop.**
