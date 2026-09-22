@@ -300,6 +300,13 @@ The adjudication queue fell from 236 to 16 (93% reduction) because most of the o
 
 **Invocation budget:** 7 total for phase A (jigoro-kano, CP-A1, jackie-chan implement, gsp, ronda, jackie-chan follow-up, this CP-A2) — 5 discretionary as planned, the 6th reviewer-triggered (the ceiling working as designed), the 7th being this mandated checkpoint. Helio confirmed the session's call not to dispatch an 8th invocation for a ronda re-check was correct, on the grounds that nothing depends on the B=16-vs-12 number until phase B, where ronda is already invoked.
 
+### Operator decisions, CP-A2 queue — both confirmed 2026-09-22
+
+1. **Rewrite-and-trash candidate (`BB-20260908-forge-001.000`): hold for now, revisit at phase B.** No immediate investigation. Already excluded from import either way under the "record, don't register" trashed-object policy — this defers the doctrine question, not the import handling.
+2. **8 misfiled documents: excluded from import as ordinary documents.** Routed the same as the other `non_post_artifacts` — never posts, never imported. Bucket C shrinks from 28 to **20** (13 trashed + 1 native Doc + 5 OFFER grammar-B + 1 genuine WANT nonconforming file). Decision 1b's actual scope (1 object) is unaffected.
+
+**Corrected bucket C, reflecting decision 2:** 20, not 28. Never-posts grows from 93 to **101** (93 + 8). Total unchanged: 1,258 + 16 + 20 + 101 = 1,395.
+
 ---
 
 ## Key paths
