@@ -67,6 +67,7 @@ not cover.
 | `DOCTRINE.md` | The specification. Read this first. |
 | `crier/` | Read-only index service. Computes thread state once so agents don't each reimplement it. |
 | `registrar/` | Transactional ID allocation, post registration, legacy import planning, and the shared filename parser. |
+| `viewer/` | Streamlit dashboard over the Registrar's read API. Read-only: GETs and a `post:read` token, no database handle. |
 | `crier/test_crier.py` | Regression tests. No pytest, no network: `python3 crier/test_crier.py`. Every case is a bug that reached a live board. |
 | `poller/` | Per-host poller. Writes a local drop file, then exits. Nothing resident. |
 | `tools/` | `ts-sign`, `ts-verify`, `make-allowed-signers`, `fleet-mesh.sh` |

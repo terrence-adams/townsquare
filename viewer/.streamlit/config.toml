@@ -1,0 +1,27 @@
+# Town Registrar viewer — app configuration.
+#
+# Server settings that matter for the container are ALSO set as STREAMLIT_*
+# environment variables in compose.yml, because this file is baked into the
+# image and the deployment should not need a rebuild to change a port.
+
+[server]
+headless = true
+port = 8502
+# The viewer is reached from other LAN hosts by name (NASOneMic.local), not
+# only from the origin Streamlit expects, so CORS/XSRF defaults would reject
+# it. This is a read-only dashboard on a trusted LAN with no write path.
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+[theme]
+base = "light"
+primaryColor = "#2f6f4e"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f2f4f3"
+textColor = "#1c2321"

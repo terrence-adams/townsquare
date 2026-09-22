@@ -1,0 +1,68 @@
+name: townsquare-viewer
+services:
+  viewer:
+    # LOCAL PROTOTYPE ONLY. Replace with the verified digest before any later rollout.
+    image: townsquare-viewer:local
+    build: {context: ., dockerfile: Dockerfile}
+    restart: unless-stopped
+    init: true
+    # No bind mounts and no writable volume, so the image's own non-root user
+    # is enough here — unlike the Registrar, nothing needs a host UID match.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      # Compose service name on the shared network. Never 127.0.0.1: the
+      # Registrar publishes on the NAS loopback only, which is the host's
+      # loopback, not this container's.
+      REGISTRAR_BASE_URL: http://registrar:8790
+      REGISTRAR_API_TOKEN_FILE: /run/secrets/viewer_api_token
+      STREAMLIT_SERVER_PORT: "8502"
+      STREAMLIT_SERVER_ADDRESS: 0.0.0.0
+      STREAMLIT_SERVER_HEADLESS: "true"
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    secrets: [viewer_api_token]
+    # Streamlit's only writable need: $HOME/.streamlit plus scratch space.
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    ports:
+      # LAN-reachable on purpose. This is a read-only dashboard with a
+      # post:read credential and no write path, so it does not inherit the
+      # Registrar's loopback-only rule. 8502 because townwatch holds 8501.
+      - "0.0.0.0:8502:8502"
+    networks:
+      # Two networks, deliberately. `registrar-internal` is declared
+      # `internal: true`, which means Docker installs isolation rules that can
+      # break a published port depending on the daemon's userland-proxy
+      # setting. `viewer-edge` is an ordinary bridge and carries the highest
+      # priority, so the container joins it first and the published port DNATs
+      # to an endpoint that is definitely reachable from the LAN.
+      viewer-edge: {priority: 100}
+      registrar-internal: {priority: 10}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8502/_stcore/health', timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 15s
+    pids_limit: 256
+    # Streamlit plus pandas holding ~1,100 post rows. Higher than the
+    # Registrar's 512m because a DataFrame server is not a SQLite reader.
+    mem_limit: 768m
+    cpus: 1.0
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "5"}
+networks:
+  # Created by the Registrar's own Compose project; this project only joins it.
+  # Confirm the real name with `docker network ls` before first start.
+  registrar-internal:
+    external: true
+    name: ${REGISTRAR_NETWORK:-townsquare-registrar_registrar-internal}
+  viewer-edge:
+    driver: bridge
+secrets:
+  # Compose bind-mounts this file as-is, preserving host ownership and mode, so
+  # it must be readable by UID 10002 inside the container (root:10002 0640).
+  viewer_api_token:
+    file: ${VIEWER_TOKEN_FILE:?set VIEWER_TOKEN_FILE to the read-only token path}
