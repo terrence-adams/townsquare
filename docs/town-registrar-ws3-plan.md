@@ -516,6 +516,18 @@ Two small non-blocking items tracked, not gating phase B's close: (1) the duplic
 
 **Next:** francis-ngannou verifies this result independently from artifacts (post-hoc, no consent problem — verifying is not acting), per the agreed pattern from the phase C authorization discussion.
 
+### Independent post-hoc verification (francis-ngannou) — reconciles
+
+Every number re-queried directly against the live DB and NAS filesystem, not copied from this doc — all matched exactly: 1,070 posts, 197 artifacts, 313 roots, 0 conflicts, 0 null `drive_created_at`, board distribution identical, 1,062 assignments, 2 promoted import runs, exactly 3 tokens with no scope creep, 2 orphan artifacts. Went further than a totals check: pulled `import_observations` per run and reconciled at row level — canary run: 15 imported + 8 warning = 23 posts, 3 artifact + 2 orphan-artifact = 5 artifacts; full run: 1,047 imported + 192 artifact + 28 unchanged (the entire canary, correctly detected as already-present). Arithmetic closes exactly both ways.
+
+Backup and archive integrity independently re-verified, not trusted: re-hashed the pre-cutover backup (matched), opened it separately and ran `integrity_check`/`foreign_key_check` (clean), confirmed `app.previous`'s `SOURCE_COMMIT` matches the actual pre-redeploy image, confirmed `data.pre-fresh-init-20260922` is intact at the expected size. Confirmed no Drive credential exists anywhere under `town-registrar/` on the NAS or mounted into the container, and a full container-log grep for Drive/googleapis/rclone activity returned nothing — Drive was never written to, structurally and by log evidence both. Confirmed `main`/`external` branches untouched.
+
+**One real gap found, now closed:** the pre-cutover backup had no accompanying manifest file, against `OPERATIONS.md`'s own documented requirement. Not a data-integrity problem — the backup itself verified clean on independent inspection — but a real documentation gap on the backup that mattered most. Written retroactively from francis-ngannou's own confirmed values (hash, integrity check, schema version, row count) immediately after the finding.
+
+**Follow-ups filed, neither blocking:** the port-8790 host-publish gap, filed to bishop as `TS-20260922-venom-001` (same NAS Docker/iptables pattern already root-caused once for the Crier outage). Optional cleanup of the pre-cutover drill backup files, left untouched, low priority.
+
+**WS3 is complete. The Town Registrar migration project is done: doctrine rebased and its decisions ratified, a full dry-run against the real corpus, every non-conforming row classified and ruled on, and the real TownSquare history — 1,070 posts, 197 signature artifacts — is now live in the database, independently verified by two parties, with Drive untouched throughout.**
+
 ---
 
 ## Key paths
