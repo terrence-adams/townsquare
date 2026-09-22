@@ -263,6 +263,16 @@ WS1+WS2 ran 8 invocations, ~$32-48-equivalent. WS3 is bigger; saying so plainly:
 
 **Filed separately, per instruction, not part of this verdict:** the cheapest unblock for `TS-20260921-venom-001`'s version-number question is for Sensei — as the adoption authority — to set the number himself (or reserve a non-colliding one) at the moment of adoption, rather than leaving it open on two currently-offline hosts.
 
+## CP-A1 (helio-gracie) and operator decisions — 2026-09-22
+
+Helio cleared CP-A1: **build may start**, phase A confirmed to touch no live state. He re-verified all six of ip-man's findings and jigoro-kano's spot-checked claims against source directly (not by trusting the reports) — conclusions all held, but three findings had loose stated evidence that jackie-chan must not build on: the "8 collisions are directories" conclusion is right but the stated proof method doesn't match (real mechanism: `--drive-trashed-only` lists intermediate folders to recurse, not "trash state changed mid-run"); the "172 adjudication rows collapse" figure conflates an instance count with a row count — the real reducible number is unique posts whose *only* flag is silent absorption, not yet computed; and `legacy.py:526`'s `'legacy'` board value is a default for a field nothing populates, not a "hardcode" — same conclusion, different fix site (the five row-construction call sites, not just line 526). Full detail and six additional refinements (A1-A7) are in Helio's block; jackie-chan's implement dispatch carries them.
+
+Two decisions Helio surfaced for the operator, **both confirmed 2026-09-22, both per recommendation**:
+- **Doctrine rollout prerequisites 6 and 8** reworded to match home-LAN scope rather than adopted as enterprise-pattern text the system doesn't implement — applied directly to `docs/town-registrar-doctrine-amendment-draft.md`.
+- **Trashed-object disposition**: **record, don't register** — confirms jigoro-kano's recommendation. Excluded from `posts`/`artifacts`, full Drive metadata preserved in the hashed manifest so the evidence survives Drive's ~30-day trash purge, nothing imported that can't be cleanly unwound later.
+
+(Report/inventory storage location — Helio's queue item 3 — was already resolved earlier: `/home/batman/town-registrar/dry-run-reports/` on the NAS, `drwx------`/`600`.)
+
 ---
 
 ## Key paths

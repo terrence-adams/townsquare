@@ -252,13 +252,26 @@ the new grammar:
    and functioning without Registrar.
 5. A read-only legacy import is run in staging, its exceptions are reconciled against Drive
    and Crier baselines, and an unchanged second run is a no-op.
-6. Backup and restore are proven on a fresh volume; production TLS and credential isolation
-   are verified.
+6. Backup and restore are proven on a fresh volume; the deployment's actual transport and
+   credential isolation are verified for the scope it runs at. **Reworded 2026-09-22, operator
+   ruling:** this fleet runs Registrar as a home-LAN tool with no customer-facing deployment,
+   reached only over an authenticated SSH tunnel to a NAS-loopback-bound port — the tunnel is
+   the encrypted transport, not a TLS proxy in front of it. A TLS reverse proxy is not required
+   at this scope; the rail that matters and stays required is that the port never binds a LAN
+   or WAN interface. *(Original text required "production TLS…verified"; see design §12 and
+   AC 28 for the same scope call already reflected in the runtime's own `REGISTRAR_ENV=production`
+   guard.)*
 7. A single namespace canary completes reserve, Drive publish, finalize, and independent
-   verification before wider enablement.
+   verification before wider enablement. (Distinct from a legacy-import canary, which validates
+   the import path only and does not satisfy this prerequisite — the two are separate
+   controls with separate scopes.)
 8. Production deployment, import promotion, and enabling writers each use their own
-   operator-approved action with exact image digest, manifest or backup artifact, and
-   command. No rollout step modifies the Agent Registry.
+   operator-approved action with an exact reference to the deployed artifact — a registry
+   image digest where one exists, or the local image ID and recorded source commit for a
+   locally built image (`--pull=false`, per `OPERATIONS.md`) — plus its manifest or backup
+   artifact and exact command. **Reworded 2026-09-22, operator ruling:** at this fleet's scale
+   there is no image registry to pin a digest to; the local image ID plus source commit is the
+   equivalent evidence. No rollout step modifies the Agent Registry.
 
 Backout stops new allocations, preserves the Registrar database and audit history, leaves
 Drive objects unchanged, disables optional enrichment, and permits only the declared P0/P1
