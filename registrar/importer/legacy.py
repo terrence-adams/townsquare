@@ -146,7 +146,7 @@ iteration order is insertion order (language-guaranteed, not hash-order), and
 order recursively; the one thing that guarantee does NOT cover is array
 (list) element order, which is why every list here is explicitly ordered.
 """
-import argparse, json, uuid
+import argparse, json, re, uuid
 from collections import Counter, defaultdict
 from registrar.app.filename import FilenameError, parse_filename
 
@@ -259,11 +259,44 @@ def _board_of(obj):
     history. This helper is the actual fix; the five call sites below (plus
     the posts pipeline itself) populate `item["board"]` with it so the old
     fallback becomes the genuine last-resort it was designed to be, not the
-    only code path that ever ran."""
+    only code path that ever ran.
+
+    gsp's NEW-1 (post-review, 2026-09-22): the raw first path segment
+    ('Bulletin Board', with a space and capitals) does NOT pass the same
+    VALID/`norm()` shape (`^[a-z][a-z0-9-]{0,62}$`) every native post's
+    board is normalized through in `Registrar.reserve_root`/`reserve_post`.
+    Not a security hole (import never calls `authorize()`, so a non-
+    norm-shaped board simply can never match an ACL or a board filter --
+    fails closed) but "cheap now and impossible later" on 1,070+ immutable
+    rows. `_slugify_board` is the fix; applied here so every one of this
+    function's callers gets a norm-shaped value for free, and `stage_import`
+    additionally asserts the invariant at the DB write boundary (see
+    service.py) so it holds on every path, not just this one."""
     path = obj.get("parent_folder_path")
     if not path:
         return None
-    return path.split("/", 1)[0]
+    return _slugify_board(path.split("/", 1)[0])
+
+
+_BOARD_SLUG_INVALID = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify_board(value):
+    """Normalize a raw board folder name into the norm()-shaped value
+    posts.board must always hold: lowercase, whitespace/punctuation runs
+    collapsed to a single '-', leading/trailing '-' stripped, capped at 63
+    chars (VALID: ^[a-z][a-z0-9-]{0,62}$). 'Bulletin Board' -> 'bulletin-
+    board', 'Requests' -> 'requests'. Returns None (never a value that would
+    fail VALID) if nothing usable survives -- e.g. an all-punctuation name,
+    or one that still can't start with a letter -- so callers fall through
+    to the same loud 'legacy' fallback _board_of's other None case already
+    uses, rather than ever writing a non-norm-shaped value."""
+    if not value:
+        return None
+    slug = _BOARD_SLUG_INVALID.sub("-", value.strip().lower()).strip("-")[:63]
+    if not slug or not slug[0].isalpha():
+        return None
+    return slug
 
 
 def _extension(name):

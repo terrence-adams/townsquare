@@ -143,6 +143,16 @@ class Registrar:
             if item["drive_file_id"] in seen_drive or item["post_uid"] in seen_uid: raise Invalid("duplicate import identity")
             seen_drive.add(item["drive_file_id"]); seen_uid.add(item["post_uid"]); valid_uids.add(item["post_uid"])
             if item.get("content_sha256") and not re.fullmatch(r"[0-9a-f]{64}",item["content_sha256"]): raise Invalid("invalid import content hash")
+            # gsp's NEW-1 (WS3 post-review, 2026-09-22): posts.board must
+            # always be norm-shaped (the same VALID regex every native
+            # post's board is normalized through), on every write path --
+            # not just legacy.py's planner output, which is only ONE
+            # producer of a stage_import manifest. Fails closed today
+            # (import never calls authorize(), so a non-norm-shaped board
+            # could never match an ACL/filter anyway) but a bad value here
+            # would be permanent on an immutable row; catch it at the
+            # boundary instead of trusting the caller.
+            if "board" in item and item["board"] is not None and not VALID.fullmatch(item["board"]): raise Invalid("import post board is not normalized")
         for artifact in manifest.get("artifacts",[]):
             if not {"drive_file_id","filename","kind","parent_post_uid","warnings"}.issubset(artifact) or artifact["kind"]!="signature": raise Invalid("invalid artifact manifest")
             if artifact["drive_file_id"] in seen_drive: raise Invalid("duplicate Drive identity")

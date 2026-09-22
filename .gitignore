@@ -5,3 +5,12 @@ state.json
 __pycache__/
 allowed_signers
 keys/
+
+# WS3 disclosure boundary (gsp's NEW-3, 2026-09-22): row-level corpus
+# output must stay outside this repo BY LOCATION (C:\Workspace\townsquare-
+# registrar-dryrun\, never C:\Repo\townsquare\) -- these patterns are
+# defense in depth in case one ever lands here by accident, not the
+# primary control.
+report*.json
+inventory.json
+lsjson-*.json

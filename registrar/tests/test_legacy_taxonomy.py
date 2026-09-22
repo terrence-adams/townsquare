@@ -427,7 +427,7 @@ class WS3TrashedNativeDocBoardTests(unittest.TestCase):
         self.assertEqual(1, report["counts"]["trashed_board_objects"])
         obj = report["trashed_board_objects"][0]
         self.assertEqual("post", obj["kind"])
-        self.assertEqual("Requests", obj["board"])
+        self.assertEqual("requests", obj["board"])
         self.assertFalse(obj["native_doc"])
         # full Drive metadata, not just a count (Drive purges trash; this
         # row may be the only surviving record)
@@ -515,7 +515,7 @@ class WS3TrashedNativeDocBoardTests(unittest.TestCase):
         report = plan(_inventory(rows))
         self.assertEqual(1, report["counts"]["native_doc_objects"])
         self.assertEqual(0, report["counts"]["quarantined_invalid_name"])
-        self.assertEqual("Bulletin Board", report["native_doc_objects"][0]["board"])
+        self.assertEqual("bulletin-board", report["native_doc_objects"][0]["board"])
 
     def test_genuine_docx_upload_with_real_size_and_checksum_is_not_misclassified(self):
         """Guard against a false positive: an ordinary uploaded Word file
@@ -557,8 +557,36 @@ class WS3TrashedNativeDocBoardTests(unittest.TestCase):
         rows = [_row("b1", "TS-20260910-cable-034.000-OPEN__by-cable.txt", "Requests")]
         report = plan(_inventory(rows))
         self.assertEqual(1, len(report["posts"]))
-        self.assertEqual("Requests", report["posts"][0]["board"])
+        self.assertEqual("requests", report["posts"][0]["board"])
         self.assertEqual(0, report["counts"]["board_fallback_fired"])
+
+    def test_board_is_slugified_to_norm_shape_not_raw_folder_name(self):
+        """gsp's NEW-1 (post-review, 2026-09-22): the raw folder name
+        ('Bulletin Board') has a space and capitals and does not pass the
+        VALID/norm() shape every native post's board is normalized through.
+        A real multi-word board folder must come out lowercase-hyphenated,
+        matching VALID exactly."""
+        import re as _re
+        VALID = _re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+        rows = [_row("bslug1", "BB-20260929-sample-091.000-POST__by-sample.txt", "Bulletin Board")]
+        report = plan(_inventory(rows))
+        board = report["posts"][0]["board"]
+        self.assertEqual("bulletin-board", board)
+        self.assertTrue(VALID.fullmatch(board), f"{board!r} does not match posts.board's norm() shape")
+
+    def test_trashed_object_with_multiword_board_folder_is_also_slugified(self):
+        """The specific regression gsp asked for: a TRASHED object whose
+        board folder needs normalization must come out normalized in
+        trashed_board_objects too, not just in posts -- the invariant holds
+        on every reported bucket, not only the ones that reach the DB."""
+        import re as _re
+        VALID = _re.compile(r"^[a-z][a-z0-9-]{0,62}$")
+        rows = [_row("bslug2", "BB-20260929-sample-092.000-POST__by-sample.txt", "Bulletin Board", trashed=True)]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, report["counts"]["trashed_board_objects"])
+        board = report["trashed_board_objects"][0]["board"]
+        self.assertEqual("bulletin-board", board)
+        self.assertTrue(VALID.fullmatch(board), f"{board!r} does not match posts.board's norm() shape")
 
     def test_board_fallback_fires_loudly_only_for_folder_unknown_fixtures(self):
         """Pre-collector-schema bare-list fixtures (no parent_folder_path key
@@ -580,8 +608,8 @@ class WS3TrashedNativeDocBoardTests(unittest.TestCase):
         ]
         report = plan(_inventory(rows))
         self.assertIsNone(report["non_post_artifacts"][0]["board"])  # board root -> no board
-        self.assertEqual("Wanted", report["legacy_nonconforming"][0]["board"])
-        self.assertEqual("Seeking", report["grammar_b_offer_host_field"][0]["board"])
+        self.assertEqual("wanted", report["legacy_nonconforming"][0]["board"])
+        self.assertEqual("seeking", report["grammar_b_offer_host_field"][0]["board"])
 
 
 if __name__ == "__main__":

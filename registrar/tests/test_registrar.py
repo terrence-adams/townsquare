@@ -254,6 +254,16 @@ class RegistrarTests(unittest.TestCase):
         root=self.root()
         self.assertIsNone(self.db.execute("SELECT drive_created_at FROM posts WHERE post_uid=?",(root["post_uid"],)).fetchone()[0])
 
+    def test_stage_import_rejects_non_normalized_board(self):
+        """gsp's NEW-1: the norm-shaped-board invariant is asserted at the
+        stage_import boundary itself, not just trusted from legacy.py's
+        planner output -- so a manifest from ANY producer with a raw,
+        non-slugified board ('Bulletin Board') is rejected before it can
+        ever reach an immutable row."""
+        manifest=plan([{"name":"TS-20260917-legacy-025.001-WORKING__by-legacy.txt","drive_file_id":"bad-board"}])
+        manifest["posts"][0]["board"]="Bulletin Board"
+        with self.assertRaises(ValueError): self.r.stage_import("i",manifest)
+
     def test_trashed_rows_never_reach_the_database_end_to_end(self):
         """WS3 item 2, end-to-end: a mixed active+trashed inventory only
         stages/promotes the active posts. Trashed rows are structurally

@@ -33,7 +33,7 @@ def authenticate_identity(db,credential,scope):
 
 def main():
     """Offline bootstrap; run only from the protected Registrar container console."""
-    import argparse
+    import argparse,sys
     from .db import connect,migrate
     ap=argparse.ArgumentParser(); ap.add_argument("--db",required=True); ap.add_argument("--principal",required=True)
     ap.add_argument("--namespace",action="append",default=[]); ap.add_argument("--board",action="append",default=[])
@@ -51,5 +51,13 @@ def main():
     db=connect(args.db); migrate(db)
     for kind,values in (("namespace",args.namespace),("board",args.board)):
         for value in values: db.execute("INSERT OR IGNORE INTO acls VALUES (?,?,?,NULL,NULL)",(args.principal,kind,value.lower()))
-    print(create_token(db,args.principal,args.scope))
+    token=create_token(db,args.principal,args.scope)
+    # gsp's NEW-2 (WS3 post-review, 2026-09-22): the class of bug item 7
+    # just fixed (a token silently minted with MORE scope than requested)
+    # was invisible at mint time -- only the credential itself ever printed.
+    # One line to stderr (never stdout, so it can't be captured/piped as if
+    # it were the credential) makes exactly what was granted observable,
+    # not just what the caller asked for.
+    print(f"minted token principal={args.principal!r} scopes={sorted(set(args.scope))} namespaces={sorted(set(args.namespace))} boards={sorted(set(v.lower() for v in args.board))}",file=sys.stderr)
+    print(token)
 if __name__=="__main__": main()
