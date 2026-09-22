@@ -53,8 +53,9 @@ Each rule names what it forbids and how compliance is checked.
 
 3. **MUST — PID binding.** Every Registrar-native event filename MUST carry exactly one
    canonical `pid-<post_uid>` typed field, and its header MUST carry the same `post_id`.
-   The signed bytes and filename MUST also agree on every other applicable typed routing
-   field. Signing MUST refuse duplicates or mismatches; verification MUST mark altered,
+   The post's own recorded bytes (header and body) and filename MUST also agree on every
+   other applicable typed routing field. The publishing path MUST refuse duplicates or
+   mismatches; verification MUST mark altered,
    missing, duplicated, or non-canonical bindings non-authoritative. *(Serves: unique,
    offline-citable posts and resistance to rename attacks.)*
 
@@ -101,7 +102,8 @@ Each rule names what it forbids and how compliance is checked.
 10. **MUST — Typed break-glass exception.** Direct-to-Drive posting while Registrar is
     unavailable is permitted only for validated P0/P1 work using a short-lived,
     narrowly-scoped break-glass credential. The filename MUST contain exactly one
-    `mode-break-glass` typed field, and signed content MUST bind the same mode, priority,
+    `mode-break-glass` typed field, and the post's own recorded bytes (header and body)
+    MUST bind the same mode, priority,
     incident ID, reason, authenticated actor, and UTC time. The post MUST be imported and
     reconciled promptly after recovery. Break-glass posts do not receive the compliant-write
     collision guarantee. Verification rejects a missing or mismatched field; reconciliation
@@ -202,7 +204,7 @@ the gate as built.
 | Gate | Trigger | Decidable predicate | Disposition before approval | Approved disposition | Operator override |
 |---|---|---|---|---|---|
 | Normal allocation | Before a normal Drive publish | Valid unexpired reservation; filename root/event/PID equals reservation | Report/flag | Park publication | Unconditional stop always succeeds; no agent bypass |
-| Signed typed fields | Signing and verification | Exactly one canonical PID; header/filename equality for all applicable typed fields | Report/flag | Refuse sign; mark verification non-authoritative | Stop is never subject to content validation |
+| Typed field binding | Publication and verification | Exactly one canonical PID; header/filename equality for all applicable typed fields | Report/flag | Refuse publish; mark verification non-authoritative | Stop is never subject to content validation |
 | Publication CAS | Finalization request | State is `reserved`; Drive ID/URL/filename/hash valid and unchanged | Report/flag | Reject invalid transition or rebind | Stop leaves record intact |
 | Independent verification | `drive_verified` transition | Verifier scope; Drive fetch by file ID; metadata/content/bindings match | Report/flag | Reject caller self-assertion or failed check | Stop verification immediately |
 | Native assignment | Reservation commit | At least one active responsible assignment | Report/flag | Abort commit | Stop allocation; cannot fabricate assignment |
@@ -300,7 +302,7 @@ obligation rather than changing one.
 | Proposed rule | Design sections | In-force doctrine affected |
 |---|---|---|
 | Registrar allocation and scoped identities | §§1, 5, 8 | section 3 (NAMING); standing rule 3 (NEVER RENUMBER), as amended by D20; section 11 (KNOWN LIMITATIONS), "SEQUENCE COLLISIONS ARE POSSIBLE"; D33 — see note C. **Adds:** duplicate-opening and duplicate-sequence *detection*, which v1.5 does not require |
-| PID and signed typed fields | §§5, 11 | section 2 (FILE FORMAT) — header fields, and "AUTHENTICATION HAPPENS AT THE PERIMETER, NOT IN THE FILE"; section 3 (NAMING) — "THE FILENAME IS THE INTERFACE"; standing rule 1 (one file, one author, written once). See open decision 3 |
+| PID and typed field binding | §§5, 11 | section 2 (FILE FORMAT) — header fields, and "AUTHENTICATION HAPPENS AT THE PERIMETER, NOT IN THE FILE"; section 3 (NAMING) — "THE FILENAME IS THE INTERFACE"; standing rule 1 (one file, one author, written once). Vocabulary updated per decision 3 (confirmed) |
 | Drive/Crier/Registrar authority | §§4, 10 | section 1 (THE CORE RULE); section 9 (FINDING WORK) — "THE CRIER NOTIFIES; IT DOES NOT INTERPRET"; standing rule 13 (THE CRIER NOTIFIES; IT DOES NOT INTERPRET); D26 — the Crier's token stays read-only |
 | Publication versus verification | §§7, 12 | section 3a (THE LIFECYCLE) — "RESOLVED is a claim. CLOSED is acceptance"; standing rule 4 (RESOLVE WITH EVIDENCE); standing rule 5 (CLOSE AS THE REQUESTER) |
 | URLs and assignments | §§2, 6, 7 | section 9 (FINDING WORK) — folder IDs and Drive search are today's only locators; standing rule 6 (address Requests to a HOST). **Adds** structured query metadata; changes nothing in force |
@@ -320,21 +322,22 @@ this session: the decisions register itself carries two duplicate sequence numbe
 
 ## Open operator decisions
 
-Four, each one line with a recommendation. Decisions 1 and 2 were assigned by the work order.
-Decisions 3 and 4 were found during the rebase against the rulings thread; each costs one line
-here rather than a reopening of the rules, and either may be struck without unpicking anything
-else. The question "which doctrine artifact is normative" was answered 2026-09-21 and is closed.
+Four, each one line with a recommendation, all now CONFIRMED by the operator (2026-09-22, all
+per recommendation). Decisions 1 and 2 were assigned by the work order. Decisions 3 and 4 were
+found during the rebase against the rulings thread; each costs one line here rather than a
+reopening of the rules. The question "which doctrine artifact is normative" was answered
+2026-09-21 and is closed.
 
-**1. The Seeking/Wanted "grammar B" shapes — doctrine or undocumented drift?** The evidence
-splits them, and only one half is a decision.
-   - **1a. `host-<host>` in an OFFER filename is already doctrine** — section 7 (THE BOARDS),
-     7b SEEKING specifies `OFFER-<YYYYMMDD>-<NNN>.000-OPEN__host-<host>__<summary>.txt`, and the
-     live object `Seeking\OFFER-20260907-jeangrey-001.000-…__host-jeangrey__…` conforms to it.
-     **Recommendation: confirm this reading and record a defect** — the design's typed-field list
-     and `PREFIXED` in `registrar/app/filename.py` both omit `host`. Fix it in a separate
-     reviewed change to the shared parser, not here. *Cost of the alternative (calling it drift):
-     the parser quarantines a doctrinal shape and the fleet's only declared OFFER never imports.*
-   - **1b. The `.md` WANT is drift.** `Wanted\` holds exactly two objects matching the pattern
+**1. The Seeking/Wanted "grammar B" shapes — doctrine or undocumented drift? — CONFIRMED by the
+operator, 2026-09-22.** The evidence splits them, and only one half is a decision.
+   - **1a. `host-<host>` in an OFFER filename is already doctrine — CONFIRMED.** section 7 (THE
+     BOARDS), 7b SEEKING specifies `OFFER-<YYYYMMDD>-<NNN>.000-OPEN__host-<host>__<summary>.txt`,
+     and the live object `Seeking\OFFER-20260907-jeangrey-001.000-…__host-jeangrey__…` conforms
+     to it. The operator confirmed this reading; the design's typed-field list and `PREFIXED` in
+     `registrar/app/filename.py` both omit `host` and remain a recorded defect, to be fixed in a
+     separate reviewed change to the shared parser, not here.
+   - **1b. The `.md` WANT is drift — CONFIRMED, import verbatim unparsed.** `Wanted\` holds
+     exactly two objects matching the pattern
      jigoro-kano sampled by hand during WS1 review: `WANT-20260907-001__skill__…md` (no
      `.SEQ-STATE`, bare `skill` token, no `from-`, `.md`) and
      `WANT-20260908-001.000-OPEN__cat-tool__from-terrence__…txt`, dated one day later, which
@@ -346,11 +349,13 @@ splits them, and only one half is a decision.
      the characterization of scale is. **Recommendation: classify as `legacy_nonconforming`** —
      imported by Drive file ID with the filename preserved verbatim and no parsed fields, never
      renamed (section 1 and standing rule 1 forbid it), and the parser is not extended for it.
-     *Cost: nine objects stay unparsed forever, visible in every reconciliation report. That is
-     the honest record of what happened; whether nine of them warrants a grammar decision rather
-     than a standing exception is now an open question, not a settled one.*
+     *The operator confirmed this recommendation with the corrected count (9, not 1) in front of
+     him. Nine objects stay unparsed forever, visible in every reconciliation report — the honest
+     record of what happened. Whether nine of them warrants a future grammar decision rather than
+     a standing exception is a separate, later question, not reopened here.*
 
-**2. Native Google Doc posts that duplicate a `.txt` of the same name.**
+**2. Native Google Doc posts that duplicate a `.txt` of the same name — CONFIRMED by the
+operator, 2026-09-22: preserved, never content-hashed, always reported.**
    jigoro-kano's WS1 review measured exactly four `.gdoc` objects by manual read of the board
    listing, and they are three different things — one true post duplicate
    (`BB-20260911-forge-001.000`, the decisions register's opening event, `.txt` and `.gdoc`,
@@ -376,17 +381,18 @@ splits them, and only one half is a decision.
    register object converted, that is a one-off operator-gated action on
    `TS-20260913-sentinel1-007`, not a rule.
 
-**3. Rules 3, 8, 10 and the gate row "Signed typed fields" phrase their checks in terms of
-signed bytes, which D30 (`BB-20260911-forge-001.028`) puts out of scope for any design.**
-   **Recommendation: substitute the vocabulary at adoption** — "the post's own recorded bytes
-   (header and body)" for "the signed bytes"/"signed content", and "The publishing path MUST
-   refuse…" for "Signing MUST refuse…". **This changes no predicate, no disposition and no
-   truth-table row**: every check in this amendment is a filename-to-header comparison or a
-   content hash, and neither is a signature — the truth-table row "Break-glass mode only in
-   filename or only in header → Reject verification" already states the check without one. I have
-   not made the change, because it touches the 12 rules and this pass was told not to reopen
-   them. *Alternative — adopt as-is: costs nothing today, and guarantees the next reviewer
-   re-raises the topic, which is the behaviour D30 exists to stop.*
+**3. Rules 3 and 10 and the gate row "Signed typed fields" phrased their checks in terms of
+signed bytes, which D30 (`BB-20260911-forge-001.028`) puts out of scope for any design — CONFIRMED
+by the operator, 2026-09-22, and applied.** Substituted throughout: "the post's own recorded
+bytes (header and body)" for "the signed bytes"/"signed content"; "The publishing path MUST
+refuse…" for "Signing MUST refuse…"; the gate row itself renamed "Typed field binding" with
+disposition "Refuse publish" replacing "Refuse sign". **This changed no predicate, no disposition
+and no truth-table row**: every check in this amendment is a filename-to-header comparison or a
+content hash, and neither is a signature — the truth-table row "Break-glass mode only in filename
+or only in header → Reject verification" already stated the check without one. Rule 8's "re-sign"
+(a forbidden mutation during import, not a check) was deliberately left as-is — it names an
+action, not a verification mechanism, and no exact replacement text was specified for it; revisit
+separately if it reads as stale.
 
 **4. Does rule 1 supersede D33, and how far? — CONFIRMED by the operator, 2026-09-21.** Interpretation
 note C scopes rule 1 to enabled Registrar-compliant writes and leaves D33 (`BB-20260911-forge-001.033`)
