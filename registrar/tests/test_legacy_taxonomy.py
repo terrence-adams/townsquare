@@ -412,5 +412,177 @@ class LegacyTaxonomyTests(unittest.TestCase):
         self.assertEqual(2, len({r["post_uid"] for r in report["posts"]}))
 
 
+class WS3TrashedNativeDocBoardTests(unittest.TestCase):
+    """WS3 phase A taxonomy extensions (jackie-chan, 2026-09-22): trashed
+    board-object policy (item 2), native-Doc detection via the Office-export
+    corroborating signal (item 3), and board derivation from
+    parent_folder_path (item 4). All fixtures here are synthetic -- no real
+    corpus content, per the disclosure-boundary rule (gsp's CP1/WS3 review
+    item 4: row-level output stays outside C:\\Repo\\townsquare\\)."""
+
+    def test_trashed_txt_post_is_excluded_from_posts_and_recorded(self):
+        rows = [_row("t1", "TS-20260929-sample-090.002-CLOSED__by-sample.txt", "Requests", trashed=True)]
+        report = plan(_inventory(rows))
+        self.assertEqual(0, len(report["posts"]))
+        self.assertEqual(1, report["counts"]["trashed_board_objects"])
+        obj = report["trashed_board_objects"][0]
+        self.assertEqual("post", obj["kind"])
+        self.assertEqual("Requests", obj["board"])
+        self.assertFalse(obj["native_doc"])
+        # full Drive metadata, not just a count (Drive purges trash; this
+        # row may be the only surviving record)
+        for key in ("drive_file_id", "mime_type", "size", "provider_checksum", "created_time", "modified_time"):
+            self.assertIn(key, obj)
+
+    def test_trashed_sig_sidecar_is_excluded_from_artifacts_and_recorded(self):
+        rows = [_row("t2", "TS-20260929-sample-090.002-CLOSED__by-sample.txt.sig", "Requests", trashed=True)]
+        report = plan(_inventory(rows))
+        self.assertEqual(0, len(report["artifacts"]))
+        self.assertEqual(1, report["counts"]["trashed_board_objects"])
+        self.assertEqual("sidecar", report["trashed_board_objects"][0]["kind"])
+
+    def test_trashed_sidecar_orphan_when_parent_also_trashed(self):
+        rows = [
+            _row("t3", "TS-20260910-cable-030.000-OPEN__by-cable.txt", "Requests", trashed=True),
+            _row("t4", "TS-20260910-cable-030.000-OPEN__by-cable.txt.sig", "Requests", trashed=True),
+        ]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, report["counts"]["trashed_sidecar_orphan"])
+        self.assertEqual(0, report["counts"]["trashed_sidecar_live_post_lost_signature"])
+        res = report["trashed_sidecar_resolution"][0]
+        self.assertEqual("orphan_sidecar", res["classification"])
+        self.assertEqual("trashed", res["parent_status"])
+
+    def test_trashed_sidecar_orphan_when_parent_missing_entirely(self):
+        rows = [_row("t5", "TS-20260910-cable-031.000-OPEN__by-cable.txt.sig", "Requests", trashed=True)]
+        report = plan(_inventory(rows))
+        res = report["trashed_sidecar_resolution"][0]
+        self.assertEqual("orphan_sidecar", res["classification"])
+        self.assertEqual("missing", res["parent_status"])
+
+    def test_trashed_sidecar_live_post_lost_signature_is_a_distinct_more_serious_class(self):
+        """The opposite class from orphan_sidecar (jigoro-kano's Q2 review):
+        the POST is still active/importable, but its signature is the thing
+        that's trashed -- must never be folded into 'orphan'."""
+        rows = [
+            _row("t6", "TS-20260910-cable-032.000-OPEN__by-cable.txt", "Requests", trashed=False),
+            _row("t7", "TS-20260910-cable-032.000-OPEN__by-cable.txt.sig", "Requests", trashed=True),
+        ]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, len(report["posts"]))  # the active post still imports
+        self.assertEqual(0, report["counts"]["trashed_sidecar_orphan"])
+        self.assertEqual(1, report["counts"]["trashed_sidecar_live_post_lost_signature"])
+        res = report["trashed_sidecar_resolution"][0]
+        self.assertEqual("live_post_lost_signature", res["classification"])
+        self.assertEqual("active", res["parent_status"])
+
+    def test_rewrite_and_trash_candidate_detected_by_exact_filename_match(self):
+        """jigoro-kano's Q2 review, check (a): identical filename observed
+        both trashed and active is a candidate doctrine section 1
+        REWRITE-AND-TRASH violation -- materially different from an
+        ordinary trashed post, and must be labeled distinctly. Filename here
+        is a fabricated synthetic pattern (same style as every other
+        fixture in this file), not a real corpus name."""
+        name = "BB-20260930-sample-777.000-POST__to-all__impact-fleet__from-sample__widget-status-update.txt"
+        rows = [
+            _row("active-copy", name, "Bulletin Board", trashed=False),
+            _row("trashed-copy", name, "Bulletin Board", trashed=True),
+        ]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, len(report["posts"]))
+        self.assertEqual("active-copy", report["posts"][0]["drive_file_id"])
+        self.assertEqual(1, report["counts"]["trashed_rewrite_and_trash_candidates"])
+        candidate = report["trashed_rewrite_and_trash_candidates"][0]
+        self.assertEqual("active-copy", candidate["active_drive_file_id"])
+        self.assertEqual("trashed-copy", candidate["trashed_drive_file_id"])
+
+    def test_ordinary_trashed_post_with_no_active_namesake_is_not_a_rewrite_candidate(self):
+        rows = [_row("t8", "TS-20260910-cable-033.000-OPEN__by-cable.txt", "Requests", trashed=True)]
+        report = plan(_inventory(rows))
+        self.assertEqual(0, report["counts"]["trashed_rewrite_and_trash_candidates"])
+
+    def test_native_doc_detected_via_office_export_mime_null_size_null_checksum(self):
+        """WS3 item 3: the live collector run never observes a bare
+        google-apps mimetype -- it observes the Office-export mimetype with
+        null size and null checksum. This is the corroborating signal that
+        makes that safe to trust."""
+        rows = [_row(
+            "nd1", "BB-20260929-sample-050.000-POST__to-all__impact-fleet__from-sample__draft-pending-confirmation.docx",
+            "Bulletin Board",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size=None, provider_checksum=None, provider_checksum_algo=None,
+        )]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, report["counts"]["native_doc_objects"])
+        self.assertEqual(0, report["counts"]["quarantined_invalid_name"])
+        self.assertEqual("Bulletin Board", report["native_doc_objects"][0]["board"])
+
+    def test_genuine_docx_upload_with_real_size_and_checksum_is_not_misclassified(self):
+        """Guard against a false positive: an ordinary uploaded Word file
+        shares the Office-export mimetype but has a REAL size and checksum
+        -- it must still fall through to generic quarantine (extension not
+        .txt), never be reported as a native Doc."""
+        rows = [_row(
+            "nd2", "BB-20260911-forge-002.000-POST__to-all__impact-fleet__from-forge__real-upload.docx",
+            "Bulletin Board",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size=48213, provider_checksum="abc123def456", provider_checksum_algo="md5",
+        )]
+        report = plan(_inventory(rows))
+        self.assertEqual(0, report["counts"]["native_doc_objects"])
+        self.assertEqual(1, report["counts"]["quarantined_invalid_name"])
+
+    def test_trashed_native_doc_in_board_folder_is_classified_once_not_double_counted(self):
+        """The required intersection fixture (Helio's CP-A1 / jigoro-kano's
+        Q2+Q3): a native Doc that is BOTH trashed AND inside a post-bearing
+        board folder must land in exactly one bucket (trashed_board_objects,
+        tagged native_doc=True), never also in native_doc_objects, and never
+        falling between the two (i.e. dropped from both)."""
+        rows = [_row(
+            "nd3", "BB-20260912-forge-003.000-POST__intersection-case.docx",
+            "Bulletin Board",
+            mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            size=None, provider_checksum=None, provider_checksum_algo=None,
+            trashed=True,
+        )]
+        report = plan(_inventory(rows))
+        self.assertEqual(0, report["counts"]["native_doc_objects"])
+        self.assertEqual([], report["native_doc_objects"])
+        self.assertEqual(1, report["counts"]["trashed_board_objects"])
+        obj = report["trashed_board_objects"][0]
+        self.assertTrue(obj["native_doc"])
+        self.assertEqual("other", obj["kind"])  # .docx is neither .txt nor .txt.sig
+
+    def test_board_is_derived_from_parent_folder_path_not_hardcoded_legacy(self):
+        rows = [_row("b1", "TS-20260910-cable-034.000-OPEN__by-cable.txt", "Requests")]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, len(report["posts"]))
+        self.assertEqual("Requests", report["posts"][0]["board"])
+        self.assertEqual(0, report["counts"]["board_fallback_fired"])
+
+    def test_board_fallback_fires_loudly_only_for_folder_unknown_fixtures(self):
+        """Pre-collector-schema bare-list fixtures (no parent_folder_path key
+        at all) still fall back to 'legacy' -- but the fallback firing is now
+        RECORDED, not silent (posts.board is NOT NULL; a silent default here
+        is the same fail-open shape flagged elsewhere in this project)."""
+        rows = [{"name": "TS-20260910-cable-035.000-OPEN__by-cable.txt", "drive_file_id": "b2"}]
+        report = plan(rows)
+        self.assertEqual(1, len(report["posts"]))
+        self.assertEqual("legacy", report["posts"][0]["board"])
+        self.assertEqual(1, report["counts"]["board_fallback_fired"])
+        self.assertEqual("b2", report["board_fallback_fired"][0]["drive_file_id"])
+
+    def test_non_post_artifact_and_legacy_nonconforming_and_grammar_b_carry_board_tag(self):
+        rows = [
+            _row("nb1", "TOWN-SQUARE-DOCTRINE-v1.5-20260908.txt", ""),
+            _row("nb2", "WANT-20260907-001__skill__x.md", "Wanted"),
+            _row("nb3", "OFFER-20260907-jeangrey-001.000-OPEN__host-jeangrey__x.txt", "Seeking"),
+        ]
+        report = plan(_inventory(rows))
+        self.assertIsNone(report["non_post_artifacts"][0]["board"])  # board root -> no board
+        self.assertEqual("Wanted", report["legacy_nonconforming"][0]["board"])
+        self.assertEqual("Seeking", report["grammar_b_offer_host_field"][0]["board"])
+
+
 if __name__ == "__main__":
     unittest.main()

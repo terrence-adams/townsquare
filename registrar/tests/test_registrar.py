@@ -212,4 +212,121 @@ class RegistrarTests(unittest.TestCase):
         root_a_uid=row["root_uid"]
         with self.assertRaises(sqlite3.IntegrityError): self.db.execute("UPDATE roots SET opening_post_uid=? WHERE root_uid=?",(root_b["post_uid"],root_a_uid))
         with self.assertRaises(sqlite3.IntegrityError): self.db.execute("UPDATE roots SET opening_post_uid=? WHERE root_uid=?",(str(uuid.uuid4()),root_a_uid))
+
+    # --- WS3 phase A (jackie-chan, 2026-09-22): migration 009 + auth scope fix ---
+
+    def test_migration_009_applies_forward_on_pre009_db_and_readiness_passes(self):
+        """QA requirement: migration 009 applies forward on a COPY of a
+        pre-009 fixture DB (mirrors the existing
+        test_migration_failure_is_atomic_and_forward_nullable technique of
+        swapping db_module.MIGRATIONS to a partial folder)."""
+        tmp2=tempfile.TemporaryDirectory()
+        try:
+            path2=str(Path(tmp2.name)/"pre009.db"); db2=connect(path2)
+            folder=Path(tmp2.name)/"migrations"; folder.mkdir()
+            for p in sorted(db_module.MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")):
+                if int(p.name[:3])<9: (folder/p.name).write_text(p.read_text())
+            old=db_module.MIGRATIONS; db_module.MIGRATIONS=folder
+            try: migrate(db2)
+            finally: db_module.MIGRATIONS=old
+            cols_before=[r[1] for r in db2.execute("PRAGMA table_info(posts)")]
+            self.assertNotIn("drive_created_at",cols_before)
+            migrate(db2)  # forward, with the real (009-including) migrations folder
+            cols_after={r[1]:r for r in db2.execute("PRAGMA table_info(posts)")}
+            self.assertIn("drive_created_at",cols_after)
+            self.assertEqual(0,cols_after["drive_created_at"][3])  # nullable (notnull==0)
+            self.assertIsNone(db2.execute("SELECT drive_created_at FROM posts LIMIT 1").fetchone())
+            db2.execute("PRAGMA integrity_check").fetchone()  # readiness: DB still coherent
+            db2.close()
+        finally: tmp2.cleanup()
+
+    def test_promote_import_populates_drive_created_at_from_manifest(self):
+        manifest=plan([{"name":"TS-20260917-legacy-020.001-WORKING__by-legacy.txt","drive_file_id":"created-time-a","created_time":"2026-09-01T12:00:00Z"}])
+        staged=self.r.stage_import("importer",manifest); self.r.promote_import("promoter",staged["run_id"],staged["manifest_digest"])
+        row=self.db.execute("SELECT drive_created_at FROM posts WHERE drive_file_id='created-time-a'").fetchone()
+        self.assertEqual("2026-09-01T12:00:00Z",row["drive_created_at"])
+        manifest2=plan([{"name":"TS-20260917-legacy-021.001-WORKING__by-legacy.txt","drive_file_id":"created-time-b"}])
+        staged2=self.r.stage_import("importer",manifest2); self.r.promote_import("promoter",staged2["run_id"],staged2["manifest_digest"])
+        row2=self.db.execute("SELECT drive_created_at FROM posts WHERE drive_file_id='created-time-b'").fetchone()
+        self.assertIsNone(row2["drive_created_at"])
+
+    def test_native_posts_have_null_drive_created_at(self):
+        root=self.root()
+        self.assertIsNone(self.db.execute("SELECT drive_created_at FROM posts WHERE post_uid=?",(root["post_uid"],)).fetchone()[0])
+
+    def test_trashed_rows_never_reach_the_database_end_to_end(self):
+        """WS3 item 2, end-to-end: a mixed active+trashed inventory only
+        stages/promotes the active posts. Trashed rows are structurally
+        absent from the manifest's posts/artifacts (they never even reach
+        stage_import), so they cannot be promoted -- confirmed by re-running
+        the whole stage->promote->stage->promote cycle and asserting
+        created==0 the second time, matching the pre-existing idempotency
+        proof but now over a manifest that also contains excluded rows."""
+        objects=[
+            {"name":"TS-20260917-legacy-030.000-OPEN__by-legacy.txt","drive_file_id":"trash-e2e-active","parent_folder_path":"Requests","trashed":False},
+            {"name":"TS-20260917-legacy-031.000-OPEN__by-legacy.txt","drive_file_id":"trash-e2e-trashed","parent_folder_path":"Requests","trashed":True},
+        ]
+        manifest=plan(objects)
+        self.assertEqual(1,len(manifest["posts"]))
+        self.assertEqual("trash-e2e-active",manifest["posts"][0]["drive_file_id"])
+        self.assertEqual(1,manifest["counts"]["trashed_board_objects"])
+        staged=self.r.stage_import("importer",manifest)
+        result=self.r.promote_import("promoter",staged["run_id"],staged["manifest_digest"])
+        self.assertEqual(1,result["created"])
+        self.assertIsNotNone(self.db.execute("SELECT 1 FROM posts WHERE drive_file_id='trash-e2e-active'").fetchone())
+        self.assertIsNone(self.db.execute("SELECT 1 FROM posts WHERE drive_file_id='trash-e2e-trashed'").fetchone())
+        staged2=self.r.stage_import("importer",manifest); result2=self.r.promote_import("promoter",staged2["run_id"],staged2["manifest_digest"])
+        self.assertEqual(0,result2["created"])
+
+    def test_auth_bootstrap_scope_flag_is_not_silently_unioned_with_post_write(self):
+        """WS3 item 7: --scope used to action='append' onto a
+        default=['post:write'], so every minted token silently carried
+        post:write regardless of what was requested. Confirms the fix
+        produces an EXACTLY-least-privilege token."""
+        class FakeHasher:
+            def hash(self,value): return "hash:"+value
+            def verify(self,digest,value):
+                if digest!="hash:"+value: raise ValueError()
+        old=auth.PasswordHasher; auth.PasswordHasher=FakeHasher
+        tmp3=tempfile.TemporaryDirectory()
+        try:
+            import sys,gc
+            dbpath=str(Path(tmp3.name)/"auth.db")
+            old_argv=sys.argv
+            sys.argv=["auth","--db",dbpath,"--principal","importer-bot","--scope","admin:import-stage"]
+            try: auth.main()
+            finally: sys.argv=old_argv
+            gc.collect()  # release main()'s own internal db connection (Windows file lock) before cleanup
+            db3=connect(dbpath)
+            scopes=set(db3.execute("SELECT scopes FROM tokens WHERE principal_id='importer-bot'").fetchone()[0].split())
+            self.assertEqual({"admin:import-stage"},scopes)
+            self.assertNotIn("post:write",scopes)
+            db3.close(); gc.collect()
+        finally:
+            tmp3.cleanup(); auth.PasswordHasher=old
+
+    def test_auth_bootstrap_omitted_scope_still_defaults_to_post_write(self):
+        """The convenience default must survive for the truly-unset case --
+        this is a post-parse fallback, not a removal of the default."""
+        class FakeHasher:
+            def hash(self,value): return "hash:"+value
+            def verify(self,digest,value):
+                if digest!="hash:"+value: raise ValueError()
+        old=auth.PasswordHasher; auth.PasswordHasher=FakeHasher
+        tmp4=tempfile.TemporaryDirectory()
+        try:
+            import sys,gc
+            dbpath=str(Path(tmp4.name)/"auth2.db")
+            old_argv=sys.argv
+            sys.argv=["auth","--db",dbpath,"--principal","legacy-bot"]
+            try: auth.main()
+            finally: sys.argv=old_argv
+            gc.collect()
+            db4=connect(dbpath)
+            scopes=set(db4.execute("SELECT scopes FROM tokens WHERE principal_id='legacy-bot'").fetchone()[0].split())
+            self.assertEqual({"post:write"},scopes)
+            db4.close(); gc.collect()
+        finally:
+            tmp4.cleanup(); auth.PasswordHasher=old
+
 if __name__=="__main__": unittest.main()

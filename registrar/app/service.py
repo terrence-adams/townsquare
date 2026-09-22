@@ -60,7 +60,7 @@ class Registrar:
             self.db.execute("UPDATE root_counters SET next_local_number=? WHERE prefix=? AND utc_date=? AND namespace=?",(number+1,prefix,date,ns))
             ru,pu=str(uuid7()),str(uuid7()); thread=f"{prefix}-{date}-{ns}-{number:03d}"; created=now()
             self.db.execute("INSERT INTO roots VALUES (?,?,?,?,?,?,?,?,?,?,?)",(ru,thread,prefix,date,ns,number,None,1,"reserved",principal,created))
-            self.db.execute("INSERT INTO posts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(pu,ru,0,0,p.get("state","OPEN"),board,None,None,created,principal,None,None,None,"reserved",(datetime.now(timezone.utc)+timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),"native"))
+            self.db.execute("INSERT INTO posts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(pu,ru,0,0,p.get("state","OPEN"),board,None,None,created,principal,None,None,None,"reserved",(datetime.now(timezone.utc)+timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),"native",None))
             self.db.execute("UPDATE roots SET opening_post_uid=? WHERE root_uid=?",(pu,ru))
             self.assign(pu,p["assignments"],principal)
             self.db.execute("INSERT INTO aliases VALUES (?,?,?)",(thread,"root",ru))
@@ -75,7 +75,7 @@ class Registrar:
         p.update(board=board,author=principal,thread_id=thread)
         def create():
             no=self.db.execute("SELECT next_post_no FROM roots WHERE root_uid=?",(root["root_uid"],)).fetchone()[0]; self.db.execute("UPDATE roots SET next_post_no=? WHERE root_uid=?",(no+1,root["root_uid"]))
-            pu,created=str(uuid7()),now(); self.db.execute("INSERT INTO posts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(pu,root["root_uid"],no,no,p["state"],board,None,None,created,principal,None,None,None,"reserved",(datetime.now(timezone.utc)+timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),"native"))
+            pu,created=str(uuid7()),now(); self.db.execute("INSERT INTO posts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(pu,root["root_uid"],no,no,p["state"],board,None,None,created,principal,None,None,None,"reserved",(datetime.now(timezone.utc)+timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),"native",None))
             self.assign(pu,p["assignments"],principal)
             self.db.execute("INSERT INTO aliases VALUES (?,?,?)",(f"{thread}#{no:03d}","post",pu))
             return {"post_uid":pu,"thread_id":thread,"post_no":no,"pid":pid(uuid.UUID(pu))},"post",pu
@@ -180,7 +180,7 @@ class Registrar:
                 if not new_root and (occupied or wanted<current_next): wanted=current_next
                 post_uid=item["post_uid"]; author=item.get("responsible_agent")
                 url=f'https://drive.google.com/file/d/{item["drive_file_id"]}/view'
-                self.db.execute("INSERT INTO posts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(post_uid,root["root_uid"],wanted,item["legacy_seq"],meta["state"],item.get("board","legacy"),item["filename"],item.get("header_at"),now(),author,item.get("content_sha256"),item["drive_file_id"],url,"legacy",None,"legacy_import"))
+                self.db.execute("INSERT INTO posts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(post_uid,root["root_uid"],wanted,item["legacy_seq"],meta["state"],item.get("board","legacy"),item["filename"],item.get("header_at"),now(),author,item.get("content_sha256"),item["drive_file_id"],url,"legacy",None,"legacy_import",item.get("created_time")))
                 if author:
                     self.db.execute("INSERT INTO assignments VALUES (?,?,?,1)",(post_uid,author,"responsible"))
                 self.db.execute("INSERT OR IGNORE INTO aliases VALUES (?,?,?)",(item["filename"],"post",post_uid)); self.db.execute("UPDATE roots SET next_post_no=CASE WHEN next_post_no<? THEN ? ELSE next_post_no END WHERE root_uid=?",(wanted+1,wanted+1,root["root_uid"])); created+=1

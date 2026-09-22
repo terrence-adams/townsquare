@@ -97,6 +97,23 @@ Taxonomy design notes (why the branching order below is what it is):
      labeled with the fact that its `drive_file_id`/`mime_type`/`size`
      describe the shortcut's target, not the shortcut itself.
 
+  7. Trashed-ness (WS3 item 2, 2026-09-22) is checked immediately AFTER the
+     folder gate and BEFORE every other board-folder branch (sidecar/
+     native-doc/`.md`/host-field/parse) — deliberately, so a trashed object
+     is diverted to `trashed_board_objects` regardless of what shape it
+     would otherwise have been classified as. This is what makes trashed-
+     ness and native-Doc-ness (point 3's detection) compose correctly when
+     they intersect on the same real object: native-doc-ness is still
+     computed and carried as a cross-cutting `native_doc` tag on whichever
+     bucket the row actually lands in, but ROUTING is decided by trashed-
+     ness first, so an object can never be double-counted across
+     `trashed_board_objects` and `native_doc_objects`, and can never fall
+     between the two. `trashed_board_objects` rows never reach `posts` or
+     `artifacts` — Drive purges trash on a schedule this collector cannot
+     observe exactly (bounded above by ~30 days from collection), so this
+     class carries full per-object Drive metadata, not just a count: it may
+     be the only surviving record of these objects once that window closes.
+
 Backward compatibility with the pre-existing report shape (relied on by
 registrar/app/service.py's `stage_import`, which parses `manifest["posts"]`
 and `manifest.get("artifacts", [])` again on its own and by
@@ -222,6 +239,33 @@ def _board_folder_status(obj):
     return "board" if first_segment in POST_BOARD_FOLDERS else "non_board"
 
 
+def _board_of(obj):
+    """First path segment of parent_folder_path -- the actual board name
+    ('Requests', 'Bulletin Board', ...) for a row the folder gate already
+    let through, or the standing-document folder name for a non_board row.
+    Returns None (never the string 'legacy') when parent_folder_path is
+    absent or empty, so callers can tell "no real board could be derived"
+    apart from a genuine board name and decide explicitly how loud to be
+    about it, instead of a silent string default.
+
+    WS3 CP-A1 finding (2026-09-22): legacy.py:526's prior
+    `item.get("board","legacy")` was a DEFAULT for a field this planner
+    never populated anywhere -- not a hardcode with the same name, a
+    different bug shape entirely. `merge_inventory.py`'s collector never
+    emits a "board" key at all (it emits `parent_folder_path`, which this
+    function derives "board" FROM), so that fallback fired on every single
+    row, unconditionally, silently turning `posts.board` -- a NOT NULL
+    column the read API filters on -- into one useless constant for all of
+    history. This helper is the actual fix; the five call sites below (plus
+    the posts pipeline itself) populate `item["board"]` with it so the old
+    fallback becomes the genuine last-resort it was designed to be, not the
+    only code path that ever ran."""
+    path = obj.get("parent_folder_path")
+    if not path:
+        return None
+    return path.split("/", 1)[0]
+
+
 def _extension(name):
     lower = name.lower()
     if lower.endswith(".gdoc"):
@@ -239,9 +283,31 @@ GOOGLE_NATIVE_MIME_EXCLUDED = {
     GOOGLE_NATIVE_MIME_PREFIX + "shortcut",
 }
 
+# WS3 CP-A1 finding #3 (2026-09-22): the LIVE collector run never observes a
+# bare `application/vnd.google-apps.*` mimetype on a native Doc at all.
+# Confirmed by direct inspection of lsjson-active.json/lsjson-trashed.json:
+# all 5 real native Docs in this corpus (4 active, 1 trashed) carry
+# `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+# (Google's default Office-export mimetype for Docs), a `.docx` name,
+# `Size: -1` (-> null after merge_inventory.py's normalization), and no
+# `Hashes.md5` at all -- rclone v1.75.1 with no --drive-export-formats flag
+# set reports the export shape, not the true `google-apps.document` type
+# (which is buried in `Metadata.content-type`, which the collector
+# discards). The two GOOGLE_NATIVE_MIME_* checks above are kept as-is (they
+# still fire correctly if a future run ever passes --drive-export-formats
+# gdoc, or the true mimetype becomes available some other way); this set
+# and the check below are the corroborating signal for the shape this run
+# actually produces.
+OFFICE_EXPORT_MIME_TYPES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # Docs -> .docx
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",        # Sheets -> .xlsx
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # Slides -> .pptx
+}
 
-def _is_native_google_doc(name, mime_type):
-    """Native-Doc detection by BOTH signals, not filename extension alone.
+
+def _is_native_google_doc(name, mime_type, size=None, provider_checksum=None):
+    """Native-Doc detection by multiple corroborating signals, not filename
+    extension alone.
 
     Part 1 review finding: ip-man's design note already flags that rclone's
     Drive backend "can synthesize export extensions on native Google Docs,
@@ -257,10 +323,21 @@ def _is_native_google_doc(name, mime_type):
     spreadsheet/presentation/...`) -- rclone doesn't synthesize or distort
     it. Checking both makes this classification robust to whatever the live
     run's actual naming turns out to be, at zero extra cost (mime_type is
-    already collected on every row)."""
+    already collected on every row).
+
+    WS3 addition (item 3): an Office-export mimetype ALONE is not a safe
+    signal -- a genuinely uploaded .docx file also carries that exact
+    mimetype. What makes a native Doc's export row distinguishable is that
+    Drive never computed a real size or a real content checksum for it (the
+    export is generated on read, not stored) -- so all three together (null
+    size AND null provider checksum AND an Office-export mimetype) is the
+    corroborating signal; any one alone would false-positive on an ordinary
+    Word upload that happens to share the mimetype."""
     if _extension(name) == ".gdoc":
         return True
     if mime_type and mime_type.startswith(GOOGLE_NATIVE_MIME_PREFIX) and mime_type not in GOOGLE_NATIVE_MIME_EXCLUDED:
+        return True
+    if mime_type in OFFICE_EXPORT_MIME_TYPES and size is None and not provider_checksum:
         return True
     return False
 
@@ -300,6 +377,40 @@ def _is_collector_defect(obj):
     return None
 
 
+def _trashed_kind(name):
+    """Coarse shape tag for a trashed board object -- 'post' (.txt),
+    'sidecar' (.txt.sig), or 'other' (anything else a trashed board-folder
+    object could in principle be, e.g. a native Doc export). Used only for
+    routing the two required cross-checks below (rewrite-and-trash name
+    intersection, sidecar-to-parent resolution); never touches DB import."""
+    if name.endswith(".txt.sig"):
+        return "sidecar"
+    if name.endswith(".txt"):
+        return "post"
+    return "other"
+
+
+def _full_drive_metadata(obj, name, board, is_native):
+    """Full per-object Drive metadata, for classes where the row itself --
+    not just a count -- IS the surviving record (WS3 item 2: Drive purges
+    trash on a schedule bounded above by ~30 days from collection, so
+    `trashed_board_objects` may be the only place this data still exists
+    once that window closes)."""
+    return {
+        "drive_file_id": obj.get("drive_file_id"),
+        "name": name,
+        "parent_folder_path": obj.get("parent_folder_path"),
+        "board": board,
+        "mime_type": obj.get("mime_type"),
+        "size": obj.get("size"),
+        "provider_checksum": obj.get("provider_checksum"),
+        "provider_checksum_algo": obj.get("provider_checksum_algo"),
+        "created_time": obj.get("created_time"),
+        "modified_time": obj.get("modified_time"),
+        "native_doc": is_native,
+    }
+
+
 def plan(objects):
     rows_in = _extract_rows(objects)
 
@@ -314,6 +425,9 @@ def plan(objects):
     sidecars = []          # board-folder .txt.sig objects, kept for the
                             # existing sidecar-matching pass below
     parsed = []             # successfully parsed .txt posts, pre-post_no
+    trashed_board_objects = []  # WS3 item 2: Drive-trashed objects inside a
+                                 # post-bearing board folder -- excluded from
+                                 # posts/artifacts, full metadata retained
 
     # Shortcut objects (gsp's CP1 finding): a structurally SEPARATE input
     # list from the collector, already isolated at the source from the
@@ -331,6 +445,7 @@ def plan(objects):
             "drive_file_id": obj.get("drive_file_id"),
             "name": obj.get("name"),
             "parent_folder_path": obj.get("parent_folder_path"),
+            "board": _board_of(obj),
             "mime_type": obj.get("mime_type"),
             "reason": "shortcut_object",
             "note": obj.get("collector_note") or (
@@ -355,11 +470,17 @@ def plan(objects):
 
         name = obj.get("name") or (obj.get("path", "").rsplit("/", 1)[-1])
         folder_status = _board_folder_status(obj)
+        board = _board_of(obj)
+        trashed = bool(obj.get("trashed"))
+        is_native = _is_native_google_doc(name, obj.get("mime_type"), obj.get("size"), obj.get("provider_checksum"))
         if folder_status == "non_board":
             non_post_artifacts.append({
                 "drive_file_id": obj.get("drive_file_id"),
                 "name": name,
                 "parent_folder_path": obj.get("parent_folder_path"),
+                "board": board,
+                "native_doc": is_native,
+                "trashed": trashed,
                 "reason": "non_post_artifact",
                 "note": (
                     "outside every recognized post-bearing folder "
@@ -370,17 +491,47 @@ def plan(objects):
             })
             continue
 
+        # WS3 item 2 (trashed policy) -- checked BEFORE sidecar/native-doc/
+        # .md/host-field/parse routing, so ANY trashed object inside a
+        # post-bearing board folder is diverted here regardless of shape.
+        # This is what makes items 2 and 3 (native-Doc detection) compose
+        # correctly when they intersect on the same real object: native-doc-
+        # ness is still computed above (`is_native`) and carried as a
+        # cross-cutting tag on this row, but ROUTING is decided by trashed-
+        # ness first -- a trashed native Doc is classified once, here, never
+        # also appended to `native_doc_objects` (no double count, and it
+        # can't fall between the two since there is only one branch it can
+        # take). `posts`/`artifacts` never see this row.
+        if trashed:
+            trashed_board_objects.append({
+                **_full_drive_metadata(obj, name, board, is_native),
+                "kind": _trashed_kind(name),
+                "reason": "trashed_board_object",
+                "note": (
+                    "Drive-trashed object inside a post-bearing board folder; "
+                    "excluded from posts/artifacts per the operator's confirmed "
+                    "2026-09-22 disposition ('record, don't register'). Drive's "
+                    "purge schedule for this object is UNKNOWN, bounded above by "
+                    "~30 days from collection (the exact date depends on this "
+                    "object's own trash time, which lsjson does not report) -- "
+                    "this row's full metadata may be the only surviving record "
+                    "after that window closes. Never silently imported."
+                ),
+            })
+            continue
+
         if name.endswith(".txt.sig"):
             sidecars.append(obj)
             continue
 
         ext = _extension(name)
-        if _is_native_google_doc(name, obj.get("mime_type")):
+        if is_native:
             native_doc_objects.append({
                 "drive_file_id": obj.get("drive_file_id"),
                 "name": name,
                 "mime_type": obj.get("mime_type"),
                 "parent_folder_path": obj.get("parent_folder_path"),
+                "board": board,
                 "reason": "native_google_doc",
                 "content_sha256": None,
                 "content_sha256_status": "native_google_doc",
@@ -392,6 +543,7 @@ def plan(objects):
                 "drive_file_id": obj.get("drive_file_id"),
                 "name": name,
                 "parent_folder_path": obj.get("parent_folder_path"),
+                "board": board,
                 "reason": "legacy_nonconforming",
                 "note": "grammar-B standalone .md post shape; classified only, parser not extended",
             })
@@ -402,6 +554,7 @@ def plan(objects):
                 "drive_file_id": obj.get("drive_file_id"),
                 "name": name,
                 "parent_folder_path": obj.get("parent_folder_path"),
+                "board": board,
                 "reason": "grammar_b_offer_host_field",
                 "note": (
                     "OFFER host- typed field, confirmed doctrine per section 7b "
@@ -435,6 +588,12 @@ def plan(objects):
             "responsible_agent": responsible,
             "warnings": warnings,
             "silent_absorption_fields": silent_fields,
+            # WS3 item 4: explicit key AFTER the **obj spread, so it always
+            # wins over any stray "board" the input happened to carry, and
+            # so line ~526's rows.append below receives a real value derived
+            # from parent_folder_path instead of relying on a key the
+            # collector never emits (see _board_of's docstring).
+            "board": board,
         })
 
     # Silent-absorption class: counted separately, not removed from `parsed`
@@ -497,6 +656,12 @@ def plan(objects):
     rows = []
     duplicate_openings = []
     duplicate_sequences = []
+    board_fallback_fired = []  # WS3 item 4: LOUD record of every time the
+                                # 'legacy' fallback below actually fires,
+                                # instead of the silent default it used to be
+                                # (posts.board is NOT NULL; a silent default
+                                # here is the same fail-open shape flagged
+                                # elsewhere in this project).
     for thread, items in sorted(groups.items()):
         counts = Counter(x["parsed"]["seq"] for x in items)
         maximum = max(counts, default=-1)
@@ -513,6 +678,22 @@ def plan(objects):
                 entry = {"thread_id": thread, "legacy_seq": seq, "drive_file_id": item["drive_file_id"], "assigned_post_no": post_no}
                 (duplicate_openings if seq == 0 else duplicate_sequences).append(entry)
             used.add(post_no)
+            board = item.get("board")
+            if board is None:
+                # Only reachable today via the "unknown" folder-status path
+                # (pre-collector-schema fixtures with no parent_folder_path
+                # key at all -- see _board_folder_status). Every real
+                # collector row now carries a derived board from item 4's
+                # fix, so this branch firing on live data is itself a signal
+                # something upstream regressed -- hence it is recorded, not
+                # just silently patched over.
+                board = "legacy"
+                board_fallback_fired.append({
+                    "thread_id": thread,
+                    "drive_file_id": item["drive_file_id"],
+                    "filename": item["parsed"]["filename"],
+                    "note": "no board could be derived from parent_folder_path; defaulted to 'legacy'",
+                })
             rows.append({
                 "thread_id": thread,
                 "post_uid": item["post_uid"],
@@ -523,11 +704,76 @@ def plan(objects):
                 "content_sha256": item.get("content_sha256"),
                 "content_sha256_status": _hash_status(item),
                 "header_at": item.get("header_at"),
-                "board": item.get("board", "legacy"),
+                "board": board,
                 "responsible_agent": item["responsible_agent"],
                 "warnings": item["warnings"],
+                # WS3 item 5: Drive's own createdTime, passed through so
+                # migration 009's posts.drive_created_at can be populated at
+                # promotion -- the only moment this value is in hand (posts
+                # are immutable after import). Optional/nullable end to end;
+                # never validated or required by stage_import.
+                "created_time": item.get("created_time"),
             })
     collisions = duplicate_openings + duplicate_sequences  # deprecated superset alias
+
+    # WS3 item 2's two required cross-checks (jigoro-kano's Q2 review),
+    # computed now that `rows` (the surviving, importable posts) is final.
+    #
+    # (a) Rewrite-and-trash candidates: exact-filename intersection between
+    #     a trashed post and the ACTIVE, importable post set. Doctrine
+    #     section 1's REWRITE-AND-TRASH prohibition is about the SAME
+    #     logical post being deleted and silently replaced -- an exact
+    #     filename match (same thread, same seq, same state, same slug) is
+    #     the strongest, least-ambiguous signal of that, and a materially
+    #     more serious finding than an ordinary trashed post: it means an
+    #     object with that identity exists TWICE in Drive's history, once
+    #     trashed and once live.
+    trashed_post_names = {t["name"] for t in trashed_board_objects if t["kind"] == "post"}
+    active_post_filenames = {row["filename"]: row["drive_file_id"] for row in rows}
+    trashed_rewrite_and_trash_candidates = []
+    for t in trashed_board_objects:
+        if t["kind"] == "post" and t["name"] in active_post_filenames:
+            trashed_rewrite_and_trash_candidates.append({
+                "filename": t["name"],
+                "trashed_drive_file_id": t["drive_file_id"],
+                "active_drive_file_id": active_post_filenames[t["name"]],
+                "reason": "rewrite_and_trash_candidate",
+                "note": (
+                    "identical filename observed both trashed and active in "
+                    "the same collection pass -- candidate doctrine section 1 "
+                    "REWRITE-AND-TRASH violation, materially different from an "
+                    "ordinary trashed post. Not auto-adjudicated; for Sensei's "
+                    "disposition decision."
+                ),
+            })
+
+    # (b) Sidecar-to-parent resolution for the trashed .txt.sig objects.
+    #     Two OPPOSITE classes, per jigoro-kano's review -- must not be
+    #     collapsed into one number:
+    #       - orphan_sidecar: the parent post is ALSO trashed (or missing
+    #         entirely) -- the signature has no live post to attest to.
+    #       - live_post_lost_signature: the parent post is STILL ACTIVE --
+    #         the signature vanished out from under a live post. This is the
+    #         more serious of the two and must never be silently folded into
+    #         "orphan".
+    trashed_sidecar_resolution = []
+    for t in trashed_board_objects:
+        if t["kind"] != "sidecar":
+            continue
+        parent_name = t["name"][:-4]  # strip ".sig", keep ".txt"
+        if parent_name in active_post_filenames:
+            classification, parent_status = "live_post_lost_signature", "active"
+        elif parent_name in trashed_post_names:
+            classification, parent_status = "orphan_sidecar", "trashed"
+        else:
+            classification, parent_status = "orphan_sidecar", "missing"
+        trashed_sidecar_resolution.append({
+            "filename": t["name"],
+            "drive_file_id": t["drive_file_id"],
+            "parent_filename": parent_name,
+            "parent_status": parent_status,
+            "classification": classification,
+        })
 
     # Sidecar matching (board-folder .txt.sig only -- non-board .sig objects
     # were already routed to non_post_artifacts above). Original shape
@@ -596,6 +842,9 @@ def plan(objects):
         if thread_id not in next_post_no or candidate > next_post_no[thread_id]:
             next_post_no[thread_id] = candidate
 
+    trashed_sidecar_orphan_count = sum(1 for r in trashed_sidecar_resolution if r["classification"] == "orphan_sidecar")
+    trashed_sidecar_live_post_lost_signature_count = sum(1 for r in trashed_sidecar_resolution if r["classification"] == "live_post_lost_signature")
+
     counts = {
         "posts": len(rows),
         "artifacts_signature": len(artifacts),
@@ -615,6 +864,11 @@ def plan(objects):
         "collector_defects": len(collector_defects),
         "directories_excluded": directories_excluded,
         "shortcut_objects": len(shortcut_objects),
+        "trashed_board_objects": len(trashed_board_objects),
+        "trashed_rewrite_and_trash_candidates": len(trashed_rewrite_and_trash_candidates),
+        "trashed_sidecar_orphan": trashed_sidecar_orphan_count,
+        "trashed_sidecar_live_post_lost_signature": trashed_sidecar_live_post_lost_signature_count,
+        "board_fallback_fired": len(board_fallback_fired),
     }
 
     return {
@@ -642,6 +896,10 @@ def plan(objects):
         "native_doc_objects": native_doc_objects,
         "collector_defects": collector_defects,
         "shortcut_objects": shortcut_objects,
+        "trashed_board_objects": trashed_board_objects,
+        "trashed_rewrite_and_trash_candidates": trashed_rewrite_and_trash_candidates,
+        "trashed_sidecar_resolution": trashed_sidecar_resolution,
+        "board_fallback_fired": board_fallback_fired,
         "next_post_no": next_post_no,
     }
 

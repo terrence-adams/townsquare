@@ -37,7 +37,17 @@ def main():
     from .db import connect,migrate
     ap=argparse.ArgumentParser(); ap.add_argument("--db",required=True); ap.add_argument("--principal",required=True)
     ap.add_argument("--namespace",action="append",default=[]); ap.add_argument("--board",action="append",default=[])
-    ap.add_argument("--scope",action="append",default=["post:write"]); args=ap.parse_args()
+    # WS3 item 7: `action="append"` APPENDS to `default`, so the old
+    # default=["post:write"] meant every minted token silently carried the
+    # writer scope regardless of what --scope was actually requested on the
+    # command line -- the exact scope Decision 1's decoupling invariant
+    # ("no post:write token exists until adoption") requires stay closed.
+    # default=[] matches the (correct) pattern --namespace/--board already
+    # use one line above; the explicit post-parse fallback below restores
+    # the convenience default ONLY when --scope was truly never passed at
+    # all, instead of silently unioning it into every invocation.
+    ap.add_argument("--scope",action="append",default=[]); args=ap.parse_args()
+    if not args.scope: args.scope=["post:write"]
     db=connect(args.db); migrate(db)
     for kind,values in (("namespace",args.namespace),("board",args.board)):
         for value in values: db.execute("INSERT OR IGNORE INTO acls VALUES (?,?,?,NULL,NULL)",(args.principal,kind,value.lower()))
