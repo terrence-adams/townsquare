@@ -482,6 +482,40 @@ Two small non-blocking items tracked, not gating phase B's close: (1) the duplic
 
 **This session put that correction to the operator directly and got an unconditional, direct answer, superseding the conditional one above:** asked plainly whether he wanted the session to execute directly given Francis's refusal and Helio's reasoning; answered **"confirming, I agree with their logic and suggestion."** This — not the earlier conditional paragraph — is the operative go-ahead for phase C's full execution sequence: redeploy from `internal` (current HEAD at time of execution), online backup immediately before cutover, fresh database init (current data directory archived aside, never deleted), migration `009` applied via the redeploy's own startup `migrate()`, two least-privilege tokens minted, canary manifest (~30 rows) staged and promoted with a hard stop if verification fails, then — only after the canary verifies clean — the full 1,267-row manifest staged and promoted, executed by this session directly (not delegated to a subagent for final trigger-pull, per Helio's and francis-ngannou's agreed pattern). francis-ngannou verifies the result afterward from artifacts once execution completes — a post-hoc independent check, which raises no consent problem since verifying is not acting.
 
+## Phase C — executed and complete, 2026-09-22
+
+**Executed directly by this session**, per the go-ahead above, using francis-ngannou's fully-designed and pre-validated runbook. Every step ran clean; nothing diverged from the design.
+
+1. Built image `town-registrar:dffbbfd` from `internal`@`dffbbfd` on the NAS (`docker build --pull=false`); migration `009` confirmed bundled.
+2. Pre-cutover online backup: `registrar-20260922T114409Z-precutover.db`, SHA-256 `a234228813...`, `integrity_check=ok`, zero FK violations.
+3. Cutover: `app` → `app.previous` (preserved, not deleted); `app.next` → `app`; live data directory archived to `data.pre-fresh-init-20260922` (preserved, not deleted); fresh container started against an empty `data/`. Migration `009` applied via startup `migrate()`.
+4. Port-8790 host-publish gap (found by francis-ngannou pre-execution) confirmed still present post-redeploy — same missing-`docker-proxy` pattern as every other check, most likely the same ASUSTOR/Docker iptables quirk already tracked from the earlier Crier outage (bishop's territory, not this project's). Worked around via `docker compose exec` for every API call in this sequence, matching `OPERATIONS.md`'s own primary access pattern; the SSH-tunnel path remains broken and is a separate follow-up, not a promotion blocker.
+5. Minted `ws3-stager` (`admin:import-stage`), `ws3-promoter` (`admin:import-promote`), later `ws3-verifier` (`post:read`, for verification queries only). Token audit post-mint: exactly these three, nothing carrying `post:write` or `break-glass:publish` — the `bishop` over-scope finding is gone with the fresh init, as expected.
+6. Canary (28 rows: 23 posts + 5 artifacts, covering all of francis-ngannou's target classes — 11 STRICT ambiguous-alias, 4 EXTENDED-only unresolved-responsibility, the two smallest self-contained duplicate-collision threads, board diversity, both orphan sidecars) staged and promoted: `created: 23`, matching exactly. Verified clean before proceeding: board values genuinely diverse (not uniformly `'legacy'`), `drive_created_at` populated on all 23, both orphan artifacts landed with `parent_post_uid IS NULL`, zero `conflict`-state posts, reconciliation and alias-lookup endpoints behaving as designed.
+   - *(One correction to the original canary design, caught before building it: the 1 `legacy_nonconforming` row was never actually stageable — WS3 phase A's item 6 was explicitly blocked, and no import path for it was ever built. It stays excluded/report-only, same as the trashed/native-Doc/grammar-B classes. Canary and full manifests both draw from `report["posts"]`/`report["artifacts"]` only, which never included it.)*
+7. Full manifest (1,267 rows: 1,070 posts + 197 artifacts) staged and promoted: `created: 1047` — exactly `1070 − 23` (the canary's posts correctly detected as already-present and marked `unchanged`, never duplicated).
+
+**Final state, verified directly against the database:**
+
+| Check | Result |
+|---|---|
+| `posts` | **1,070** |
+| `artifacts` | **197** |
+| `roots` | 313 |
+| `conflict`-state posts | **0** |
+| `drive_created_at` NULL count | **0** (every row has a real timestamp) |
+| Board distribution | `requests` 743 · `bulletin-board` 307 · `seeking` 16 · `wanted` 4 — genuinely per-row derived, zero `'legacy'` fallback |
+| `registration_state` | all `legacy` (correct — historical import) |
+| `source` | all `legacy_import` |
+| `assignments` | 1,062 (the ~8-row gap is the `unresolved_responsibility` class, correctly `author_agent NULL` per jigoro-kano's Group C ruling) |
+| `import_runs` | 2, both `promoted` (canary, full) |
+| Final token audit | `ws3-stager`/`admin:import-stage`, `ws3-promoter`/`admin:import-promote`, `ws3-verifier`/`post:read` — no write-scope creep |
+| Container | `town-registrar:dffbbfd`, healthy |
+
+**Nothing touched Drive at any point in this project.** The source of truth is exactly as it was before WS1 began. `main` and `external` branches untouched throughout. `app.previous` and `data.pre-fresh-init-20260922` remain on the NAS, preserved, if anything ever needs to be compared against the pre-migration state.
+
+**Next:** francis-ngannou verifies this result independently from artifacts (post-hoc, no consent problem — verifying is not acting), per the agreed pattern from the phase C authorization discussion.
+
 ---
 
 ## Key paths
