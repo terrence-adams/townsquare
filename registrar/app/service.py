@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib,json,re,secrets,sqlite3,time,uuid
+import base64,hashlib,hmac,json,re,secrets,sqlite3,time,uuid
 from datetime import datetime,timedelta,timezone
 from urllib.parse import urlparse,unquote
 from pathlib import Path
@@ -9,6 +9,7 @@ VALID=re.compile(r"^[a-z][a-z0-9-]{0,62}$"); PREFIXES={"TS","BB","SEEK","OFFER",
 class Conflict(Exception): pass
 class Invalid(ValueError): pass
 class Forbidden(PermissionError): pass
+class Unavailable(Exception): pass
 def now(): return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 def uuid7():
     value=(int(time.time()*1000)<<80)|(0x7<<76)|(secrets.randbits(12)<<64)|(0b10<<62)|secrets.randbits(62); return uuid.UUID(int=value)
@@ -17,6 +18,58 @@ def pid(value):
     for _ in range(26): chars.append(CROCKFORD[n&31]); n>>=5
     return "".join(reversed(chars))
 def canonical(value): return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False)
+
+# --- GET /v1/posts stable-cursor pagination (design.md §7/§11, AC26/AC38) ---
+# Cursor = base64url({"payload": {...}, "sig": HMAC-SHA256(canonical(payload))}).
+# `payload` carries the immutable sort tuple (created_at, post_uid), a hash of
+# the *query* filters (so a filter change mid-walk is caught, not silently
+# honored), the cursor schema version, the signing key id, and an issue time.
+# Mirrors the canonical()/sha256 pattern idempotency and import digests already
+# use in this file -- one hashing convention, not a second one.
+CURSOR_VERSION=1
+# "old cursors expire quickly" (design.md §11): a generous but bounded TTL.
+# The hard security properties (tamper-evident, filter-bound) are enforced by
+# the HMAC + filter_hash checks below regardless of this value; the TTL is the
+# one piece of rotation complexity intentionally kept simple for a home-LAN
+# PoC at ~1,070 rows -- see jackie-chan's implementation note.
+CURSOR_TTL_SECONDS=24*3600
+_FILTER_KEYS=("assigned_to","role","state","board","registration_state","root")
+def normalize_filters(filters): return {k:filters.get(k) for k in _FILTER_KEYS}
+def filter_hash(filters): return hashlib.sha256(canonical(normalize_filters(filters)).encode()).hexdigest()
+def _b64url_encode(data): return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+def _b64url_decode(text): return base64.urlsafe_b64decode(text+"="*(-len(text)%4))
+def encode_cursor(created_at,post_uid,filters,current):
+    """`current` is a (key_id, key_bytes) pair. New cursors always use the
+    current key -- never the previous one, per design.md §11."""
+    key_id,key=current
+    payload={"v":CURSOR_VERSION,"created_at":created_at,"post_uid":post_uid,"filter_hash":filter_hash(filters),"kid":key_id,"iat":int(time.time())}
+    sig=hmac.new(key,canonical(payload).encode(),hashlib.sha256).hexdigest()
+    return _b64url_encode(canonical({"payload":payload,"sig":sig}).encode())
+def decode_cursor(token,filters,current,previous):
+    """`current`/`previous` are (key_id, key_bytes) pairs or None -- the
+    bounded current/previous overlap design.md §11 asks for. Any tamper,
+    unknown key id, version mismatch, filter change, or expiry raises
+    `Invalid` (mapped to 400 by main.py's `invoke()`); nothing is ever
+    silently accepted or silently reinterpreted under the new filters."""
+    try: envelope=json.loads(_b64url_decode(token))
+    except Exception as exc: raise Invalid("malformed cursor") from exc
+    if not isinstance(envelope,dict): raise Invalid("malformed cursor")
+    payload=envelope.get("payload"); sig=envelope.get("sig")
+    if not isinstance(payload,dict) or not isinstance(sig,str): raise Invalid("malformed cursor")
+    key_id=payload.get("kid"); key=None
+    if current and key_id==current[0]: key=current[1]
+    elif previous and previous[0] is not None and key_id==previous[0]: key=previous[1]
+    if key is None: raise Invalid("invalid cursor")
+    try: expected=hmac.new(key,canonical(payload).encode(),hashlib.sha256).hexdigest()
+    except Exception as exc: raise Invalid("malformed cursor") from exc
+    if not hmac.compare_digest(expected,sig): raise Invalid("invalid cursor")
+    if payload.get("v")!=CURSOR_VERSION: raise Invalid("unsupported cursor version")
+    if payload.get("filter_hash")!=filter_hash(filters): raise Invalid("cursor filters changed")
+    iat=payload.get("iat")
+    if not isinstance(iat,int) or iat>int(time.time())+60 or int(time.time())-iat>CURSOR_TTL_SECONDS: raise Invalid("cursor expired")
+    created_at=payload.get("created_at"); post_uid=payload.get("post_uid")
+    if not isinstance(created_at,str) or not isinstance(post_uid,str): raise Invalid("malformed cursor")
+    return created_at,post_uid
 
 class Registrar:
     def __init__(self,db): self.db=db
@@ -218,14 +271,32 @@ class Registrar:
             self.db.execute("INSERT INTO audit_log(at,principal_id,operation,outcome,detail) VALUES (?,?,?,?,?)",(now(),principal,"import_promote","ok",f"{run_id}:{digest}:created={created}")); self.db.commit()
             return {"run_id":run_id,"manifest_digest":digest,"status":"promoted","created":created}
         except Exception: self.db.rollback(); raise
-    def posts(self,**filters):
+    def posts(self,cursor=None,cursor_keys=(None,None),**filters):
+        """Exact filters, default order `(created_at, post_uid)` ascending
+        (design.md §7). With no `cursor`, behavior is byte-for-byte what it
+        was before pagination existed. With a `cursor`, the scan continues
+        strictly after the signed tuple -- no duplicates, no gaps, no
+        reordering, even if rows were inserted after the cursor was issued,
+        because the WHERE bound is the immutable tuple itself, not an offset."""
+        current,previous=cursor_keys
+        limit=min(int(filters.get("limit",100)),200)
         sql="SELECT p.*,r.thread_id FROM posts p JOIN roots r USING(root_uid)"; where=[]; args=[]
         if filters.get("assigned_to"):
             sql+=" JOIN assignments a ON a.post_uid=p.post_uid"; where.append("a.agent_id=? AND a.active=1"); args.append(filters["assigned_to"])
             if filters.get("role"): where.append("a.role=?"); args.append(filters["role"])
         for key,col in (("state","p.state"),("board","p.board"),("registration_state","p.registration_state"),("root","r.thread_id")):
             if filters.get(key): where.append(col+"=?"); args.append(filters[key])
+        if cursor:
+            # Can't verify what we have no key to check -- fail closed, never
+            # silently ignore the cursor and return page one instead.
+            if current is None: raise Unavailable("cursor signing key not configured")
+            seek_created_at,seek_post_uid=decode_cursor(cursor,filters,current,previous)
+            where.append("(p.created_at>? OR (p.created_at=? AND p.post_uid>?))"); args.extend([seek_created_at,seek_created_at,seek_post_uid])
         if where: sql+=" WHERE "+" AND ".join(where)
-        sql+=" ORDER BY p.created_at,p.post_uid LIMIT ?"; args.append(min(int(filters.get("limit",100)),200)); return [dict(r) for r in self.db.execute(sql,args)]
+        sql+=" ORDER BY p.created_at,p.post_uid LIMIT ?"; args.append(limit+1)  # +1 probes for a next page without a second COUNT query
+        rows=[dict(r) for r in self.db.execute(sql,args)]
+        more=len(rows)>limit; rows=rows[:limit]
+        next_cursor=encode_cursor(rows[-1]["created_at"],rows[-1]["post_uid"],filters,current) if (more and rows and current is not None) else None
+        return {"posts":rows,"next_cursor":next_cursor}
     def aliases(self,alias):
         rows=[dict(r) for r in self.db.execute("SELECT * FROM aliases WHERE alias=? ORDER BY resource_uid",(alias,))]; return {"alias":alias,"ambiguous":len(rows)>1,"matches":rows}

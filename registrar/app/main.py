@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI,Header,HTTPException,Query,Request
 from .auth import authenticate_identity
 from .db import connect,migrate
-from .service import Conflict,Forbidden,Invalid,Registrar
+from .service import Conflict,Forbidden,Invalid,Registrar,Unavailable
 from .attestation import verify as verify_attestation
 from .runtime import ensure_runtime_mode,verification_enabled
 
@@ -22,6 +22,24 @@ def invoke(fn):
     except Conflict as exc: raise HTTPException(409,str(exc)) from exc
     except Forbidden as exc: raise HTTPException(403,str(exc)) from exc
     except Invalid as exc: raise HTTPException(400,str(exc)) from exc
+    except Unavailable as exc: raise HTTPException(503,str(exc)) from exc
+
+def cursor_keys():
+    """Resolve the cursor-signing key material for this request. Read fresh
+    per call (not cached at import time) so an operator can rotate the
+    mounted secret file without restarting the container -- the same
+    live-rotation posture the /v1/verifications key lookup below already
+    uses. `REGISTRAR_CURSOR_KEY_FILE` is the Docker secret OPERATIONS.md and
+    compose.example.yml already declare; the `_PREVIOUS` pair is optional and
+    only needed while a key rotation's bounded overlap window is open
+    (design.md §11) -- absent by default, no compose change required to keep
+    working exactly as today."""
+    def read(path): return open(path,"rb").read().strip() if path else None
+    current_file=os.environ.get("REGISTRAR_CURSOR_KEY_FILE"); current_id=os.environ.get("REGISTRAR_CURSOR_KEY_ID","current")
+    previous_file=os.environ.get("REGISTRAR_CURSOR_KEY_FILE_PREVIOUS"); previous_id=os.environ.get("REGISTRAR_CURSOR_KEY_ID_PREVIOUS")
+    current=(current_id,read(current_file)) if current_file else None
+    previous=(previous_id,read(previous_file)) if previous_file and previous_id else None
+    return current,previous
 
 @app.get("/health/live")
 def live(): return {"ok":True}
@@ -66,9 +84,10 @@ def get_post(post_uid:str,authorization:str|None=Header(None)):
     if not row: raise HTTPException(404,"unknown post")
     return dict(row)
 @app.get("/v1/posts")
-def posts(assigned_to:str|None=None,role:str|None=None,state:str|None=None,board:str|None=None,registration_state:str|None=None,root:str|None=None,limit:int=Query(100,ge=1,le=200),authorization:str|None=Header(None)):
+def posts(assigned_to:str|None=None,role:str|None=None,state:str|None=None,board:str|None=None,registration_state:str|None=None,root:str|None=None,limit:int=Query(100,ge=1,le=200),cursor:str|None=None,authorization:str|None=Header(None)):
     identity(authorization,"post:read")
-    return {"posts":service.posts(assigned_to=assigned_to,role=role,state=state,board=board,registration_state=registration_state,root=root,limit=limit)}
+    current,previous=cursor_keys()
+    return invoke(lambda:service.posts(assigned_to=assigned_to,role=role,state=state,board=board,registration_state=registration_state,root=root,limit=limit,cursor=cursor,cursor_keys=(current,previous)))
 @app.get("/v1/aliases/{alias:path}")
 def aliases(alias:str,authorization:str|None=Header(None)):
     identity(authorization,"post:read"); return service.aliases(alias)

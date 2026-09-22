@@ -1,15 +1,20 @@
-import hashlib,json,sqlite3,tempfile,threading,unittest,uuid
+import base64,hashlib,json,sqlite3,tempfile,threading,unittest,uuid
 from pathlib import Path
 from registrar.app.db import connect,migrate
 import registrar.app.db as db_module
 from registrar.app.filename import FilenameError,check_header,parse_filename
-from registrar.app.service import Conflict,Forbidden,Registrar
+from registrar.app.service import Conflict,Forbidden,Invalid,Registrar,Unavailable
 from registrar.app import auth
 from registrar.importer.legacy import plan
 from registrar.verifier.job import verify as run_verifier
 from registrar.app.runtime import ensure_runtime_mode,verification_enabled
 
 ASSIGN=lambda who:[{"agent_id":who,"role":"responsible"}]
+# Test-fixture-only HMAC key material for GET /v1/posts cursor pagination
+# (WS4). Never real secrets; mirrors the (key_id, key_bytes) tuple shape
+# main.py's cursor_keys() resolves from REGISTRAR_CURSOR_KEY_FILE.
+CURSOR_KEY_A=("key-a",b"unit-test-cursor-signing-key-aaaa")
+CURSOR_KEY_B=("key-b",b"unit-test-cursor-signing-key-bbbb")
 class RegistrarTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.path=str(Path(self.tmp.name)/"r.db")
@@ -49,7 +54,12 @@ class RegistrarTests(unittest.TestCase):
         with self.assertRaises(Conflict): self.r.publish("bishop","pub-other",other["post_uid"],{**payload,"filename":other_name})
         self.assertEqual(post["post_uid"],self.r.aliases(name)["matches"][0]["resource_uid"])
     def test_assignment_query(self):
-        root=self.root(); rows=self.r.posts(assigned_to="bishop",role="responsible",root=root["thread_id"]); self.assertEqual(1,len(rows))
+        # NOTE (jackie-chan, WS4 cursor pagination): Registrar.posts() now
+        # returns {"posts":[...],"next_cursor":...} instead of a bare list,
+        # so GET /v1/posts can report a next_cursor alongside rows without a
+        # second query-shaping layer in main.py. This is the one pre-existing
+        # call site touched for that contract change.
+        root=self.root(); rows=self.r.posts(assigned_to="bishop",role="responsible",root=root["thread_id"])["posts"]; self.assertEqual(1,len(rows))
     def test_parser_pid_and_exact_binding(self):
         value="01ARZ3NDEKTSV4RRFFQ69G5FAV"; name=f"TS-20260917-bishop-004.001-WORKING__by-bishop__pid-{value}.txt"; parsed=parse_filename(name)
         self.assertEqual(value,parsed["pid"]); self.assertIsNone(parsed["slug"])
@@ -338,5 +348,107 @@ class RegistrarTests(unittest.TestCase):
             db4.close(); gc.collect()
         finally:
             tmp4.cleanup(); auth.PasswordHasher=old
+
+    # --- WS4 (jackie-chan, 2026-09-22): GET /v1/posts stable-cursor pagination ---
+    # AC26: "Stable-cursor tests show no duplicate/reordered rows and reject
+    # filter reuse." Registrar.posts() is exercised directly (this suite's
+    # existing convention -- no test here ever spins up FastAPI/TestClient),
+    # since main.py's handler is a thin pass-through to it.
+
+    def _seed_root_with_children(self,name,count):
+        root=self.root(name)
+        for i in range(count):
+            self.r.reserve_post("bishop",f"{name}-child-{i}",root["thread_id"],{"board":"requests","author":"bishop","state":"WORKING","assignments":ASSIGN("bishop")})
+        return root
+
+    def test_ac26_stable_cursor_walk_has_no_duplicates_or_reordering(self):
+        root=self._seed_root_with_children("walk",11)
+        baseline=self.r.posts(root=root["thread_id"],limit=999,cursor_keys=(CURSOR_KEY_A,None))["posts"]
+        self.assertEqual(12,len(baseline))  # 11 children + post 0 (the opening reservation)
+        walked=[]; cursor=None; pages=0
+        while True:
+            page=self.r.posts(root=root["thread_id"],limit=4,cursor=cursor,cursor_keys=(CURSOR_KEY_A,None))
+            self.assertLessEqual(len(page["posts"]),4)
+            walked.extend(page["posts"]); pages+=1; cursor=page["next_cursor"]
+            self.assertLess(pages,20,"pagination did not terminate")
+            if cursor is None: break
+        self.assertGreater(pages,1)
+        self.assertEqual([r["post_uid"] for r in baseline],[r["post_uid"] for r in walked])
+        self.assertEqual(len(walked),len({r["post_uid"] for r in walked}))
+
+    def test_insert_before_cursor_position_is_excluded_insert_after_is_included(self):
+        root=self._seed_root_with_children("mid",5)
+        root_uid=self.db.execute("SELECT root_uid FROM roots WHERE thread_id=?",(root["thread_id"],)).fetchone()[0]
+        page1=self.r.posts(root=root["thread_id"],limit=3,cursor_keys=(CURSOR_KEY_A,None))
+        self.assertIsNotNone(page1["next_cursor"])
+        consumed={r["post_uid"] for r in page1["posts"]}
+        # Backdated row: sorts before every row already consumed. The cursor's
+        # own guarantee (§7/§11) is that it never resurfaces once the walk has
+        # passed its position -- not merely that "new rows get appended".
+        early_uid=str(uuid.uuid4())
+        self.db.execute("INSERT INTO posts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (early_uid,root_uid,9001,9001,"WORKING","requests",None,None,"2000-01-01T00:00:00Z","bishop",None,None,None,"reserved","2099-01-01T00:00:00Z","native",None))
+        self.db.execute("INSERT INTO assignments VALUES (?,?,?,1)",(early_uid,"bishop","responsible"))
+        # A newly reserved row sorts after everything already scanned and must
+        # be picked up naturally by continuing the walk.
+        late=self.r.reserve_post("bishop","mid-late",root["thread_id"],{"board":"requests","author":"bishop","state":"WORKING","assignments":ASSIGN("bishop")})
+        rest=[]; cursor=page1["next_cursor"]
+        while cursor is not None:
+            page=self.r.posts(root=root["thread_id"],limit=3,cursor=cursor,cursor_keys=(CURSOR_KEY_A,None))
+            rest.extend(page["posts"]); cursor=page["next_cursor"]
+        rest_uids={r["post_uid"] for r in rest}
+        self.assertNotIn(early_uid,rest_uids)
+        self.assertIn(late["post_uid"],rest_uids)
+        self.assertEqual(set(),consumed & rest_uids)
+
+    def test_tampered_cursor_is_rejected(self):
+        root=self._seed_root_with_children("tamper",3)
+        page=self.r.posts(root=root["thread_id"],limit=1,cursor_keys=(CURSOR_KEY_A,None))
+        cursor=page["next_cursor"]; self.assertIsNotNone(cursor)
+        idx=len(cursor)//2; flipped="A" if cursor[idx]!="A" else "B"
+        tampered=cursor[:idx]+flipped+cursor[idx+1:]
+        with self.assertRaises(Invalid):
+            self.r.posts(root=root["thread_id"],limit=1,cursor=tampered,cursor_keys=(CURSOR_KEY_A,None))
+
+    def test_cursor_reused_under_changed_filters_is_rejected(self):
+        root=self._seed_root_with_children("filters",3)
+        page=self.r.posts(root=root["thread_id"],state="WORKING",limit=1,cursor_keys=(CURSOR_KEY_A,None))
+        cursor=page["next_cursor"]; self.assertIsNotNone(cursor)
+        with self.assertRaises(Invalid):
+            self.r.posts(root=root["thread_id"],state="OPEN",limit=1,cursor=cursor,cursor_keys=(CURSOR_KEY_A,None))
+
+    def test_cursor_key_rotation_bounded_overlap(self):
+        """design.md §11: 'Rotation supports a bounded overlap of
+        current/previous key IDs; new cursors use only current keys, old
+        cursors expire quickly.' A is retiring, B is the new current key."""
+        root=self._seed_root_with_children("rotate",5)
+        page=self.r.posts(root=root["thread_id"],limit=2,cursor_keys=(CURSOR_KEY_A,None))
+        cursor=page["next_cursor"]; self.assertIsNotNone(cursor)
+        # Overlap window open: a cursor minted under the now-previous key A
+        # still verifies while B is current.
+        rotated=self.r.posts(root=root["thread_id"],limit=2,cursor=cursor,cursor_keys=(CURSOR_KEY_B,CURSOR_KEY_A))
+        self.assertIsInstance(rotated["posts"],list)
+        next_cursor=rotated["next_cursor"]
+        if next_cursor:
+            payload=json.loads(base64.urlsafe_b64decode(next_cursor+"="*(-len(next_cursor)%4)))["payload"]
+            self.assertEqual(CURSOR_KEY_B[0],payload["kid"])  # new cursors mint under current only, never previous
+        # Overlap window closed: A retired (no previous configured). The same
+        # cursor, still minted under A, is now rejected -- "old cursors
+        # expire quickly" once the operator ends the overlap.
+        with self.assertRaises(Invalid):
+            self.r.posts(root=root["thread_id"],limit=2,cursor=cursor,cursor_keys=(CURSOR_KEY_B,None))
+
+    def test_cursor_without_signing_key_degrades_to_pre_pagination_behavior(self):
+        """Backward compatibility: on a deployment where
+        REGISTRAR_CURSOR_KEY_FILE is not yet provisioned, GET /v1/posts must
+        behave exactly as it did before this change -- bounded page, no
+        error, no next_cursor advertised. A client that explicitly sends a
+        cursor anyway gets a clear 503-mapped Unavailable, not a silently
+        ignored parameter."""
+        root=self._seed_root_with_children("nokey",3)
+        page=self.r.posts(root=root["thread_id"],limit=1)  # cursor_keys defaults to (None,None)
+        self.assertIsNone(page["next_cursor"])
+        with self.assertRaises(Unavailable):
+            self.r.posts(root=root["thread_id"],limit=1,cursor="whatever")
 
 if __name__=="__main__": unittest.main()
