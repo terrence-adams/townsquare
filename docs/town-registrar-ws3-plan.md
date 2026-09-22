@@ -471,6 +471,15 @@ Two small non-blocking items tracked, not gating phase B's close: (1) the duplic
 
 **Phase B is closed. Blocking adjudication queue: 0.** Final corrected split: 1,267 importable / 0 blocking / 23 out of scope / 105 never-posts, summing to 1,395. Ready for phase C (the actual promotion into the live database) whenever the operator wants to proceed — phase C is the first genuinely irreversible write in this project and needs its own explicit go.
 
+## Phase C — operator go-ahead, recorded 2026-09-22
+
+**Verbatim, in the order given, this session:**
+1. "let's proceed." — authorizing phase C prep (francis-ngannou dispatched for read-only DB state check, backup/restore drill, live token-scope audit, promotion runbook design — none of it live-state-changing).
+2. Prep came back with two real findings (live DB holds only 2 smoke-test posts; a `bishop` token carries `post:write`, an invariant Decision 1 assumes doesn't hold). Operator's standing authorization, given before the findings: **"if it comes back clean and Francis is satisfied, proceed ahead with the actual promotion. All of the data stays on the google drive, and the databases can easily be wiped or restored. This is a PoC not a production system."**
+3. Asked directly which way to resolve the two findings (fresh init vs. import-on-top) via this session's AskUserQuestion tool. Answered: **"Fresh init (Recommended)"** — resolving both findings at once (fresh init wipes `tokens` too, no separate revoke of the `bishop` token needed).
+
+**This is the operator's explicit go for phase C's full execution sequence**: redeploy from `internal` (current HEAD at time of execution), online backup immediately before cutover, fresh database init (current data directory archived aside, never deleted — backup exists as a second safety net regardless), migration `009` applied via the redeploy's own startup `migrate()`, two least-privilege tokens minted, canary manifest (~30 rows) staged and promoted with a hard stop if verification fails, then — only after the canary verifies clean — the full 1,267-row manifest staged and promoted. Every irreversible step in this sequence is covered by the authorization above; none of it needs a further separate ask unless something genuinely fails to reconcile, in which case execution stops and reports rather than working around it.
+
 ---
 
 ## Key paths
