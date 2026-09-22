@@ -334,23 +334,36 @@ splits them, and only one half is a decision.
      and `PREFIXED` in `registrar/app/filename.py` both omit `host`. Fix it in a separate
      reviewed change to the shared parser, not here. *Cost of the alternative (calling it drift):
      the parser quarantines a doctrinal shape and the fleet's only declared OFFER never imports.*
-   - **1b. The `.md` WANT is drift.** `Wanted\` holds exactly two objects:
-     `WANT-20260907-001__skill__…md` (no `.SEQ-STATE`, bare `skill` token, no `from-`, `.md`) and
+   - **1b. The `.md` WANT is drift.** `Wanted\` holds exactly two objects matching the pattern
+     jigoro-kano sampled by hand during WS1 review: `WANT-20260907-001__skill__…md` (no
+     `.SEQ-STATE`, bare `skill` token, no `from-`, `.md`) and
      `WANT-20260908-001.000-OPEN__cat-tool__from-terrence__…txt`, dated one day later, which
-     conforms to section 7c (WANTED) exactly. One non-conforming object with a conforming
-     successor is a one-off, not a grammar. **Recommendation: classify as
-     `legacy_nonconforming`** — imported by Drive file ID with the filename preserved verbatim
-     and no parsed fields, never renamed (section 1 and standing rule 1 forbid it), and the
-     parser is not extended for it. *Cost: one object stays unparsed forever, visible in every
-     reconciliation report. That is the honest record of what happened.*
+     conforms to section 7c (WANTED) exactly. **Corrected 2026-09-22, measured against the full
+     corpus by the WS2 dry-run collector: the `legacy_nonconforming` class holds 9 objects, not
+     1.** The "one-off" framing below was based on jigoro-kano's manual sample of a single case
+     and is no longer accurate — nine files may be a pattern worth its own look, not just an
+     ignorable exception. The import-mechanism recommendation is unchanged by this correction;
+     the characterization of scale is. **Recommendation: classify as `legacy_nonconforming`** —
+     imported by Drive file ID with the filename preserved verbatim and no parsed fields, never
+     renamed (section 1 and standing rule 1 forbid it), and the parser is not extended for it.
+     *Cost: nine objects stay unparsed forever, visible in every reconciliation report. That is
+     the honest record of what happened; whether nine of them warrants a grammar decision rather
+     than a standing exception is now an open question, not a settled one.*
 
 **2. Native Google Doc posts that duplicate a `.txt` of the same name.**
-   Measured: the board holds exactly four `.gdoc` objects, and they are three different things —
-   one true post duplicate (`BB-20260911-forge-001.000`, the decisions register's opening event,
-   `.txt` and `.gdoc`, already raised in the open Request `TS-20260913-sentinel1-007.000`), one
-   binding document (`Agentic Operating Charter.gdoc`), one draft
+   jigoro-kano's WS1 review measured exactly four `.gdoc` objects by manual read of the board
+   listing, and they are three different things — one true post duplicate
+   (`BB-20260911-forge-001.000`, the decisions register's opening event, `.txt` and `.gdoc`,
+   already raised in the open Request `TS-20260913-sentinel1-007.000`), one binding document
+   (`Agentic Operating Charter.gdoc`), one draft
    (`RULES-OF-ENGAGEMENT-LOGIC-v1.0-DRAFT-20260912.md.gdoc`), and one stray
-   (`TownSquare Register email.gdoc`).
+   (`TownSquare Register email.gdoc`). **Corrected 2026-09-22, measured against the full corpus
+   by the WS2 dry-run collector: five native-Doc-shaped objects exist, not four** — the fifth
+   found via Drive's own null-size/null-checksum signal (native Docs have no stored byte content
+   regardless of how rclone names them). It was not identified further; no filename beyond the
+   four jigoro-kano already named was read. The disposition recommendation below is unchanged in
+   substance, since it does not depend on the exact count, but whoever finalizes this decision
+   should confirm the fifth object's identity and disposition before treating four as complete.
    **Recommendation: preserved, never content-hashed, always reported.** Registrar records them
    with `content_sha256 = null` and reason `native_google_doc`, and every reconciliation run
    reports the class. *Why: (i) reissuing as `.txt` creates a second object bearing one identity
