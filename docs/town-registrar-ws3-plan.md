@@ -309,15 +309,146 @@ The adjudication queue fell from 236 to 16 (93% reduction) because most of the o
 
 ---
 
+## Phase B — jackie-chan (2026-09-22)
+
+Scope: regenerate the report with the 8-misfiled-document exclusion applied, settle the STRICT/EXTENDED
+adjudication-candidate dispute flagged open at CP-A2, explain the WS2→WS3-A flag-count delta, build the
+grouped adjudication decision sheet, and design (not build) `adjudication-decisions.json`. Offline only;
+touched `registrar/importer/legacy.py` only (not `filename.py`, not service.py/auth.py/migrations); nothing
+live touched. Existing test suite re-run clean (`pytest registrar/tests/` — 76 passed, no regressions).
+Row-level detail (per-row lists, all example filenames beyond what's below) stays in
+`C:\Workspace\townsquare-registrar-dryrun\` per the standing disclosure-boundary rule (gsp, phase A).
+
+**1. Report regenerated with the 8-doc exclusion applied.** `legacy.py` gained a homogeneity check
+(`_is_want_shaped_md`, a plain regex over the filename only — `filename.py` untouched) that separates
+decision 1b's true scope (`WANT-<date>-<local_number>[__...].md`) from folder+extension coincidence. Of the
+prior 9 `.md`-in-board-folder rows, exactly 1 matches; the other 8 now route to `non_post_artifacts` with
+`reason: "misfiled_standing_document"`, same disposition as every other standing document. New file:
+`report-ws3-phaseB-final.json` (report-ws3-phaseA-final.json kept as-is for the prior audit trail).
+Corrected counts: `legacy_nonconforming` 9→1, `non_post_artifacts` 81→89, everything else unchanged.
+Arithmetic reconciles exactly against the frozen corpus: `directories_excluded(12) + non_post_artifacts(89)
++ trashed_board_objects(13) + native_doc_objects(1) + grammar_b_offer_host_field(5) + legacy_nonconforming(1)
++ quarantined_invalid_name(7) + posts(1070) + artifacts_signature/sidecars(197) = 1395`, matching the
+operator-confirmed total. Determinism re-proved: two runs over the same frozen `inventory.json` produce a
+byte-identical SHA-256 (`2baa612...`), same guarantee WS2's 3a criterion established.
+
+**2. STRICT(5)/EXTENDED(9) — retired as unreproducible, replaced with a defined, embedded method.**
+Several natural-join attempts against the manifest's own data were tried before concluding this (raw union of
+`duplicate_sequences`+`ambiguous_unnamespaced_aliases` member ids = 49; distinct collision groups = 19+3=22;
+intersection with `unresolved_responsibility` = 4; per-group tie-break signal strength = 0 "no signal"
+groups found) — none reproduces 5 or 9. This **confirms ronda-rousey's CP-A2 finding independently**: the
+figures cannot be recovered from the manifest, and this session (a fresh dispatch, no transcript memory)
+cannot recall the original method either. They are retired, not pattern-matched to.
+
+In their place, `legacy.py`'s `plan()` now computes and embeds `adjudication_candidates: {method_note,
+strict, extended}` directly in the report — re-derivable by anyone who re-runs the planner, closing Helio's
+"a number Sensei may be asked to choose on lives in a transcript" flag for good. The definition, with
+evidence: `duplicate_openings`/`duplicate_sequences` are **excluded** from both lists — Decision 2 already
+treats them as report-after (the renumbering rule is the decision), and this run confirms every one of the
+corpus's 19 collision groups has a real, distinct Drive `created_time` on every member (zero "no signal"
+ties) — so the deterministic rule has real signal in 100% of cases, not just nominally. **STRICT (11)** =
+`ambiguous_unnamespaced_aliases` membership only (design §11's "never auto-binds" class — genuinely
+undecidable by rule). **EXTENDED (15)** = STRICT + the 4 posts whose only warning is
+`unresolved_responsibility` and aren't already in STRICT. Neither list removes anything from `posts` — under
+Decision 2's own rule these rows already import; the list is a review flag layered on top (like the
+`native_doc` cross-cutting tag elsewhere in this report), not a second import gate. This also means the true
+**blocking** adjudication bucket (rows that cannot import without a ruling) is **7** (`quarantined_invalid_name`
+only), not 16 — see the decision sheet for why duplicate/alias/responsibility flags don't gate import.
+
+**3. Flag-count delta (`duplicate_openings` 14→4, `duplicate_sequences` 42→38): CONFIRMED, with one
+precision correction.** Diffed `report.json` (WS2 baseline) against this run by `drive_file_id`: all 10
+`duplicate_openings` losses and all 4 `duplicate_sequences` losses are fully accounted for by exactly **7**
+two-member collision pairs (5 + 2) where one member moved into the new `trashed_board_objects` class — 7
+removed + 7 un-flagged survivors = 14 lost entries, zero residual. Helio's mechanism is right. The correction:
+in **6 of the 7 pairs** the trashed and surviving filenames are *different* (different slug/subject) — these
+were two independent posts that happened to collide on the same thread+`legacy_seq` slot; trashing one
+removed the report's evidence of that coincidence, it does not mean the collision was fake. Only **1 of 7**
+(`BB-20260908-forge-001.000`, "key-attestation-forge-and-forge-now-verifies") has an identical filename on
+both sides — a true same-identity trash-and-repost, and it is the *same* row already named in
+`trashed_rewrite_and_trash_candidates` and held by the operator at CP-A2. So: most of what vanished were
+ordinary numeric coincidences, not repost events — say that plainly rather than the broader "duplicate
+openings were trash-and-repost" reading. Full pair-by-pair evidence:
+`C:\Workspace\townsquare-registrar-dryrun\flag-count-delta-ws2-to-ws3b.json` (a one-time forensic diff
+against the WS2 baseline report, not reproducible from `plan()`'s single-input output alone — kept as a
+standalone artifact rather than folded into the planner).
+
+**4. Grouped decision sheet** — `C:\Workspace\townsquare-registrar-dryrun\adjudication-decision-sheet-phaseB.json`.
+Eight groups, by decision type + distinguishing value, each with a question, row count, up to 3 example
+filenames, and jackie-chan's recommendation (never a ruling):
+
+| Group | Source | Rows | One-line question | Recommendation |
+|---|---|---|---|---|
+| A1 | quarantined | 1 | post-shaped file, duplicate `to-` field — grammar gap or author error? | leave quarantined; file grammar question separately, don't touch `filename.py` for one row |
+| A2 | quarantined | 4 | 3 `.json` logs + 1 `.txt` status statement misfiled into board folders — same pattern as the 8 `.md` docs? | **yes** — reclassify as `non_post_artifacts`, direct analogy to an already-made ruling |
+| A3 | quarantined | 2 | two self-labeled VOID/reissued markers — preserve the explanation anywhere? | exclude as `non_post_artifacts`/void tag; note only |
+| B1 | ambiguous alias | 2 | simple bare+namespaced pair, different subjects | import as-is, no merge needed |
+| B2 | ambiguous alias | 6 | two independent 3-post threads (bishop vs sentinel1) both claim `SEEK-20260913-001` | import both as-is; separately flag the numbering-allocation gap for doctrine attention |
+| B3 | ambiguous alias | 3 | same pattern at local_number=2; one row hints it was already self-renumbered as `sentinel1-009` (unverified) | import as-is; light-touch confirmation only |
+| C | unresolved responsibility | 4 | `from-` present, no `by`/`to` — is NULL `author_agent` correct for an unclaimed OPEN ask? | likely yes (from ≠ claim); confirm since it affects future ownership queries |
+| D | duplicate openings/sequences | 42 | does this class need a ruling at all? | **no** — already governed by a decided, evidenced rule; confirming, not asking |
+
+Already-ruled items are **not** reopened here (8 misfiled `.md` docs — applied; 13 trashed objects — applied,
+unchanged; `BB-20260908-forge-001.000` rewrite-and-trash — still held, new corroborating evidence noted in
+§3 above, not re-adjudicated).
+
+**5. `adjudication-decisions.json` — schema design only, not implemented.**
+
+```
+{
+  "schema_version": 1,
+  "ruled_at": "<date>", "ruled_by": "sensei",
+  "source_decision_sheet": "adjudication-decision-sheet-phaseB.json",
+  "rules": [
+    {
+      "rule_id": "<slug>", "decision_sheet_group_id": "A2",
+      "match": { "drive_file_id": ["<id1>", "<id2>", "..."] },
+      "disposition": "reclassify_non_post_artifact",
+      "note": "<why, carried into the manifest as the audit record>"
+    }
+  ]
+}
+```
+
+Design constraints:
+1. **Explicit `drive_file_id` lists at apply time, never a re-evaluated pattern.** The decision sheet groups
+   by *pattern* for human review; the applied rule binds a *closed list* of ids. A future row that happens to
+   resemble group A2 is never silently swept in by an old ruling — it lands in its normal bucket and needs its
+   own rule. Every row's disposition is traceable to exactly one rule.
+2. **`disposition` is a closed enum**, validated at load — an unknown value is a hard stop, never a silent
+   skip. Starting members (from this sheet's groups): `reclassify_non_post_artifact`,
+   `reclassify_void_marker`, `exclude_pending_grammar_fix`, `accept_null_author_agent`, `import_as_posted`,
+   `hold_for_doctrine_ruling`. A genuinely new disposition needs a planner code change before it can be used
+   — the data file doesn't get to invent new import behavior, same discipline this project already applies to
+   `filename.py`.
+3. **Applied as a second, separate step — `apply_decisions(report, decisions)` — not folded into `plan()`.**
+   `plan(inventory)` stays pure and single-input, preserving every existing test and the current
+   byte-identical guarantee untouched. Composition, not a rewrite, keeps classification and human ruling
+   independently testable.
+4. **Hard-stop on drift, direct application of jigoro-kano's Q3 phase-A finding** ("both functions currently
+   fail OPEN on an unknown manifest section"): a rule whose `drive_file_id` no longer appears in the current
+   inventory's classified rows is a fatal error, not a no-op — the corpus moved since the ruling was made and
+   that must be loud. A flagged row with no covering rule stays in its original bucket (Decision 2: "unanswered
+   group = excluded row... never a silent default") and the run reports a nonzero
+   `decisions_unresolved_count` so "no rule filed" is never confused with "ruled to leave alone."
+5. **Determinism extends to two inputs**, restating WS2's 3a criterion precisely: same `inventory.json` +
+   same `adjudication-decisions.json` → byte-identical manifest. The decision file's own SHA-256 is recorded
+   in the manifest header alongside inventory's — Decision 2's own words, "the decision file is a hashed
+   input artifact" — so any change to either input is visible as a hash change and the manifest records which
+   pair produced it.
+6. **One rule per group** (ip-man's original instruction), not per row and not one rule for the whole file —
+   the 8 groups above are the intended rule boundaries for this pass.
+
+---
+
 ## Key paths
 
 - `C:\Repo\townsquare\docs\town-registrar-design.md` — approved design (§9 import, §13 rollout, §15 acceptance)
 - `C:\Repo\townsquare\docs\town-registrar-ws1-ws2-plan.md` — WS1/WS2 note (working tree copy is revision 2; the d284133 version carries the checkpoint rounds and estimate)
 - `C:\Repo\townsquare\docs\town-registrar-doctrine-amendment-draft.md` — rebased amendment, unadopted
-- `C:\Repo\townsquare\registrar\importer\legacy.py` — planner; no `trashed` handling, `board` hardcoded at line 526
+- `C:\Repo\townsquare\registrar\importer\legacy.py` — planner; trashed/native-Doc/board handling (WS3-A), `.md` WANT-shape homogeneity check + `adjudication_candidates` (WS3 phase B)
 - `C:\Repo\townsquare\registrar\app\service.py` — `stage_import` (line 134) and `promote_import` (line 155); the persisted column list is line 183
 - `C:\Repo\townsquare\registrar\app\auth.py` — line 40 carries the `--scope` append/default defect
 - `C:\Repo\townsquare\registrar\app\runtime.py` — `REGISTRAR_ENV=production` raises; AC 28 is vacuous today
 - `C:\Repo\townsquare\registrar\migrations\005_posts_nullable_forward.sql` — `posts` shape (no CHECK on `state`, nullable `filename`/`author_agent`)
 - `C:\Repo\townsquare\registrar\OPERATIONS.md` — live-action gates, backup/restore, SSH-tunnel access
-- `C:\Workspace\townsquare-registrar-dryrun\` — `inventory.json`, `report.json`, `lsjson-active.json`, `lsjson-trashed.json`, `collector\merge_inventory.py` (row-level; stays outside the repo)
+- `C:\Workspace\townsquare-registrar-dryrun\` — `inventory.json`, `report.json` (WS2 baseline), `report-ws3-phaseA-final.json`, `report-ws3-phaseB-final.json` (current), `flag-count-delta-ws2-to-ws3b.json`, `adjudication-decision-sheet-phaseB.json`, `lsjson-active.json`, `lsjson-trashed.json`, `collector\merge_inventory.py` (row-level; stays outside the repo)

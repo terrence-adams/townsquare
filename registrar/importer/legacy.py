@@ -375,6 +375,30 @@ def _is_native_google_doc(name, mime_type, size=None, provider_checksum=None):
     return False
 
 
+_WANT_MD_RE = re.compile(r"^WANT-\d{8}(?:-[a-z][a-z0-9-]*)?-\d{3,}(?:__.*)?\.md$")
+
+
+def _is_want_shaped_md(name):
+    """WS3 phase B (2026-09-22): homogeneity check for decision 1b's
+    grammar-B standalone WANT shape, .md variant -- the same
+    PREFIX-date(-namespace)?-number skeleton as filename.py's NAME_RE, minus
+    the `.seq-STATE` suffix .txt posts carry (this shape has neither one), with
+    a `.md` extension in place of `.txt`. A plain regex over the filename
+    only; filename.py is never imported here and its .txt grammar is never
+    extended to .md.
+
+    CP-A2 (2026-09-22) found that only 1 of this corpus's 9 `.md`-inside-a-
+    board-folder rows actually matches this shape
+    (`WANT-20260907-001__skill__...md`); the other 8 are ordinary standing
+    documents (audits, protocol drafts, an operating memo) that landed in
+    `Requests`/`Wanted` via folder+extension coincidence, not because they
+    are WANT posts. Operator-confirmed 2026-09-22 disposition: the 8 are
+    excluded from import as ordinary documents, routed the same as
+    `non_post_artifacts` -- never a corpus (post) exception. This function
+    is the fix; see its call site below."""
+    return bool(_WANT_MD_RE.fullmatch(name))
+
+
 def _has_host_field(name):
     """Detect the confirmed-doctrine OFFER `host-` typed field (design section
     7b / W1-5 / jigoro-kano's WS1 finding) without touching filename.py's
@@ -572,14 +596,37 @@ def plan(objects):
             })
             continue
         if ext == ".md":
-            legacy_nonconforming.append({
-                "drive_file_id": obj.get("drive_file_id"),
-                "name": name,
-                "parent_folder_path": obj.get("parent_folder_path"),
-                "board": board,
-                "reason": "legacy_nonconforming",
-                "note": "grammar-B standalone .md post shape; classified only, parser not extended",
-            })
+            # WS3 phase B: split decision 1b's true scope (the WANT-shaped
+            # row) from folder+extension coincidence (everything else),
+            # per the operator's 2026-09-22 ruling. See _is_want_shaped_md's
+            # docstring for the full citation.
+            if _is_want_shaped_md(name):
+                legacy_nonconforming.append({
+                    "drive_file_id": obj.get("drive_file_id"),
+                    "name": name,
+                    "parent_folder_path": obj.get("parent_folder_path"),
+                    "board": board,
+                    "reason": "legacy_nonconforming",
+                    "note": "grammar-B standalone .md WANT post shape (decision 1b); classified only, parser not extended",
+                })
+            else:
+                non_post_artifacts.append({
+                    "drive_file_id": obj.get("drive_file_id"),
+                    "name": name,
+                    "parent_folder_path": obj.get("parent_folder_path"),
+                    "board": board,
+                    "native_doc": False,
+                    "trashed": False,
+                    "reason": "misfiled_standing_document",
+                    "note": (
+                        "a .md file inside a post-bearing folder that does NOT match "
+                        "decision 1b's WANT-<date>-<local_number> grammar-B shape; an "
+                        "ordinary standing document that landed here via folder+"
+                        "extension coincidence, not a WANT post. Operator-confirmed "
+                        "2026-09-22: excluded from import, routed as non_post_artifacts "
+                        "-- never a corpus (post) exception."
+                    ),
+                })
             continue
 
         if _has_host_field(name):
@@ -878,6 +925,87 @@ def plan(objects):
     trashed_sidecar_orphan_count = sum(1 for r in trashed_sidecar_resolution if r["classification"] == "orphan_sidecar")
     trashed_sidecar_live_post_lost_signature_count = sum(1 for r in trashed_sidecar_resolution if r["classification"] == "live_post_lost_signature")
 
+    # WS3 phase B, item 1 (2026-09-22): STRICT/EXTENDED adjudication-
+    # candidate id lists, computed HERE from data already in this report --
+    # not asserted in a chat transcript -- so the count is re-derivable by
+    # anyone who re-runs this planner over the same inventory.json. This
+    # closes Helio's CP-A2 flag ("a number Sensei may be asked to choose on
+    # lives in a transcript"). It SUPERSEDES an earlier, undocumented
+    # recompute (STRICT=5 / EXTENDED=9) that neither ronda-rousey nor this
+    # session could reproduce via a natural join over the manifest's own
+    # data (verified attempts: raw union of duplicate_sequences +
+    # ambiguous_unnamespaced_aliases member ids = 49; distinct collision
+    # groups = 19+3=22; intersection with unresolved_responsibility = 4;
+    # per-group tie-break signal strength = 0 "no signal" groups found).
+    # Those figures are retired as unverifiable, not pattern-matched to.
+    #
+    # duplicate_openings and duplicate_sequences are DELIBERATELY EXCLUDED
+    # from both lists below. Decision 2 ("adjudication is a grouped decision
+    # surface, not a row queue") already treats them as report-after: an
+    # already-decided deterministic rule (design %9 step 7's renumbering)
+    # resolves every collision, and this run's own duplicate_sequences data
+    # shows that rule has REAL signal to work with in all 19 collision
+    # groups in this corpus -- Drive `created_time` is present and distinct
+    # on every member of every group, so no group's renumbering order is an
+    # unanchored coin flip. Restated here with evidence, not just cited.
+    #
+    # STRICT = every post that is a member of `ambiguous_unnamespaced_aliases`
+    #   -- design %11's "aliases are many-to-many observations... never
+    #   chooses silently" means this class is NEVER auto-bound, so whether a
+    #   bare-namespace post and a namespaced post are the "same" logical
+    #   thread or two coincidentally-numbered distinct threads is a genuine,
+    #   unresolvable-by-rule human question (see the grouped decision sheet
+    #   for why the three groups need three different dispositions).
+    # EXTENDED = STRICT plus every post whose warnings are ONLY
+    #   `unresolved_responsibility` (no `by`/`to` field) that is not already
+    #   in STRICT -- i.e. it adds exactly the unresolved_responsibility
+    #   posts STRICT doesn't already cover, never double-counts one that is.
+    #
+    # Membership note: these candidates are NOT removed from `posts` --
+    # Decision 2's rule already imports them. This list is an informational
+    # cross-reference (like the `native_doc` tag elsewhere in this report),
+    # not a second import gate. See the phase-B decision sheet for the
+    # recommended disposition of each group.
+    rows_by_id = {r["drive_file_id"]: r for r in rows}
+    strict_ids = sorted({a["drive_file_id"] for a in ambiguous_unnamespaced_aliases})
+    strict_id_set = set(strict_ids)
+    responsibility_only_ids = sorted({
+        r["drive_file_id"] for r in rows
+        if r["warnings"] == ["unresolved_responsibility"] and r["drive_file_id"] not in strict_id_set
+    })
+    extended_ids = sorted(strict_id_set | set(responsibility_only_ids))
+
+    def _candidate_entry(drive_file_id):
+        row = rows_by_id.get(drive_file_id)
+        flags = []
+        if drive_file_id in strict_id_set:
+            flags.append("ambiguous_unnamespaced_alias")
+        if row and row["warnings"] == ["unresolved_responsibility"]:
+            flags.append("unresolved_responsibility")
+        return {
+            "drive_file_id": drive_file_id,
+            "filename": row["filename"] if row else None,
+            "thread_id": row["thread_id"] if row else None,
+            "flags": flags,
+        }
+
+    adjudication_candidates = {
+        "method_note": (
+            "STRICT = ambiguous_unnamespaced_aliases membership only. "
+            "EXTENDED = STRICT + unresolved_responsibility-only posts not "
+            "already in STRICT. duplicate_openings/duplicate_sequences "
+            "excluded (already governed by design %9 step 7's decided "
+            "renumbering rule, evidenced by real created_time signal on "
+            "every collision group in this corpus). Neither list removes "
+            "anything from `posts`; both import today under the existing "
+            "decided rule -- this is a review flag, not an import gate. "
+            "Supersedes an unreproducible earlier STRICT=5/EXTENDED=9 "
+            "figure; see WS3 phase-B decision sheet."
+        ),
+        "strict": [_candidate_entry(i) for i in strict_ids],
+        "extended": [_candidate_entry(i) for i in extended_ids],
+    }
+
     counts = {
         "posts": len(rows),
         "artifacts_signature": len(artifacts),
@@ -902,6 +1030,8 @@ def plan(objects):
         "trashed_sidecar_orphan": trashed_sidecar_orphan_count,
         "trashed_sidecar_live_post_lost_signature": trashed_sidecar_live_post_lost_signature_count,
         "board_fallback_fired": len(board_fallback_fired),
+        "adjudication_candidates_strict": len(adjudication_candidates["strict"]),
+        "adjudication_candidates_extended": len(adjudication_candidates["extended"]),
     }
 
     return {
@@ -933,6 +1063,7 @@ def plan(objects):
         "trashed_rewrite_and_trash_candidates": trashed_rewrite_and_trash_candidates,
         "trashed_sidecar_resolution": trashed_sidecar_resolution,
         "board_fallback_fired": board_fallback_fired,
+        "adjudication_candidates": adjudication_candidates,
         "next_post_no": next_post_no,
     }
 
