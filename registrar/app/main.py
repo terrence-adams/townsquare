@@ -24,22 +24,72 @@ def invoke(fn):
     except Invalid as exc: raise HTTPException(400,str(exc)) from exc
     except Unavailable as exc: raise HTTPException(503,str(exc)) from exc
 
+CURSOR_KEY_MIN_BYTES=32
+def _load_cursor_key_material(path):
+    """Read and validate cursor-signing key material from `path`. Raises
+    OSError (missing/unreadable file) or ValueError (key material shorter
+    than CURSOR_KEY_MIN_BYTES -- an empty/misconfigured secret must fail
+    instead of silently signing forgeable-but-functioning cursors, F4
+    2026-09-22) on any problem. The two call sites below decide what
+    "raise" means for them: `ensure_cursor_signing_key_at_startup` lets it
+    fail the boot loudly, matching `runtime.ensure_runtime_mode`'s
+    fail-at-import convention; `_read_cursor_key` catches it and degrades to
+    "no usable key" per request instead."""
+    data=open(path,"rb").read().strip()
+    if len(data)<CURSOR_KEY_MIN_BYTES: raise ValueError(f"cursor signing key material is only {len(data)} bytes (need >={CURSOR_KEY_MIN_BYTES}): {path}")
+    return data
+def _read_cursor_key(path):
+    """Per-request key read. gsp's F1 (2026-09-22 review of 466c55d): a
+    present-but-unreadable -- or, per F4, undersized -- key file must not
+    500 every GET /v1/posts call. Only requests that actually send a
+    `cursor` need the key at all (service.posts() itself raises Unavailable
+    when the resolved current key is None); no-cursor requests must stay
+    200 either way. So any failure here degrades to "no usable current
+    key", exactly as if REGISTRAR_CURSOR_KEY_FILE were never set -- this
+    never raises."""
+    if not path: return None
+    try: return _load_cursor_key_material(path)
+    except (OSError,ValueError): return None
+def ensure_cursor_signing_key_at_startup():
+    """Fail loudly at boot if REGISTRAR_CURSOR_KEY_FILE is set but not
+    actually usable -- matches `ensure_runtime_mode`'s fail-at-import
+    convention above. Before this fix, a misprovisioned secret only
+    surfaced as a 500 on the first GET /v1/posts call, behind a green
+    /health/ready (gsp, 2026-09-22 security review of 466c55d)."""
+    path=os.environ.get("REGISTRAR_CURSOR_KEY_FILE")
+    if not path: return
+    try: _load_cursor_key_material(path)
+    except OSError as exc: raise RuntimeError(f"REGISTRAR_CURSOR_KEY_FILE={path!r} is set but unreadable: {exc}") from exc
+    except ValueError as exc: raise RuntimeError(str(exc)) from exc
 def cursor_keys():
     """Resolve the cursor-signing key material for this request. Read fresh
     per call (not cached at import time) so an operator can rotate the
-    mounted secret file without restarting the container -- the same
-    live-rotation posture the /v1/verifications key lookup below already
-    uses. `REGISTRAR_CURSOR_KEY_FILE` is the Docker secret OPERATIONS.md and
-    compose.example.yml already declare; the `_PREVIOUS` pair is optional and
-    only needed while a key rotation's bounded overlap window is open
-    (design.md §11) -- absent by default, no compose change required to keep
-    working exactly as today."""
-    def read(path): return open(path,"rb").read().strip() if path else None
+    mounted secret file without restarting the container. `REGISTRAR_CURSOR_KEY_FILE`
+    is the Docker secret OPERATIONS.md and compose.example.yml already
+    declare.
+
+    No `previous`-key env wiring lives here (F3, 2026-09-22 -- gsp's
+    ownership assignment on 466c55d's review, decision made by jackie-chan):
+    `Registrar.posts()`/`decode_cursor()` in service.py still accept and
+    correctly isolate a `previous` key for a bounded rotation overlap
+    (verify-only, never sign -- see test_cursor_key_rotation_bounded_overlap),
+    so that safe primitive is intact and callable. What's removed is only
+    the *unwired, unvalidated* env-var plumbing that used to live here:
+    none of REGISTRAR_CURSOR_KEY_FILE_PREVIOUS/_ID_PREVIOUS were wired into
+    compose.example.yml (unlike _FILE/_ID), _ID_PREVIOUS had no default and
+    no startup check, and an operator setting _FILE_PREVIOUS without
+    _ID_PREVIOUS (or vice versa) silently produced previous=None with no
+    warning -- an untested, silently-no-op rotation path is worse than no
+    rotation path. Re-add the env resolution -- wired into
+    compose.example.yml, documented in OPERATIONS.md's rotation procedure,
+    and validated at startup (fail loud if one of the paired vars is set
+    without the other) -- in a dedicated, reviewed change when key rotation
+    is actually needed operationally."""
     current_file=os.environ.get("REGISTRAR_CURSOR_KEY_FILE"); current_id=os.environ.get("REGISTRAR_CURSOR_KEY_ID","current")
-    previous_file=os.environ.get("REGISTRAR_CURSOR_KEY_FILE_PREVIOUS"); previous_id=os.environ.get("REGISTRAR_CURSOR_KEY_ID_PREVIOUS")
-    current=(current_id,read(current_file)) if current_file else None
-    previous=(previous_id,read(previous_file)) if previous_file and previous_id else None
-    return current,previous
+    key=_read_cursor_key(current_file) if current_file else None
+    current=(current_id,key) if key is not None else None
+    return current,None
+ensure_cursor_signing_key_at_startup()
 
 @app.get("/health/live")
 def live(): return {"ok":True}

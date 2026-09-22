@@ -55,7 +55,18 @@ def decode_cursor(token,filters,current,previous):
     except Exception as exc: raise Invalid("malformed cursor") from exc
     if not isinstance(envelope,dict): raise Invalid("malformed cursor")
     payload=envelope.get("payload"); sig=envelope.get("sig")
-    if not isinstance(payload,dict) or not isinstance(sig,str): raise Invalid("malformed cursor")
+    if not isinstance(payload,dict): raise Invalid("malformed cursor")
+    # F2 (gsp, 2026-09-22 review of 466c55d): validate `sig` is exactly 64
+    # lowercase hex chars *before* it ever reaches hmac.new/compare_digest.
+    # hmac.compare_digest raises TypeError on non-ASCII str input (e.g. a
+    # "café"/emoji/Cyrillic sig), and the try/except around hmac.new below
+    # only covers the digest computation, not the comparison -- so a
+    # non-ASCII sig used to escape as an unhandled 500 instead of a clean
+    # 400. `s.strip(charset)==""` iff every char of `s` is in `charset`
+    # (strip only removes from the ends inward, so it can only reach empty
+    # if there's no disqualifying char anywhere to stop it) -- correct, not
+    # just a fast-path heuristic.
+    if not isinstance(sig,str) or len(sig)!=64 or sig.strip("0123456789abcdef"): raise Invalid("malformed cursor")
     key_id=payload.get("kid"); key=None
     if current and key_id==current[0]: key=current[1]
     elif previous and previous[0] is not None and key_id==previous[0]: key=previous[1]
@@ -286,7 +297,18 @@ class Registrar:
             if filters.get("role"): where.append("a.role=?"); args.append(filters["role"])
         for key,col in (("state","p.state"),("board","p.board"),("registration_state","p.registration_state"),("root","r.thread_id")):
             if filters.get(key): where.append(col+"=?"); args.append(filters[key])
-        if cursor:
+        if cursor is not None:
+            # ronda-rousey's adversarial probing (2026-09-22 review of
+            # 466c55d): `if cursor:` treated an explicit empty-string
+            # cursor="" as falsy, silently starting a fresh page one --
+            # unlike every other malformed cursor (garbage base64, bad
+            # JSON, wrong version, tampered signature), which all correctly
+            # raise Invalid->400. `cursor is not None` routes "" through
+            # the exact same decode_cursor() path below: urlsafe_b64decode("")
+            # is b"", json.loads(b"") raises, decode_cursor's except
+            # reraises Invalid("malformed cursor") -- no special-cased
+            # branch needed, one validation pipeline for every cursor value.
+            #
             # Can't verify what we have no key to check -- fail closed, never
             # silently ignore the cursor and return page one instead.
             if current is None: raise Unavailable("cursor signing key not configured")

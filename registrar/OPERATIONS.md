@@ -44,6 +44,8 @@ docker build --pull=false -t town-registrar:local .
 docker run --rm town-registrar:local python -m pytest
 ```
 
+Running the suite locally (outside the image), invoke pytest from the repository root (the parent of `registrar/`, e.g. `python -m pytest registrar/tests/`) — `registrar` resolves as an implicit namespace package, so running pytest from inside `registrar/tests/` itself gives a spurious `ModuleNotFoundError` instead of collecting the tests.
+
 Record source commit, image ID, migration version, test report, and rollback image ID.
 
 ## Prepared NAS prototype deployment (live actions; approval required)
