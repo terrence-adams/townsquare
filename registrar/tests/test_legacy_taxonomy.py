@@ -27,7 +27,7 @@ The two SHA-256 hashes must match (they did, at the time this was written).
 """
 import unittest
 
-from registrar.importer.legacy import plan
+from registrar.importer.legacy import DecisionApplicationError, apply_decisions, plan
 
 
 def _row(drive_file_id, name, parent_folder_path, **overrides):
@@ -610,6 +610,291 @@ class WS3TrashedNativeDocBoardTests(unittest.TestCase):
         self.assertIsNone(report["non_post_artifacts"][0]["board"])  # board root -> no board
         self.assertEqual("wanted", report["legacy_nonconforming"][0]["board"])
         self.assertEqual("seeking", report["grammar_b_offer_host_field"][0]["board"])
+
+
+class WS3PhaseBQuarantineRulingTests(unittest.TestCase):
+    """WS3 phase B (jackie-chan, 2026-09-22): jigoro-kano's ruling on the 7
+    quarantined_invalid_name rows. Two structurally different mechanisms,
+    tested separately:
+      - the .json extension gate is a plan()-only, decision-file-free,
+        structural fact (group A2's 3 machine-generated logs).
+      - `renamed_out_of_grammar_posts` and the other two rulings (A1, A2')
+        only ever appear via apply_decisions() acting on a reviewed
+        adjudication-decisions.json (group A3, plus the two lone rows).
+    All fixtures are synthetic -- no real corpus content, per the standing
+    disclosure-boundary rule (gsp's CP1/WS3 review item 4)."""
+
+    def _decisions(self, *rules):
+        return {
+            "schema_version": 1,
+            "ruled_at": "2026-09-22",
+            "ruled_by": "sensei",
+            "source_decision_sheet": "test-fixture",
+            "rules": list(rules),
+        }
+
+    # -- 1. the .json structural gate -------------------------------------
+
+    def test_json_in_board_folder_is_non_post_artifact_machine_generated(self):
+        rows = [_row("j1", "nightly-2026-09-09.json", "Requests")]
+        report = plan(_inventory(rows))
+        self.assertEqual(0, report["counts"]["quarantined_invalid_name"])
+        self.assertEqual(1, report["counts"]["non_post_artifacts"])
+        entry = report["non_post_artifacts"][0]
+        self.assertEqual("machine_generated_artifact", entry["reason"])
+        self.assertEqual(0, len(report["posts"]))
+
+    def test_json_at_board_root_is_also_non_post_artifact(self):
+        """The folder gate still runs first (jigoro-kano's WS1 finding,
+        unchanged): a .json at board root is a non_post_artifact via the
+        ordinary non_board path, not via the new machine_generated_artifact
+        reason -- both land in the same bucket, for different reasons."""
+        rows = [_row("j2", "some-log.json", "")]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, report["counts"]["non_post_artifacts"])
+        self.assertEqual("non_post_artifact", report["non_post_artifacts"][0]["reason"])
+
+    def test_json_gate_applies_to_any_json_object_not_only_ruled_ids(self):
+        """The gate is structural (R7), not a lookup against jigoro-kano's 3
+        named ids -- a synthetic .json row with an unrelated drive_file_id
+        must classify identically."""
+        rows = [_row("some-other-json-id", "phoenix-nightly-report.json", "Bulletin Board")]
+        report = plan(_inventory(rows))
+        self.assertEqual(0, report["counts"]["quarantined_invalid_name"])
+        self.assertEqual("machine_generated_artifact", report["non_post_artifacts"][0]["reason"])
+
+    def test_plan_alone_never_populates_renamed_out_of_grammar_posts(self):
+        rows = [_row("v1", "VOID-DUPLICATE-ID__sample.txt", "Requests")]
+        report = plan(_inventory(rows))
+        self.assertEqual([], report["renamed_out_of_grammar_posts"])
+        self.assertEqual(0, report["counts"]["renamed_out_of_grammar_posts"])
+        # a VOID-named .txt with no rule applied is ordinary quarantine --
+        # the class only exists as apply_decisions()'s output, never plan()'s
+        self.assertEqual(1, report["counts"]["quarantined_invalid_name"])
+
+    # -- 2. apply_decisions: renamed_out_of_grammar ------------------------
+
+    def test_renamed_out_of_grammar_disposition_moves_row_out_of_quarantined(self):
+        rows = [_row("v2", "VOID-DUPLICATE-ID__sample-reissued.txt", "Requests")]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, report["counts"]["quarantined_invalid_name"])
+        decisions = self._decisions({
+            "rule_id": "a3-test", "decision_sheet_group_id": "A3",
+            "match": {"drive_file_id": ["v2"]},
+            "disposition": "renamed_out_of_grammar",
+            "note": "renamed mid-incident after a thread-id collision",
+        })
+        out = apply_decisions(report, decisions)
+        self.assertEqual(0, out["counts"]["quarantined_invalid_name"])
+        self.assertEqual(1, out["counts"]["renamed_out_of_grammar_posts"])
+        entry = out["renamed_out_of_grammar_posts"][0]
+        self.assertEqual("renamed_out_of_grammar", entry["reason"])
+        self.assertEqual("v2", entry["drive_file_id"])
+        # full Drive metadata retained, same "record, don't register" shape
+        # trashed_board_objects already uses
+        for key in ("drive_file_id", "name", "parent_folder_path", "board",
+                    "mime_type", "size", "provider_checksum", "created_time", "modified_time"):
+            self.assertIn(key, entry)
+        # plan() output itself is untouched (apply_decisions never mutates it)
+        self.assertEqual(1, report["counts"]["quarantined_invalid_name"])
+        self.assertEqual([], report["renamed_out_of_grammar_posts"])
+
+    def test_renamed_out_of_grammar_entry_only_ever_carries_drive_metadata_fields(self):
+        """Structural assertion of jigoro-kano's hard constraint: every key
+        on a renamed_out_of_grammar_posts entry must come from the closed
+        set _full_drive_metadata produces (plus reason/note), never a body-
+        content field a future editor might be tempted to add (e.g. a
+        recovered 'id' from the object's own text)."""
+        rows = [_row("v3", "VOID-DUPLICATE-ID-2__sample-reissued.txt", "Requests")]
+        report = plan(_inventory(rows))
+        decisions = self._decisions({
+            "rule_id": "a3-test2", "decision_sheet_group_id": "A3",
+            "match": {"drive_file_id": ["v3"]},
+            "disposition": "renamed_out_of_grammar",
+            "note": "x",
+        })
+        out = apply_decisions(report, decisions)
+        entry = out["renamed_out_of_grammar_posts"][0]
+        allowed_keys = {
+            "drive_file_id", "name", "parent_folder_path", "board", "mime_type",
+            "size", "provider_checksum", "provider_checksum_algo", "created_time",
+            "modified_time", "native_doc", "reason", "note",
+        }
+        self.assertTrue(set(entry.keys()) <= allowed_keys, f"unexpected key(s): {set(entry.keys()) - allowed_keys}")
+
+    # -- 3. apply_decisions: misfiled_standing_document and
+    #       exclude_doctrine_nonconforming --------------------------------
+
+    def test_misfiled_standing_document_disposition_moves_row_to_non_post_artifacts(self):
+        rows = [_row("s1", "STATEMENT-SAMPLE-STATUS-20260909.txt", "Requests")]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, report["counts"]["quarantined_invalid_name"])
+        decisions = self._decisions({
+            "rule_id": "a2prime-test", "decision_sheet_group_id": "A2'",
+            "match": {"drive_file_id": ["s1"]},
+            "disposition": "misfiled_standing_document",
+            "note": "genuine operator-authored statement, no thread id/state token",
+        })
+        out = apply_decisions(report, decisions)
+        self.assertEqual(0, out["counts"]["quarantined_invalid_name"])
+        self.assertEqual(report["counts"]["non_post_artifacts"] + 1, out["counts"]["non_post_artifacts"])
+        moved = [e for e in out["non_post_artifacts"] if e["drive_file_id"] == "s1"][0]
+        self.assertEqual("misfiled_standing_document", moved["reason"])
+
+    def test_exclude_doctrine_nonconforming_disposition_stays_in_quarantined_but_annotated(self):
+        rows = [_row("m1", "TS-20260913-sample-005.002-OPEN__to-forge__to-wolverine__by-sample.txt", "Requests")]
+        report = plan(_inventory(rows))
+        self.assertEqual(1, report["counts"]["quarantined_invalid_name"])
+        decisions = self._decisions({
+            "rule_id": "a1-test", "decision_sheet_group_id": "A1",
+            "match": {"drive_file_id": ["m1"]},
+            "disposition": "exclude_doctrine_nonconforming",
+            "note": "two-owner Request has no doctrine form",
+        })
+        out = apply_decisions(report, decisions)
+        # count UNCHANGED -- still excluded, still in quarantined, just
+        # annotated with the ruled disposition instead of a generic warning
+        self.assertEqual(1, out["counts"]["quarantined_invalid_name"])
+        self.assertEqual(1, len(out["quarantined"]))
+        entry = out["quarantined"][0]
+        self.assertEqual("exclude_doctrine_nonconforming", entry["disposition"])
+        self.assertEqual("a1-test", entry["rule_id"])
+
+    # -- 4. hard-stop on a ruled id no longer present in the inventory -----
+
+    def test_hard_stop_when_ruled_drive_file_id_not_in_current_inventory(self):
+        """Phase-B schema design constraint 4, applied for real: the corpus
+        moved (or the id was mistyped) since the ruling was filed -- this
+        must raise, never silently no-op and never silently apply a partial
+        ruling."""
+        rows = [_row("present-1", "NOT-A-VALID-POST-NAME.txt", "Requests")]
+        report = plan(_inventory(rows))
+        decisions = self._decisions({
+            "rule_id": "ghost-rule", "decision_sheet_group_id": "A1",
+            "match": {"drive_file_id": ["this-id-does-not-exist-in-inventory"]},
+            "disposition": "exclude_doctrine_nonconforming",
+            "note": "x",
+        })
+        with self.assertRaises(DecisionApplicationError):
+            apply_decisions(report, decisions)
+        # confirm it's genuinely a hard stop, not a partial mutation visible
+        # anywhere -- report itself must remain untouched too
+        self.assertEqual(1, report["counts"]["quarantined_invalid_name"])
+
+    def test_hard_stop_is_all_or_nothing_across_multiple_ids_in_one_rule(self):
+        """One rule naming two ids, only one of which is real: the entire
+        rule (and the whole decision file) must fail before EITHER id is
+        disposed of -- never a partial application of a single rule."""
+        rows = [
+            _row("real-a3-1", "VOID-DUPLICATE-ID__x.txt", "Requests"),
+        ]
+        report = plan(_inventory(rows))
+        decisions = self._decisions({
+            "rule_id": "a3-partial", "decision_sheet_group_id": "A3",
+            "match": {"drive_file_id": ["real-a3-1", "ghost-id-not-present"]},
+            "disposition": "renamed_out_of_grammar",
+            "note": "x",
+        })
+        with self.assertRaises(DecisionApplicationError):
+            apply_decisions(report, decisions)
+
+    def test_unknown_disposition_is_rejected_at_validation_before_any_lookup(self):
+        rows = [_row("m2", "NOT-A-VALID-POST-NAME.txt", "Requests")]
+        report = plan(_inventory(rows))
+        decisions = self._decisions({
+            "rule_id": "bad-rule", "decision_sheet_group_id": "A1",
+            "match": {"drive_file_id": ["m2"]},
+            "disposition": "invent_a_new_behavior",
+            "note": "x",
+        })
+        with self.assertRaises(DecisionApplicationError):
+            apply_decisions(report, decisions)
+
+    def test_duplicate_drive_file_id_claimed_by_two_rules_is_rejected(self):
+        rows = [_row("m3", "NOT-A-VALID-POST-NAME.txt", "Requests")]
+        report = plan(_inventory(rows))
+        decisions = self._decisions(
+            {
+                "rule_id": "rule-a", "decision_sheet_group_id": "A1",
+                "match": {"drive_file_id": ["m3"]},
+                "disposition": "exclude_doctrine_nonconforming", "note": "x",
+            },
+            {
+                "rule_id": "rule-b", "decision_sheet_group_id": "A2'",
+                "match": {"drive_file_id": ["m3"]},
+                "disposition": "misfiled_standing_document", "note": "x",
+            },
+        )
+        with self.assertRaises(DecisionApplicationError):
+            apply_decisions(report, decisions)
+
+    def test_wrong_schema_version_is_rejected(self):
+        rows = [_row("m4", "NOT-A-VALID-POST-NAME.txt", "Requests")]
+        report = plan(_inventory(rows))
+        decisions = {
+            "schema_version": 2, "ruled_at": "2026-09-22", "ruled_by": "sensei",
+            "source_decision_sheet": "x",
+            "rules": [{
+                "rule_id": "r1", "decision_sheet_group_id": "A1",
+                "match": {"drive_file_id": ["m4"]},
+                "disposition": "exclude_doctrine_nonconforming", "note": "x",
+            }],
+        }
+        with self.assertRaises(DecisionApplicationError):
+            apply_decisions(report, decisions)
+
+    # -- 5. determinism, extended to two inputs -----------------------------
+
+    def test_apply_decisions_determinism_same_inventory_same_decisions(self):
+        """Phase-B design constraint 5: same inventory + same decision file
+        -> byte-identical manifest."""
+        import hashlib, json as _json
+        rows = [
+            _row("j3", "phoenix-audit.json", "Requests"),
+            _row("v4", "VOID-DUPLICATE-ID__x.txt", "Bulletin Board"),
+            _row("v5", "VOID-DUPLICATE-ID-2__x.txt", "Bulletin Board"),
+            _row("s2", "STATEMENT-X-20260909.txt", "Wanted"),
+            _row("m5", "TS-20260913-sample-005.002-OPEN__to-forge__to-wolverine__by-sample.txt", "Requests"),
+        ]
+        inventory = _inventory(rows)
+        decisions = self._decisions(
+            {"rule_id": "a3-1", "decision_sheet_group_id": "A3",
+             "match": {"drive_file_id": ["v4", "v5"]},
+             "disposition": "renamed_out_of_grammar", "note": "x"},
+            {"rule_id": "a2p-1", "decision_sheet_group_id": "A2'",
+             "match": {"drive_file_id": ["s2"]},
+             "disposition": "misfiled_standing_document", "note": "x"},
+            {"rule_id": "a1-1", "decision_sheet_group_id": "A1",
+             "match": {"drive_file_id": ["m5"]},
+             "disposition": "exclude_doctrine_nonconforming", "note": "x"},
+        )
+        a = _json.dumps(apply_decisions(plan(inventory), decisions), indent=2, sort_keys=True)
+        b = _json.dumps(apply_decisions(plan(inventory), decisions), indent=2, sort_keys=True)
+        self.assertEqual(hashlib.sha256(a.encode()).hexdigest(), hashlib.sha256(b.encode()).hexdigest())
+        self.assertEqual(a, b)
+        report = _json.loads(a)
+        self.assertEqual(1, report["counts"]["quarantined_invalid_name"])  # only m5 (a1) remains
+        self.assertEqual(2, report["counts"]["renamed_out_of_grammar_posts"])
+        self.assertIn("decisions_sha256", report["decisions_header"])
+
+    def test_decisions_header_records_hash_and_applied_rules(self):
+        rows = [_row("v6", "VOID-DUPLICATE-ID__y.txt", "Requests")]
+        report = plan(_inventory(rows))
+        decisions = self._decisions({
+            "rule_id": "a3-header-test", "decision_sheet_group_id": "A3",
+            "match": {"drive_file_id": ["v6"]},
+            "disposition": "renamed_out_of_grammar", "note": "x",
+        })
+        out = apply_decisions(report, decisions)
+        header = out["decisions_header"]
+        self.assertEqual(1, header["schema_version"])
+        self.assertEqual("sensei", header["ruled_by"])
+        self.assertTrue(header["decisions_sha256"])
+        self.assertEqual(64, len(header["decisions_sha256"]))  # sha256 hex digest length
+        self.assertEqual(
+            [{"rule_id": "a3-header-test", "drive_file_id": "v6", "disposition": "renamed_out_of_grammar"}],
+            header["rules_applied"],
+        )
 
 
 if __name__ == "__main__":

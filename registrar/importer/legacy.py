@@ -114,6 +114,25 @@ Taxonomy design notes (why the branching order below is what it is):
      class carries full per-object Drive metadata, not just a count: it may
      be the only surviving record of these objects once that window closes.
 
+  8. `.json` extension gate and `renamed_out_of_grammar_posts` (WS3 phase B,
+     jigoro-kano's 2026-09-22 ruling on the 7 `quarantined_invalid_name`
+     rows, approved by Sensei) -- two different shapes of "not a post",
+     handled two different ways:
+       - group A2 (3 rows): a `.json` object inside a post-bearing folder is
+         a STRUCTURAL fact, checked right alongside the `.md` gate
+         (extension-before-parsing, R7) -- doctrine section 2 (FILE FORMAT)
+         admits plain `.txt` only, so `plan()` classifies it as
+         `non_post_artifacts` / `machine_generated_artifact` on its own, no
+         decision-file rule needed, for ANY `.json` object in the corpus,
+         not only the 3 rows this ruling happened to name.
+       - group A3 (2 rows): a JUDGMENT call (the author renamed a real post
+         mid-incident after a thread-ID collision), so `plan()` never
+         assigns this class by itself. `renamed_out_of_grammar_posts` exists
+         as a possible OUTCOME of `apply_decisions()` (defined below `plan()`
+         in this file) applying a reviewed `adjudication-decisions.json`
+         rule -- see that function's docstring for the hard constraint on
+         what may ever populate one of its rows.
+
 Backward compatibility with the pre-existing report shape (relied on by
 registrar/app/service.py's `stage_import`, which parses `manifest["posts"]`
 and `manifest.get("artifacts", [])` again on its own and by
@@ -146,7 +165,7 @@ iteration order is insertion order (language-guaranteed, not hash-order), and
 order recursively; the one thing that guarantee does NOT cover is array
 (list) element order, which is why every list here is explicitly ordered.
 """
-import argparse, json, re, uuid
+import argparse, hashlib, json, re, uuid
 from collections import Counter, defaultdict
 from registrar.app.filename import FilenameError, parse_filename
 
@@ -305,6 +324,8 @@ def _extension(name):
         return ".gdoc"
     if lower.endswith(".md"):
         return ".md"
+    if lower.endswith(".json"):
+        return ".json"
     if lower.endswith(".txt"):
         return ".txt"
     return None
@@ -485,6 +506,14 @@ def plan(objects):
     trashed_board_objects = []  # WS3 item 2: Drive-trashed objects inside a
                                  # post-bearing board folder -- excluded from
                                  # posts/artifacts, full metadata retained
+    renamed_out_of_grammar_posts = []  # WS3 phase B, group A3: NEVER
+                                 # populated by plan() itself -- only ever
+                                 # populated by apply_decisions() acting on a
+                                 # ruled adjudication-decisions.json rule.
+                                 # Declared here (always present, always an
+                                 # empty list from plan() alone) so the
+                                 # manifest shape is stable whether or not a
+                                 # decision file is ever applied.
 
     # Shortcut objects (gsp's CP1 finding): a structurally SEPARATE input
     # list from the collector, already isolated at the source from the
@@ -593,6 +622,35 @@ def plan(objects):
                 "content_sha256": None,
                 "content_sha256_status": "native_google_doc",
                 "reissued_as_txt": False,
+            })
+            continue
+        if ext == ".json":
+            # WS3 phase B (jigoro-kano's 2026-09-22 ruling, group A2): a
+            # .json object inside a post-bearing folder is a machine-
+            # generated artifact, never a post, by STRUCTURE -- doctrine
+            # section 2 (FILE FORMAT) admits plain .txt only. Same gate
+            # pattern and same point in the branching order as the .md gate
+            # immediately below (extension-before-parsing, R7): this is a
+            # fact about the extension, not a per-row judgment call, so no
+            # decision-file rule is used or needed here. Applies to any
+            # .json object in the corpus, not only the 3 rows this ruling
+            # happened to name.
+            non_post_artifacts.append({
+                "drive_file_id": obj.get("drive_file_id"),
+                "name": name,
+                "parent_folder_path": obj.get("parent_folder_path"),
+                "board": board,
+                "native_doc": False,
+                "trashed": False,
+                "reason": "machine_generated_artifact",
+                "note": (
+                    "a .json file inside a post-bearing folder; doctrine "
+                    "section 2 (FILE FORMAT) admits plain .txt only, so a "
+                    ".json object can never be a post by construction -- "
+                    "structural, extension-based exclusion (R7: extension-"
+                    "before-parsing), same gate pattern as .md, not a "
+                    "decision-file rule"
+                ),
             })
             continue
         if ext == ".md":
@@ -1032,6 +1090,7 @@ def plan(objects):
         "board_fallback_fired": len(board_fallback_fired),
         "adjudication_candidates_strict": len(adjudication_candidates["strict"]),
         "adjudication_candidates_extended": len(adjudication_candidates["extended"]),
+        "renamed_out_of_grammar_posts": len(renamed_out_of_grammar_posts),
     }
 
     return {
@@ -1062,16 +1121,295 @@ def plan(objects):
         "trashed_board_objects": trashed_board_objects,
         "trashed_rewrite_and_trash_candidates": trashed_rewrite_and_trash_candidates,
         "trashed_sidecar_resolution": trashed_sidecar_resolution,
+        "renamed_out_of_grammar_posts": renamed_out_of_grammar_posts,
         "board_fallback_fired": board_fallback_fired,
         "adjudication_candidates": adjudication_candidates,
         "next_post_no": next_post_no,
     }
 
 
+# ---------------------------------------------------------------------------
+# adjudication-decisions.json application (WS3 phase B item 5's schema,
+# designed but not implemented there; used for real for the first time here,
+# for jigoro-kano's 2026-09-22 ruling on the 7 quarantined_invalid_name rows).
+#
+# `plan(inventory)` stays pure and single-input above this line, untouched in
+# signature and behavior (phase-B design constraint 3) -- every existing test
+# and the byte-identical determinism guarantee hold exactly as before.
+# `apply_decisions(report, decisions)` is a SECOND, separate step that
+# composes on top, so classification (structural, rule-free) and human
+# ruling (decision-file-driven) stay independently testable.
+# ---------------------------------------------------------------------------
+
+DECISIONS_SCHEMA_VERSION = 1
+
+# Closed enum, scoped to the dispositions actually ruled and implemented this
+# pass (jigoro-kano's 2026-09-22 ruling). Per phase-B design constraint 2,
+# "a genuinely new disposition needs a planner code change before it can be
+# used" -- a future ruling that needs a new disposition adds both the enum
+# member AND its application branch in apply_decisions() together, never
+# just the string. `exclude_pending_grammar_fix` (decision 1a's 5 OFFER
+# host- rows) is deliberately NOT a member here: that disposition was never
+# implemented as a decision-file rule and stays reserved/unused until it is.
+DECISION_DISPOSITIONS = {
+    "exclude_doctrine_nonconforming",
+    "misfiled_standing_document",
+    "renamed_out_of_grammar",
+}
+
+
+class DecisionApplicationError(Exception):
+    """Raised when adjudication-decisions.json cannot be safely applied.
+    Fail loud, never degrade: jigoro-kano's Q3 phase-A finding ("both
+    functions [stage_import/promote_import] currently fail OPEN on an
+    unknown manifest section") is the exact failure shape this exception
+    exists to prevent on the decision-file path. Decision 2's own rule --
+    "unanswered group = excluded row... never a silent default" -- extends
+    the same way to a ruled row whose identity has drifted out of the
+    current inventory: the run must stop and report the mismatch, not
+    silently apply a partial ruling or reconcile the discrepancy on its own
+    (an independent planner run either CONFIRMS or CONTRADICTS a ruling; it
+    never adjusts itself to match one)."""
+
+
+def _decisions_sha256(decisions):
+    """SHA-256 over the decision file's CANONICAL JSON, not raw file bytes
+    -- the identical discipline registrar/app/service.py's own `canonical()`
+    already applies before hashing a manifest for idempotency (sort_keys,
+    ':'/',' separators, no incidental whitespace), so two decision files
+    that differ only in formatting hash identically and the recorded digest
+    is stable across re-saves of the same rules."""
+    body = json.dumps(decisions, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _validate_decisions(decisions):
+    """Structural validation of the decision file itself -- schema_version,
+    required top-level keys, and per-rule shape/disposition/uniqueness.
+    Per-rule drive_file_id EXISTENCE against the current inventory is
+    deliberately NOT checked here -- that needs the report, so it happens in
+    apply_decisions() itself, before any row is disposed of."""
+    if not isinstance(decisions, dict):
+        raise DecisionApplicationError("adjudication-decisions.json must be a JSON object")
+    if decisions.get("schema_version") != DECISIONS_SCHEMA_VERSION:
+        raise DecisionApplicationError(
+            f"adjudication-decisions.json schema_version must be "
+            f"{DECISIONS_SCHEMA_VERSION!r}, got {decisions.get('schema_version')!r}"
+        )
+    rules = decisions.get("rules")
+    if not isinstance(rules, list) or not rules:
+        raise DecisionApplicationError("adjudication-decisions.json must carry a non-empty 'rules' list")
+    seen_rule_ids = set()
+    claimed_by = {}  # drive_file_id -> rule_id, to catch a ruled row claimed twice
+    for rule in rules:
+        rule_id = rule.get("rule_id")
+        if not rule_id or not isinstance(rule_id, str):
+            raise DecisionApplicationError(f"rule missing a string rule_id: {rule!r}")
+        if rule_id in seen_rule_ids:
+            raise DecisionApplicationError(f"duplicate rule_id: {rule_id!r}")
+        seen_rule_ids.add(rule_id)
+
+        disposition = rule.get("disposition")
+        if disposition not in DECISION_DISPOSITIONS:
+            raise DecisionApplicationError(
+                f"rule {rule_id!r}: unknown disposition {disposition!r}; must be one of "
+                f"{sorted(DECISION_DISPOSITIONS)} -- a new disposition needs a planner "
+                "code change before it can be used (phase-B schema design constraint 2)"
+            )
+
+        match = rule.get("match") or {}
+        ids = match.get("drive_file_id")
+        if not isinstance(ids, list) or not ids or not all(isinstance(i, str) and i for i in ids):
+            raise DecisionApplicationError(
+                f"rule {rule_id!r}: match.drive_file_id must be a non-empty list of "
+                "non-empty strings"
+            )
+        for fid in ids:
+            if fid in claimed_by:
+                raise DecisionApplicationError(
+                    f"drive_file_id {fid!r} claimed by both rule {claimed_by[fid]!r} and "
+                    f"{rule_id!r} -- every row's disposition must trace to exactly one "
+                    "rule (phase-B schema design constraint 1)"
+                )
+            claimed_by[fid] = rule_id
+    return rules
+
+
+def apply_decisions(report, decisions):
+    """Apply a ruled adjudication-decisions.json on top of an already-built
+    plan() report. Returns a NEW dict; `report` is never mutated in place.
+
+    Scope this pass: every disposition currently implemented re-disposes a
+    row that is presently in `report["quarantined"]` -- this is the only
+    bucket eligible for a rule match here. A future ruling targeting a
+    different bucket extends that lookup deliberately, not implicitly, at
+    the same time it adds its own new disposition (see DECISION_DISPOSITIONS).
+
+    Hard-stop (raises DecisionApplicationError), before disposing of ANY
+    row -- never a partial application:
+      - the decision file itself fails _validate_decisions (bad shape,
+        unknown disposition, duplicate rule_id, a drive_file_id claimed by
+        two rules)
+      - a rule's drive_file_id is not currently present in `quarantined` --
+        direct application of jigoro-kano's Q3 phase-A finding ("both
+        functions currently fail OPEN on an unknown manifest section") and
+        phase-B design constraint 4 ("the corpus moved since the ruling was
+        made and that must be loud")
+
+    Disposition handling:
+      - `exclude_doctrine_nonconforming`: the row STAYS in `quarantined`
+        (still excluded, still un-imported -- visible via
+        GET /v1/reconciliation as a Drive object with no Registrar row, per
+        the operator's policy that a genuinely OPEN row with a live
+        requirement is not silently archived). Only the audit trail is
+        upgraded, from a generic parser warning to the ruled disposition,
+        rule_id and note.
+      - `misfiled_standing_document`: the row MOVES from `quarantined` into
+        `non_post_artifacts`, reusing the exact reason tag the 8
+        already-ruled misfiled documents carry (same disposition, same
+        pattern -- "no thread id/state token, so no Registrar identity can
+        be assigned without inventing one").
+      - `renamed_out_of_grammar`: the row MOVES from `quarantined` into the
+        new `renamed_out_of_grammar_posts` bucket, "record, don't register"
+        -- the identical pattern `trashed_board_objects` already uses.
+
+        HARD CONSTRAINT, enforced by construction, not merely documented:
+        no field written into a `renamed_out_of_grammar_posts` entry may
+        EVER come from the object's own body/content -- only from Drive
+        metadata (file ID, name, path, MIME, timestamps, size, checksum),
+        via `_full_drive_metadata`, the SAME helper `trashed_board_objects`
+        already uses above in plan(). This planner has never read a post
+        body anywhere in this file (see the module docstring's
+        `content_sha256` note: `content_sha256` is never computed here) --
+        so the constraint already holds by construction; this comment (and
+        the fact that `obj` below is always plan()'s original,
+        metadata-only collector row, never re-fetched or re-read) is what
+        jigoro-kano asked to make that fact STRUCTURALLY OBVIOUS rather than
+        true by accident. Do NOT "helpfully" open or parse these two
+        objects' content to recover the stale `id:` field they carry -- that
+        field names OTHER agents' live threads (a collided, stale
+        reference), and splicing it in here is the exact failure this
+        constraint exists to block. A future need to look inside these rows
+        is a NEW, separately reviewed decision -- never a quiet extension of
+        this function.
+    """
+    rules = _validate_decisions(decisions)
+
+    quarantined_by_id = {}
+    for entry in report["quarantined"]:
+        fid = entry["object"].get("drive_file_id")
+        if fid:
+            quarantined_by_id[fid] = entry
+
+    # Existence hard-stop FIRST, over every rule/id, before a single row is
+    # disposed of -- so a bad rule never produces a partially-applied report.
+    for rule in rules:
+        for fid in rule["match"]["drive_file_id"]:
+            if fid not in quarantined_by_id:
+                raise DecisionApplicationError(
+                    f"rule {rule['rule_id']!r} (disposition {rule['disposition']!r}) names "
+                    f"drive_file_id {fid!r}, which is not currently in `quarantined` -- the "
+                    "corpus has moved since this ruling was made; stop and report, don't apply"
+                )
+
+    fid_to_rule = {fid: rule for rule in rules for fid in rule["match"]["drive_file_id"]}
+
+    quarantined_out = []
+    non_post_artifacts_out = list(report["non_post_artifacts"])
+    renamed_out_of_grammar_posts_out = list(report.get("renamed_out_of_grammar_posts", []))
+    rules_applied = []
+
+    # Single pass over `quarantined` in its existing (already-deterministic,
+    # original-row-order) order -- matches this file's determinism
+    # discipline (module docstring: every list is either a single ordered
+    # pass or an explicit sort before being appended to the report).
+    for entry in report["quarantined"]:
+        fid = entry["object"].get("drive_file_id")
+        rule = fid_to_rule.get(fid)
+        if rule is None:
+            quarantined_out.append(entry)
+            continue
+
+        obj = entry["object"]
+        name = obj.get("name") or (obj.get("path", "").rsplit("/", 1)[-1])
+        board = _board_of(obj)
+        is_native = _is_native_google_doc(name, obj.get("mime_type"), obj.get("size"), obj.get("provider_checksum"))
+        disposition = rule["disposition"]
+        rules_applied.append({"rule_id": rule["rule_id"], "drive_file_id": fid, "disposition": disposition})
+
+        if disposition == "exclude_doctrine_nonconforming":
+            quarantined_out.append({
+                **entry,
+                "disposition": disposition,
+                "rule_id": rule["rule_id"],
+                "decision_sheet_group_id": rule.get("decision_sheet_group_id"),
+                "note": rule.get("note"),
+            })
+            continue
+
+        if disposition == "misfiled_standing_document":
+            non_post_artifacts_out.append({
+                "drive_file_id": obj.get("drive_file_id"),
+                "name": name,
+                "parent_folder_path": obj.get("parent_folder_path"),
+                "board": board,
+                "native_doc": is_native,
+                "trashed": bool(obj.get("trashed")),
+                "reason": "misfiled_standing_document",
+                "note": rule.get("note") or (
+                    "no thread id/state token, so no Registrar identity can be assigned "
+                    "without inventing one -- same reasoning as the 8 already-ruled "
+                    "misfiled documents"
+                ),
+            })
+            continue
+
+        if disposition == "renamed_out_of_grammar":
+            # See this function's docstring for the hard body-content
+            # constraint. `_full_drive_metadata` is metadata-only by
+            # construction -- nothing here reads `obj`'s content.
+            renamed_out_of_grammar_posts_out.append({
+                **_full_drive_metadata(obj, name, board, is_native),
+                "reason": "renamed_out_of_grammar",
+                "note": rule.get("note") or (
+                    "renamed mid-incident after a real thread-ID collision; the "
+                    "explanation survives intact in conforming objects already on "
+                    "the board -- record, don't register, same pattern as "
+                    "trashed_board_objects"
+                ),
+            })
+            continue
+
+        # Unreachable: _validate_decisions already restricts `disposition`
+        # to DECISION_DISPOSITIONS, and every member above has a branch.
+        raise DecisionApplicationError(f"unhandled disposition {disposition!r} for rule {rule['rule_id']!r}")
+
+    counts = dict(report["counts"])
+    counts["quarantined_invalid_name"] = len(quarantined_out)
+    counts["non_post_artifacts"] = len(non_post_artifacts_out)
+    counts["renamed_out_of_grammar_posts"] = len(renamed_out_of_grammar_posts_out)
+
+    out = dict(report)
+    out["quarantined"] = quarantined_out
+    out["non_post_artifacts"] = non_post_artifacts_out
+    out["renamed_out_of_grammar_posts"] = renamed_out_of_grammar_posts_out
+    out["counts"] = counts
+    out["decisions_header"] = {
+        "schema_version": decisions.get("schema_version"),
+        "ruled_at": decisions.get("ruled_at"),
+        "ruled_by": decisions.get("ruled_by"),
+        "source_decision_sheet": decisions.get("source_decision_sheet"),
+        "decisions_sha256": _decisions_sha256(decisions),
+        "rules_applied": sorted(rules_applied, key=lambda r: (r["rule_id"], r["drive_file_id"])),
+    }
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("inventory")
     ap.add_argument("--output")
+    ap.add_argument("--decisions", help="adjudication-decisions.json to apply on top of plan()'s report")
     args = ap.parse_args()
     # gsp's nit (CP1 review, 2026-09-21): both handles opened via `with`
     # rather than a bare open(...).write(...)/open(...).read() -- the latter
@@ -1081,6 +1419,10 @@ def main():
     with open(args.inventory, "r", encoding="utf-8") as f:
         inventory = json.load(f)
     report = plan(inventory)
+    if args.decisions:
+        with open(args.decisions, "r", encoding="utf-8") as f:
+            decisions = json.load(f)
+        report = apply_decisions(report, decisions)
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
