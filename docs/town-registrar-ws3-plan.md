@@ -273,6 +273,33 @@ Two decisions Helio surfaced for the operator, **both confirmed 2026-09-22, both
 
 (Report/inventory storage location — Helio's queue item 3 — was already resolved earlier: `/home/batman/town-registrar/dry-run-reports/` on the NAS, `drwx------`/`600`.)
 
+## CP-A2 (helio-gracie) — phase A complete, GATEWAY to Sensei (2026-09-22)
+
+**Verdict: PROCEED.** No real block. Phase A touched no live state (verified: no `.db`/`.sqlite` file exists anywhere in either tree). Item 6 is correctly blocked — a taxonomy decision, not a failed work item. Code committed at `3a33d21`, pushed to `internal`.
+
+**Corrected corpus split, replacing the CP2 figures of 1,066 / 236 / 93 and the 15-27h estimate:**
+
+| Bucket | Count | Composition |
+|---|---|---|
+| A — importable unattended | **1,258** | 1,061 posts + 197 signature sidecars |
+| B — needs adjudication | **16** | 7 unparseable names + 9 flagged posts (this 9 is producer-verified only — not yet independently reproduced; deferred to phase B QA at no extra cost, not asked of Sensei prematurely) |
+| C — out of scope this pass | **28** | 13 trashed + 1 native Doc + 5 OFFER grammar-B + 9 misfiled `.md` (see correction below — really 1 real WANT file + 8 unrelated documents) |
+| Never posts | **93** | 81 documents + 12 folders |
+
+The adjudication queue fell from 236 to 16 (93% reduction) because most of the original flags were on typed routing fields (`for-`/`cap-`/`cat-`) that the database schema has nowhere to store — those rows were never going to need a human.
+
+**Two self-corrections Helio made against his own earlier blocks, both worth recording plainly:** his CP-A1 claim that a native Doc intersects `trashed_board_objects` was wrong (it's at board root, outside all four post-bearing folders — jackie-chan and ronda both caught this independently). More consequentially, his CP2 instruction to Sensei — "rule on 9, not 1" for decision 1b's `.md` WANT count — was **also wrong**. jackie-chan's homogeneity check (required at CP-A1) found only 1 of those 9 objects actually matches the WANT shape; the other 8 are unrelated documents (audits, protocol drafts, an operating memo) that only landed in that bucket via folder+extension coincidence. **Decision 1b, as confirmed by Sensei, governs exactly 1 object — jigoro-kano's original "one-off" reading was correct.** The other 8 need a separate taxonomy ruling, not an import-path fix.
+
+**For Sensei — real decisions, not yet asked:**
+1. **The rewrite-and-trash candidate** — `BB-20260908-forge-001.000-POST__...key-attestation-forge-and-forge-now-verifies.txt` exists both live and trashed under the identical filename. Found independently by gsp and ronda-rousey. A candidate doctrine section-1 violation (rewriting and trashing is not how doctrine allows a post's state to change), not an ordinary trashed post.
+2. **The 8 misfiled documents** — need a taxonomy ruling on what they actually are (ordinary standing documents that don't belong in the import scope at all, most likely), separate from decision 1b, which they were never really part of.
+
+**Security:** the `auth.py` least-privilege defect is real, fixed, and rated **Low** by gsp with explicit reasoning (over-granted scope doesn't reach the admin import gates; a second ACL gate still holds; reachable only from the local console) — kept off "trivial" because it was silent, would have collapsed verifier/author separation of duties, and falsified a documented invariant. Nothing High or Critical. Minting now prints granted scopes so the failure mode can't recur silently.
+
+**Not verified, deferred to phase B/C at zero extra invocation cost:** the STRICT(5)/EXTENDED(9) adjudication ID lists (ronda couldn't reproduce them; jackie-chan's recompute is unconfirmed); an unreported corpus change since CP2 (duplicate_openings 14→4, duplicate_sequences 42→38 — likely because excluding trashed posts collapsed duplicate pairs, meaning some "collisions" were really trash-and-repost events, not true collisions); whether any existing live-DB token already carries `post:write` (needs the 3C live-DB audit).
+
+**Invocation budget:** 7 total for phase A (jigoro-kano, CP-A1, jackie-chan implement, gsp, ronda, jackie-chan follow-up, this CP-A2) — 5 discretionary as planned, the 6th reviewer-triggered (the ceiling working as designed), the 7th being this mandated checkpoint. Helio confirmed the session's call not to dispatch an 8th invocation for a ronda re-check was correct, on the grounds that nothing depends on the B=16-vs-12 number until phase B, where ronda is already invoked.
+
 ---
 
 ## Key paths
