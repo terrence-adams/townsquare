@@ -237,6 +237,34 @@ WS1+WS2 ran 8 invocations, ~$32-48-equivalent. WS3 is bigger; saying so plainly:
 
 ---
 
+## Revision — jigoro-kano's phase-A review (2026-09-22)
+
+**Verdict: NO BLOCKING CONCERNS.** All four bounded questions resolve in favor of the plan; findings below refine the work order rather than stopping it.
+
+**Q1 (decoupling) — SOUND, and stronger than argued.** The amendment's own rollout prerequisites are introduced by "Before any native writer emits the new grammar:", and **item 5** requires "a read-only legacy import is run in staging... an unchanged second run is a no-op" as a precondition of enabling writers — not a consequence of adoption. Import is upstream of the emitters gate in the doctrine text itself, not just the design. Historical import is not blocked on forge or bishop's availability. One citation correction: AC 10 (§15) carries the reconciliation *requirement* but not the "before production writes" clause — that ordering is §9 step 12 alone. Enforcement note: the "no post:write token exists" invariant is a live-state claim, so phase A proves the `auth.py` fix on fixtures only; establishing the invariant on the live box (revoke/re-mint any existing token) is a 3C step, not phase A.
+
+**Q2 (trashed objects) — doctrine fact. Recommend: record, don't register.** Trashing does not remove an object from doctrine's purview (section 1a, section 7a, section 8, and section 1's "REWRITE-AND-TRASH" prohibition all bear on this). But `registration_state` has no CHECK value meaning "trashed" (`001_initial.sql`/`005_posts_nullable_forward.sql`), and with no delete API, an imported row is permanent — exclusion is reversible, import is not. **Recommendation: exclude the 13 from `posts`/`artifacts`, but carry full Drive metadata per object (not just a count) in the hashed manifest, so the evidence survives Drive's ~30-day purge without asserting these are live ledger entries.** Two added offline checks for jackie-chan: (a) intersect the 9 trashed post names against the active set — a match is a candidate **rewrite-and-trash** doctrine violation (section 1), a materially different finding than an ordinary trashed post; (b) resolve each of the 4 trashed `.sig` sidecars against its parent post — orphan-sidecar and live-post-lost-its-signature are opposite classes, currently invisible if the 13 are counted as one number. Basis label correction: "purges early-to-mid October" is **inferred** (Drive's 30-day window is established behavior, but the exact date depends on per-object trash time, which may not be in `lsjson`'s output) — state it as "unknown, bounded above by 30 days from collection," not as a date.
+
+**Q3 (legacy_nonconforming path) — YES, honors decision 1b, not a second grammar — subject to five implementation constraints:**
+1. `roots` is defined in `001_initial.sql`, not `005` — verify the no-migration claim against both files (confirmed to hold: no format CHECK on `prefix`/`namespace`, `status` admits `'legacy'`).
+2. The synthetic root's `prefix` must come from a value no legacy filename can produce (the corpus uses `TS`, `BB`, `SEEK`, `OFFER`, `WANT` — pick something outside that set) to avoid colliding with `roots`' `UNIQUE(prefix,utc_date,namespace,local_number)`.
+3. **`promote_import` parses too, not just `stage_import`** — service.py:173,176,183,188 all consume parsed fields. Patch both functions; skip the `root_counters` upsert entirely for nonconforming rows (those counters only matter for future allocation in a namespace no writer will ever use).
+4. **Both functions currently fail OPEN on an unknown manifest section** — `stage_import` validates only `dry_run`/`posts`/`artifacts`; `promote_import` iterates only those two. Patch stage without promote (or vice versa) and promotion reports success while silently inserting zero nonconforming rows. This is why ronda-rousey's QA assertion must be a **count equality** (staged nonconforming rows == promoted rows with `state='legacy_nonconforming'`), not idempotency alone.
+5. Nonconforming rows must join the same `seen_drive`/`seen_uid`/`valid_uids` dedup sets `stage_import` already uses for conforming posts, and `valid_uids` must be populated before the artifact-parent-check loop, or a nonconforming row can duplicate a conforming row's Drive ID undetected.
+
+**Q4 (rail drops) — two trace to the (unadopted) amendment text itself, not just to the design doc's engineering judgment:**
+- **TLS proxy drop** — also contradicts amendment rollout prerequisite 6 ("production TLS and credential isolation are verified"). The reasoning stands (in-force section 2: "AUTHENTICATION HAPPENS AT THE PERIMETER, NOT IN THE FILE" backs the SSH-tunnel rail actually used) — but prerequisite 6's wording needs to change at adoption, or Sensei needs to explicitly rule the deviation, so the doctrine text doesn't contradict what's actually built.
+- **Image-digest-pinning drop** — also contradicts amendment rollout prerequisite 8 ("exact image digest"), which names "import promotion" as one of the three gated actions this binds at 3C. Recommend rewording to admit a locally-built image ID (no registry digest exists for a `--pull=false` local build).
+- **Canary relabeling** — not a drop, but a naming hazard: call the WS3 import canary exactly that ("import canary"), distinct from amendment prerequisite 7's still-owed "namespace canary" (the writer path), so a later reviewer doesn't mistake one for satisfying the other.
+- The remaining four drops (alerting, image digest — see above, audit-checkpoint folding, Crier enrichment) are design-only and consistent with in-force doctrine as-is; no amendment edit needed for those.
+- Flagged for the record: this review and the WS1 rebase it builds on share the same author and vendor (jigoro-kano, Claude) — the two amendment-prerequisite edits above should get a non-Claude read before adoption, since same-vendor agreement on doctrine text is weak evidence.
+
+**Three items recorded for Sensei at CP-A2** (his call, not the crew's): (1) disposition of the 13 trashed objects — record-don't-register recommended; (2) reword amendment prerequisite 6 (TLS) or explicitly rule the deviation; (3) reword amendment prerequisite 8 (image digest) to admit a local image ID.
+
+**Filed separately, per instruction, not part of this verdict:** the cheapest unblock for `TS-20260921-venom-001`'s version-number question is for Sensei — as the adoption authority — to set the number himself (or reserve a non-colliding one) at the moment of adoption, rather than leaving it open on two currently-offline hosts.
+
+---
+
 ## Key paths
 
 - `C:\Repo\townsquare\docs\town-registrar-design.md` — approved design (§9 import, §13 rollout, §15 acceptance)
