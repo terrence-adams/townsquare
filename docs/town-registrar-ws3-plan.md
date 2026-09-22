@@ -463,6 +463,14 @@ Row-level Drive file IDs are deliberately NOT in this repo (source-available) �
 
 **Next:** jackie-chan implements (the `.json` extension gate, the `renamed_out_of_grammar_posts` class, the three reason tags, re-run the planner); ronda-rousey QAs (fixtures for the new classes, re-proves determinism, asserts no manifest field is ever populated from an object's body). gsp and shuri not needed this pass — no new write path, no new measurement design.
 
+### Implemented and QA'd — 2026-09-22, commit `f289152`
+
+jackie-chan built it exactly as ruled; ronda-rousey independently reproduced everything (determinism, byte-identical across two fresh runs; corrected counts read from raw output, not summary; 13 adversarial fixtures including a poisoned-body-content injection attempt against `renamed_out_of_grammar_posts` — rejected, confirmed the class can only ever be built from Drive metadata; duplicate-`rule_id` and cross-rule ID-collision rejection; the hard-stop verified against the real decision file with a real row deleted; 89/91 tests pass, the 2 failures reproduced as the same pre-existing SQLite-lock flake via her own independent stash comparison). **PASS, no blocking findings.**
+
+Two small non-blocking items tracked, not gating phase B's close: (1) the duplicate-`rule_id` case ronda tested only exists in her scratch script, not the permanent test suite — a one-line follow-up for jackie-chan whenever convenient; (2) no structural guard yet forces `apply_decisions` to run before `stage_import` — currently inert (no disposition this pass writes into `posts`), worth a design note for whenever a future disposition needs to reach `posts`.
+
+**Phase B is closed. Blocking adjudication queue: 0.** Final corrected split: 1,267 importable / 0 blocking / 23 out of scope / 105 never-posts, summing to 1,395. Ready for phase C (the actual promotion into the live database) whenever the operator wants to proceed — phase C is the first genuinely irreversible write in this project and needs its own explicit go.
+
 ---
 
 ## Key paths
