@@ -554,9 +554,14 @@ sign-off below does not stand in for it.
 
 Confirmed at `auth.py:25`: `authenticate()` ends with an autocommit
 `UPDATE tokens SET last_used_at=? WHERE token_id=?` on every successful authentication, read or
-write route alike — `identity()` (`main.py:65`) is called as a bare statement at the top of all 13
-DB-touching routes, *separately from and before* any `invoke(...)` call, including in the six write
-routes. `identity()`'s own `try/except` catches only `Forbidden`; nothing catches
+write route alike — `identity()` (`main.py:65`) is called as a bare statement at the top of 12 of
+the 13 DB-touching routes, *separately from and before* any `invoke(...)` call, including in the
+six write routes. *[Corrected 2026-09-22 — the original text read "all 13," but `ready` is
+DB-touching (it takes `db` via `Depends(get_db)`) and never calls `identity()`, since it has no
+`authorization` parameter and is a liveness-adjacent check, not an authenticated route. 12 of the
+13 is the accurate count; caught by helio-gracie's independent re-derivation, re-verified directly
+against `main.py` rather than taken on trust.]* `identity()`'s own `try/except` catches only
+`Forbidden`; nothing catches
 `sqlite3.OperationalError` there, and no route wraps its `identity(...)` call in `invoke()`. If that
 UPDATE loses the busy-lock race, it is an unhandled 500, confirmed by reading the code, not
 inferred.
@@ -612,7 +617,7 @@ declined). Scratch probe kept at
 `C:\Users\terre\AppData\Local\Temp\claude\...\scratchpad\exc_handler_probe.py` for reproducibility,
 not committed (throwaway, not part of the suite).
 
-This closes Issue 1 (identity()'s UPDATE, at all 13 call sites, uniformly) and Issue 2 (below) with
+This closes Issue 1 (identity()'s UPDATE, at all 12 call sites, uniformly) and Issue 2 (below) with
 the same mechanism, which is why I'm ruling for the general form rather than patching
 `sqlite3.OperationalError` alone: patching only the one exception type asked about in Issue 1 while
 leaving `Conflict`/`Forbidden`/`Invalid`/`Unavailable` on the old per-call-site convention would
