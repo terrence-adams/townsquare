@@ -25,12 +25,13 @@ bootstrap steps (ACL grant, token minting) that run to completion and close
 before any concurrent section starts -- the same pattern `FreshAppCase._bearer`
 already uses, not a workaround of the rule above.
 
-What this file builds now (per the design doc's "New regression test
-category needed" section, items 1-2 and 4b) -- items 3, 4a, and any
-status-code assertion under lock/busy contention are explicitly HELD, not
-built here, pending open rulings (mixed read/write correctness depends on
-the still-open narrow-vs-generalized exception-handler scope question with
-ip-man; the `del _boot` tripwire depends on her Issue 3 ruling landing):
+What this file builds (per the design doc's "New regression test category
+needed" section, items 1-5). Items 3, 4a, and the status-code assertions
+under lock/busy contention were originally HELD pending open rulings; all
+three rulings landed (Addendum B: B1 narrow exception-handler scope, B2
+`_migrate_at_boot()` replacing `_boot`, B3 status-code spec; jackie-chan's
+review of `60ee5aa` confirmed the delivered code matches), so they are built
+here now, on top of `d9eb5a0`:
 
   1. HTTP-layer concurrency through the real app: `HttpConcurrentPaginationTests`.
   2. Data correctness, not just absence of exceptions: every walk asserts the
@@ -38,9 +39,32 @@ ip-man; the `del _boot` tripwire depends on her Issue 3 ruling landing):
      premature termination -- not merely "no 5xx". A "no 5xx" assertion alone
      would have passed against the pre-fix code roughly two-thirds of the
      time (ip-man's design note, "Measured impact").
+  3. Mixed read/write, plus the B3 status-code spec: `MixedReadWriteConcurrencyTests`
+     -- readers walking `GET /v1/posts` while a writer reserves and publishes.
+     Per B3's exact guidance (not reinvented here): 200 is normal; a 503 is
+     legitimate under genuine contention and must be retryable (a retry after
+     the writer's transaction completes must succeed); 500 is never
+     acceptable for lock contention -- that is the defect B1 exists to close,
+     and it is the assertion that matters most; a 503 is never asserted to
+     occur (timing-dependent, would flake) -- only its absence-as-anything-
+     other-than-503 and its recovery are asserted. Also covers the plain
+     correctness half of item 3: a post observed as `registration_state`
+     `published` must never be missing the rest of `publish()`'s single
+     transaction (drive fields, and the filename alias `publish()` inserts
+     in the same `BEGIN IMMEDIATE`) -- readers must never observe an
+     uncommitted row, and a post-completion read must never miss a
+     committed one.
+  4a. `NoModuleLevelConnectionTripwireTests` -- the design doc's own item-4
+      structural tripwire, now a strong assertion rather than one with a
+      footnote: `registrar.app.main` has no module attribute that is a
+      `sqlite3.Connection`, and the module does not import `connect` at all
+      (Addendum B2's `_migrate_at_boot()` made both unconditionally true,
+      confirmed structurally in `60ee5aa` and re-verified by jackie-chan).
   4b. `WriteRouteCoroutineTripwireTests` -- every write route stays a
       coroutine function, converting Risk #1 (writers must never land on the
       threadpool) from a remembered invariant into an enforced one.
+  5. File-scoped rule (unchanged, restated below): no test in this file gives
+     a thread its own `sqlite3.Connection`.
 
 Run pytest from the parent of registrar/ (the repo root), matching every
 other file in this suite -- see the note in app_harness.py.
@@ -83,7 +107,11 @@ data still passes, exactly as it should.
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
+import sqlite3
+import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from fastapi.testclient import TestClient
@@ -204,6 +232,186 @@ class HttpConcurrentPaginationTests(FreshAppCase):
         self.assertEqual(self.expected_uids, set(uids))
 
 
+class MixedReadWriteConcurrencyTests(FreshAppCase):
+    """Design doc test-category item 3 + the B3 status-code spec, using B3's
+    exact guidance rather than an invented one:
+
+    - Reads in flight when a writer takes the write lock: 200 is normal; 503
+      is legitimate if genuinely contended, and must be retryable -- a retry
+      after the writer's transaction completes must succeed.
+    - Reads arriving after a writer's transaction completes must see the
+      writer's committed state -- no dirty reads of in-flight, uncommitted
+      writer state. This is the whole point of the fix.
+    - 500 is never acceptable for lock contention -- this is the actual
+      defect B1 exists to close, and it is the assertion that matters most.
+    - Do NOT assert that a 503 occurs -- B3 is explicit this is
+      timing-dependent and would flake. Assert the negative (no 5xx other
+      than 503) and the recovery (any 503 is followed by a successful retry
+      that returns 200 with correct data).
+
+    The "no dirty read" check is not taken on WAL's word alone (jackie-chan's
+    Risk-2 ruling already established that mechanically): it is exercised
+    live, over the real HTTP topology, by cross-checking two independent
+    reads against the SAME multi-statement transaction. `Registrar.publish`
+    does an `UPDATE posts ... registration_state='published'` and then, in
+    the SAME `BEGIN IMMEDIATE`, `INSERT INTO aliases` for the post's
+    filename. Because both statements commit together or not at all, the
+    instant any reader observes `registration_state=='published'` via
+    `GET /v1/posts`, the filename alias it names is *already* durably
+    committed too -- so a `GET /v1/aliases/{filename}` that fails to resolve
+    it at that point is a genuine torn/dirty read across the transaction
+    boundary, not a timing artifact to explain away.
+
+    File-scoped rule (unchanged): no test in this file gives a thread its own
+    `sqlite3.Connection`. The writer and every reader drive the real app
+    through the shared `TestClient` instance, exactly like
+    `HttpConcurrentPaginationTests` above -- dispatched through `main.py`'s
+    real `get_db` dependency exactly as a real client's request would be.
+    The only direct `db.connect()` call is `_grant_acl`'s, a sequential,
+    single-threaded bootstrap step that runs to completion and closes before
+    the concurrent section starts (same pattern as
+    `HttpConcurrentPaginationTests._grant_acl`)."""
+
+    NUM_WRITES = 12          # well under GET /v1/posts's default page size (100) and hard max (200) -- no pagination/cursor complexity needed to exercise this
+    NUM_READERS = 4
+    NAMESPACE = "qa"
+    BOARD = "mixed"
+    MAX_503_RETRY_ATTEMPTS = 20  # B3: any 503 must be followed by a successful retry -- bounded so a genuine regression (503 that never clears) fails loud instead of hanging the suite
+    RETRY_DELAY_SECONDS = 0.1
+
+    def setUp(self):
+        self.main_module = self._boot()  # no cursor-signing key needed: NUM_WRITES is well under the page limit, so no response in this test ever carries a cursor
+        self.client = TestClient(self.main_module.app)
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+        self._grant_acl("writer", self.NAMESPACE, self.BOARD)
+        self.write_headers = self._bearer(self.main_module, scope="post:write", principal="writer")
+        self.reader_headers = [self._bearer(self.main_module, scope="post:read", principal=f"mixed-reader-{i}") for i in range(self.NUM_READERS)]
+
+    def _grant_acl(self, principal, namespace, board):
+        from registrar.app.db import connect
+        import os
+        db = connect(os.environ["REGISTRAR_DB"])
+        try:
+            db.execute("INSERT INTO acls VALUES (?,?,?,NULL,NULL)", (principal, "namespace", namespace))
+            db.execute("INSERT INTO acls VALUES (?,?,?,NULL,NULL)", (principal, "board", board))
+        finally:
+            db.close()
+
+    def _get_retrying_on_503(self, path, params, headers):
+        """One GET, retried on 503 up to MAX_503_RETRY_ATTEMPTS. Fails the
+        test immediately on any 500 (B3: never acceptable for lock
+        contention) or any status other than 200/503 (not the shape this
+        helper exists to characterize). Returns (response, was_retried)."""
+        last = None
+        for attempt in range(self.MAX_503_RETRY_ATTEMPTS):
+            r = self.client.get(path, params=params, headers=headers)
+            self.assertNotEqual(500, r.status_code, f"GET {path} attempt {attempt}: 500 under lock contention -- this is exactly the defect B1 exists to close: a locked/busy sqlite3.OperationalError must map to a retryable 503, never surface as an unhandled 500. Body: {r.text}")
+            self.assertIn(r.status_code, (200, 503), f"GET {path} attempt {attempt}: unexpected status {r.status_code}: {r.text}")
+            if r.status_code != 503:
+                return r, attempt > 0
+            last = r
+            time.sleep(self.RETRY_DELAY_SECONDS)
+        self.fail(f"GET {path} kept returning 503 for {self.MAX_503_RETRY_ATTEMPTS} attempts ({self.MAX_503_RETRY_ATTEMPTS * self.RETRY_DELAY_SECONDS:.1f}s of retry delay) -- B3 requires that a retry after the writer's transaction completes succeeds; last body: {last.text if last else None}")
+
+    def _assert_published_row_fully_committed(self, row):
+        for field in ("drive_file_id", "drive_url", "filename", "content_sha256"):
+            self.assertIsNotNone(row.get(field), f"post {row['post_uid']} has registration_state='published' but {field!r} is null/missing -- partial visibility of publish()'s UPDATE, a dirty/torn read")
+
+    def _assert_alias_resolves(self, post_uid, filename, headers):
+        r, _ = self._get_retrying_on_503(f"/v1/aliases/{filename}", {}, headers)
+        self.assertEqual(200, r.status_code, r.text)
+        matches = {m["resource_uid"] for m in r.json()["matches"]}
+        self.assertIn(post_uid, matches, f"post {post_uid} was observed as registration_state='published' via GET /v1/posts, but its filename alias {filename!r} -- inserted in the SAME publish() BEGIN IMMEDIATE transaction, after the UPDATE -- does not resolve via GET /v1/aliases. Either both the state change and the alias must be visible, or neither: this is the 'readers never observe an uncommitted row' invariant the fix exists to guarantee.")
+
+    def _writer_reserve_and_publish(self, write_headers):
+        """Sequential, single writer thread: NUM_WRITES independent
+        reserve-then-publish pairs, each its own BEGIN IMMEDIATE transaction
+        (idem() in service.py). Returns the list of {post_uid, filename} for
+        everything that successfully published, in commit order."""
+        published = []
+        for i in range(self.NUM_WRITES):
+            key = f"mixed-write-{i}"
+            body = {"namespace": self.NAMESPACE, "board": self.BOARD, "state": "OPEN", "assignments": [{"agent_id": "writer", "role": "responsible"}]}
+            r = self.client.post("/v1/roots/reserve", headers={**write_headers, "Idempotency-Key": key}, json=body)
+            self.assertEqual(201, r.status_code, r.text)
+            reserved = r.json()
+            filename = f'{reserved["thread_id"]}.000-OPEN__by-writer__pid-{reserved["pid"]}.txt'
+            drive_file_id = f"mixed-write-{i}"
+            payload = {"drive_file_id": drive_file_id, "drive_url": f"https://drive.google.com/file/d/{drive_file_id}/view", "filename": filename, "content_sha256": hashlib.sha256(f"mixed-{i}".encode()).hexdigest()}
+            r2 = self.client.put(f"/v1/posts/{reserved['post_uid']}/publication", headers={**write_headers, "Idempotency-Key": f"{key}-pub"}, json=payload)
+            self.assertEqual(200, r2.status_code, r2.text)
+            published.append({"post_uid": reserved["post_uid"], "filename": filename})
+        return published
+
+    def _reader_loop(self, headers, stop_event, verified_published, lock):
+        """Poll GET /v1/posts until told to stop. Every response is checked
+        for the no-500/retryable-503 contract; every 'published' row seen for
+        the first time triggers the cross-transaction alias check. Sets
+        stop_event on any exit (normal or error) so siblings wind down
+        promptly instead of continuing to poll after a sibling has already
+        failed the test."""
+        try:
+            while not stop_event.is_set():
+                r, _ = self._get_retrying_on_503("/v1/posts", {"board": self.BOARD, "limit": 200}, headers)
+                body = r.json()
+                self.assertIsNone(body["next_cursor"], "test fixture writes only NUM_WRITES posts, well under the page limit -- a non-null next_cursor means an assumption behind this test (single-page reads, no cursor complexity) no longer holds")
+                for row in body["posts"]:
+                    if row["registration_state"] != "published":
+                        continue
+                    self._assert_published_row_fully_committed(row)
+                    with lock:
+                        first_time = row["post_uid"] not in verified_published
+                        if first_time:
+                            verified_published.add(row["post_uid"])
+                    if first_time:
+                        self._assert_alias_resolves(row["post_uid"], row["filename"], headers)
+        finally:
+            stop_event.set()
+
+    def test_mixed_read_write_no_500_and_503_is_retryable_and_writer_commits_are_visible(self):
+        stop_event = threading.Event()
+        verified_published = set()
+        lock = threading.Lock()
+
+        with ThreadPoolExecutor(max_workers=self.NUM_READERS + 1) as pool:
+            reader_futures = [pool.submit(self._reader_loop, self.reader_headers[i], stop_event, verified_published, lock) for i in range(self.NUM_READERS)]
+            writer_future = pool.submit(self._writer_reserve_and_publish, self.write_headers)
+            published = writer_future.result()  # propagates any writer-side failure into the main test thread
+            stop_event.set()
+            for f in reader_futures:
+                f.result()  # propagates any reader-side failure (no-500, retryable-503, dirty-read) into the main test thread
+
+        self.assertEqual(self.NUM_WRITES, len(published), "writer must successfully publish every post it reserved -- a short count here means the writer itself failed silently, not a reader-side finding")
+
+        # Correctness check: a read AFTER every writer transaction has
+        # committed must see every published post, fully formed, with its
+        # alias resolvable -- "never miss a committed row" (B3/item 3).
+        final, _ = self._get_retrying_on_503("/v1/posts", {"board": self.BOARD, "limit": 200}, self.reader_headers[0])
+        final_body = final.json()
+        final_by_uid = {row["post_uid"]: row for row in final_body["posts"]}
+        expected_uids = {p["post_uid"] for p in published}
+        self.assertEqual(expected_uids, set(final_by_uid), "post-completion read is missing committed post_uid(s), or shows extra ones -- a committed write must never be invisible to a subsequent read")
+        for p in published:
+            row = final_by_uid[p["post_uid"]]
+            self.assertEqual("published", row["registration_state"], f"post {p['post_uid']}: writer's publish() returned 200 but the post-completion read shows registration_state={row['registration_state']!r}")
+            self._assert_published_row_fully_committed(row)
+            self._assert_alias_resolves(p["post_uid"], p["filename"], self.reader_headers[0])
+
+        # Deliberately NOT asserted, per B3: that verified_published is
+        # non-empty (i.e., that some reader actually observed a post
+        # mid-race, before the writer finished). It is expected under this
+        # test's timing (4 readers polling continuously against a
+        # multi-second sequential writer), but asserting it would be exactly
+        # the kind of timing-dependent assertion B3 warns against for the
+        # 503 case -- a slower or faster environment could legitimately
+        # shift every observation to before or after the race window without
+        # that being a regression. The in-flight check that matters (no
+        # dirty reads) still ran on whatever was observed; the
+        # post-completion check above is what makes the "never miss a
+        # committed row" guarantee unconditional regardless of timing.
+
+
 class WriteRouteCoroutineTripwireTests(FreshAppCase):
     """Structural tripwire (design doc item 4, second half), non-timing-
     dependent so it can never pass flakily: every write route must remain a
@@ -225,6 +433,37 @@ class WriteRouteCoroutineTripwireTests(FreshAppCase):
             with self.subTest(route=name):
                 fn = getattr(self.main_module, name)
                 self.assertTrue(inspect.iscoroutinefunction(fn), f"{name} must stay `async def` -- a sync `def` write route would land on the threadpool and introduce write-lock contention (Risk #1)")
+
+
+class NoModuleLevelConnectionTripwireTests(FreshAppCase):
+    """Structural tripwire, design doc item 4 ("assert two concurrent
+    requests never share a sqlite3.Connection identity / no module-level
+    connection is reachable from handlers"), written now that Addendum B2's
+    `_migrate_at_boot()` replaced the old `del _boot` plan -- per B2's own
+    consequence, this can be a strong structural assertion rather than one
+    carrying an unexplained special case: `main.py` no longer has a
+    module-level connection of any kind (open or closed), and it does not
+    import `connect` from db.py at all. `session()` is the only door out of
+    db.py it uses, and everything opened through it closes in a `finally`.
+
+    Both properties were confirmed by jackie-chan's review of `60ee5aa`
+    against the running booted module (not just by reading source); this
+    test is the permanent, repeatable regression guard for that same
+    property, not a new discovery. Non-timing-dependent -- runs once,
+    deterministically, and can never pass flakily."""
+
+    def setUp(self):
+        self.main_module = self._boot()
+
+    def test_no_module_attribute_is_a_sqlite3_connection(self):
+        offenders = [name for name, value in vars(self.main_module).items() if isinstance(value, sqlite3.Connection)]
+        self.assertEqual([], offenders, f"registrar.app.main has a module-level sqlite3.Connection attribute {offenders} -- this is exactly the shared/leaked-connection topology the fix removes; every connection must be opened and closed per-request (get_db) or per-boot (_migrate_at_boot), never bound at module scope where a handler could reach it")
+
+    def test_main_module_does_not_import_connect(self):
+        self.assertFalse(hasattr(self.main_module, "connect"), "registrar.app.main has a `connect` attribute -- main.py must only ever open a connection through db.py's `session()`, which always closes in a `finally`; importing `connect` directly reopens the possibility of an unclosed or module-scoped connection (Addendum B2)")
+
+    def test_no_boot_attribute_survives_import(self):
+        self.assertFalse(hasattr(self.main_module, "_boot"), "a module-level `_boot` name survived import -- Addendum B2 replaced the closed-but-still-bound `_boot` connection with a function-scoped `_migrate_at_boot()` specifically so no module attribute of this shape exists at all, closed or otherwise")
 
 
 if __name__ == "__main__":
