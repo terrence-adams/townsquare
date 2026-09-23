@@ -1226,3 +1226,225 @@ norm on scope discipline.
 
 **This does not block the final gateway or reopen B1/B2.** Recorded per the coordinator's
 instruction so a wrong "already battle-tested" premise does not sit unreconciled in the design doc.
+
+## Addendum C — closeout rulings on helio-gracie's final ESCALATE bundle (ip-man, 2026-09-22)
+
+Five items, one round. C1, C2, C3 and C4 gate closeout; C5 is deferred with a named shape.
+C1 and C3 gate because each is a Done-when criterion with no honest proof behind it — the
+one failure mode this doc has corrected repeatedly and must not commit on its own last page.
+
+### C1. Done-when bullet 2 is false as written. Amend the criterion now; fix the tests after closeout.
+
+**The finding is not in question** — `test_concurrent_root_allocation` and
+`test_concurrent_children_and_publication` fail intermittently on this hardware (jackie-chan
+5/5 and 3/5, ronda-rousey 4/5), root-caused in the correction section above. What was missing
+is a ruling on the criterion. Ruling: **amend it, and fix the tests separately.**
+
+**Amendment.** In the work order's "Done when", replace:
+
+> - Full existing suite green, including both WS3 concurrency tests.
+
+with:
+
+> - Full existing suite green, with exactly two documented exceptions:
+>   `test_concurrent_root_allocation` and `test_concurrent_children_and_publication`,
+>   which fail intermittently on this hardware for a cause this job did not create and
+>   cannot reach. **The required evidence is structural, not statistical:**
+>   `git diff fe6d953..HEAD -- registrar/tests/test_registrar.py` is empty, and neither
+>   test imports `registrar.app.main` — so no line changed by this job is reachable from
+>   either one. Both must be re-run and shown at closeout, not remembered. Root cause:
+>   100 threads against 12 logical processors, `busy_timeout` being wall-clock rather
+>   than CPU-time (see the correction section above).
+
+**Why structural proof rather than a green run, and why this is stronger rather than a
+concession.** A green run of a flaky test proves nothing about causation — it is a coin
+landing the right way, and re-running until it lands is the dishonest version of this
+criterion, not the rigorous one. An empty diff on the test file plus the absence of a
+`main.py` import is a *deductive* argument that this job could not have affected these
+tests, and it is deterministic, cheap, and re-checkable by anyone. jackie-chan already made
+exactly this argument in her `60ee5aa` review ("structurally incapable of being affected by
+this change"); the criterion should say what she actually proved. Note that this only works
+*because* `test_registrar.py` was held at zero diff — which is why the test fix below must
+land after closeout, not inside it.
+
+**Test fix: jackie-chan's option (b), bounded retry-on-locked. Ordered as a separate
+follow-up commit after this job closes.**
+
+Of her three options, (b) is the only one that preserves what these tests are *for*. The
+invariant under test is allocation uniqueness under concurrent writers
+(`assertEqual(100, len(set(results)))`); the thread count is a proxy for contention, not the
+invariant. Option (a) — reduce the thread count — weakens the contention that makes the
+uniqueness assertion meaningful, trading a real signal for a quiet suite. Option (c) — a
+known-flaky comment alone — leaves a permanently red suite, and a suite that is *expected* to
+be partly red trains every future reader to discount red, which costs more than these two
+tests are worth. Option (b) keeps 100-way contention at full strength and removes only the
+failure mode this system now explicitly defines as recoverable: B1 established that a lost
+busy-lock race is a retryable 503 and that the correct client response is to retry. A test
+writer that does not retry is asserting a contract stricter than the one the API offers.
+After the change, `assertFalse(errors)` means "no error survived bounded retry" — which is a
+genuine defect signal, where today it is a hardware-scheduling coin flip.
+
+Conditions on the fix, so a retry loop does not become a way to hide a real regression:
+1. Retry **only** on `sqlite3.OperationalError` whose message matches the same locked/busy
+   discrimination `main.py`'s handler uses. Every other exception fails the test immediately.
+2. Bounded — a small fixed attempt cap with brief backoff. Exhaustion is a test failure, not
+   a skip, not a warning.
+3. A comment naming the oversubscription mechanism and pointing at the correction section
+   above, so the next reader does not mistake the retry for tolerance of a real defect.
+4. No assertion is weakened. The uniqueness assertions stay exactly as they are today.
+
+This does not gate closeout. `test_registrar.py` staying byte-unchanged through this job is
+itself the evidence C1's amended criterion rests on.
+
+### C2. Pin `starlette==0.47.3` in `registrar/requirements.txt`. Authorized.
+
+`registrar/tests/test_dependency_exception_handling.py` asserts `starlette.__version__ ==
+"0.47.3"` and calls it "fastapi 0.116.1's resolved transitive pin". It is not a pin.
+`requirements.txt` declares `fastapi`, `uvicorn` and `argon2-cffi` only, and fastapi's
+dependency range admits other `0.47.x` releases — so a clean `docker build` can resolve a
+version that fails a test whose failure message explains nothing about why.
+
+Either the assertion is wrong or the manifest is incomplete. **The manifest is incomplete**,
+and the reason is not merely that a test would go red: jackie-chan's B2-round verification of
+teardown-phase exception reachability was conducted against this exact version and she flagged
+its scope herself — "a property of the current fastapi/starlette pin, not a language-level
+guarantee — if either is ever upgraded, this should be re-checked". An unpinned transitive
+makes that re-check something that can be skipped silently. Pinning converts an upgrade into
+a deliberate act that trips a visible, explainable test.
+
+Loosening the assertion instead was considered and rejected: it would make the test assert an
+accident rather than a declared contract, and it would remove the only tripwire protecting a
+version-scoped verification.
+
+Conditions:
+1. Add `starlette==0.47.3` with a one-line comment: transitive dependency of fastapi 0.116.1,
+   pinned explicitly because `test_dependency_exception_handling.py` and the teardown-phase
+   reachability verification in this doc are scoped to this exact version — bump it together
+   with fastapi and re-run that verification.
+2. **Verify, do not assert**, that the pin resolves cleanly alongside `fastapi==0.116.1` in a
+   clean environment — a fresh venv is sufficient; the pip resolver is what is under test, not
+   the container.
+3. Re-run `test_dependency_exception_handling.py` and the full suite after.
+
+**Named and explicitly not ordered:** the rest of `requirements.txt` is equally unlocked
+(uvicorn's and argon2-cffi's transitives are unconstrained). Whether this project wants a full
+lockfile is a real question and a reproducibility posture decision for francis-ngannou's lane
+— it is not this job. Smallest change that solves it: pin the one transitive a test asserts on.
+
+### C3. Build the handler regression test. Confirmed gap, and wider than reported.
+
+Confirmed by grep: `main.py`'s `@app.exception_handler(sqlite3.OperationalError)` is the only
+registration outside the synthetic app in `test_dependency_exception_handling.py`, and no test
+in `test_http_concurrency.py` asserts its existence or behavior — the tripwires there cover
+async write routes, module-level connections, the `connect` import, `_boot`, and the
+`invoke()`-wrapping AST check. Deleting the decorator passes the entire suite today.
+
+**It is worse than "the handler could be deleted unnoticed."** B4's first two Done-when bullets
+both lack a durable test:
+- "No `sqlite3.OperationalError` with a locked/busy message ... surfaces as a 500" — provable
+  today only by inducing real contention, which B3 forbids asserting on.
+- "A non-locked/busy `OperationalError` still surfaces as a server exception with its
+  traceback, **verified empirically, not assumed**" — the only evidence is jackie-chan's
+  scratch probes, uncommitted and discarded. That is precisely the gap
+  `test_dependency_exception_handling.py` was created to close one round ago, recurring on a
+  different claim.
+
+**Ruling: build it — `registrar/tests/test_operational_error_handler.py`, new file, built on
+`FreshAppCase` from `app_harness.py`.** Deterministic, no threads, no timing. Four cases,
+against the **real** `main.app`, not a synthetic one:
+
+1. **Registration:** `sqlite3.OperationalError` is a key in `main.app.exception_handlers`.
+   The literal tripwire for someone deleting the decorator.
+2. **Dependency-setup origin:** `app.dependency_overrides[main.get_db]` replaced with a
+   generator raising `sqlite3.OperationalError("database is locked")` before its `yield`.
+   Assert 503 and a body of exactly `{"detail": "database is locked"}` — B1 condition 3's
+   contract with `viewer/registrar_client.py`, currently untested against the real app.
+3. **Auth-path origin:** monkeypatch `main.authenticate_identity` to raise the same. This is
+   Issue 1's actual finding — `identity()`'s `last_used_at` UPDATE, which no route wraps in
+   `invoke()` — and it is the origin most likely to regress if someone "tidies" `identity()`.
+4. **Negative control:** `sqlite3.OperationalError("no such table: posts")` re-raises under
+   `TestClient(raise_server_exceptions=True)` and yields a genuine 500 under
+   `raise_server_exceptions=False`. This is the assertion that stops a future "improvement"
+   from turning schema skew into a tidy retryable 503 — the silent-wrongness this whole
+   change exists to remove.
+
+Constraints: `FreshAppCase` is not modified (Addendum A3). Every override and monkeypatch is
+undone in `addCleanup`. No new assertion in any existing file.
+
+Why the four cases and not just case 1: case 1 alone tests that a decorator exists, which is
+a weaker claim than the doc actually makes. Cases 2-4 cost little more and convert B4's first
+two bullets from probe-and-discard into standing coverage — the same move
+`test_dependency_exception_handling.py` made, applied to the real app instead of a stand-in.
+
+### C4. ronda-rousey appends her own QA section to this doc. She writes it, not a summarizer.
+
+Verified rather than assumed: grepping this file for `ronda` returns only second-hand
+references written by others, and `122` appears nowhere in it. Every other contributor's work
+lives here in their own voice with their own evidence; hers exists in commit messages and in
+`test_http_concurrency.py`'s module docstring (lines 78-112, which is a good home for it and
+should stay) — and that docstring cross-references "ronda-rousey's QA report, 2026-09-22",
+which this doc does not contain.
+
+This is not cosmetic consistency. The 122s stall is an **open, not-root-caused finding**, and a
+doc of record that omits an open finding is not a doc of record. A job cannot be declared closed
+against an artifact that does not contain what is still open.
+
+**It must be written by her.** A summary composed by anyone else is the restate-someone-else's-
+finding-uncritically failure mode this file has already corrected twice (A0's negative claim from
+a single file read; Issue 2's insistence on an independent count). Bounded scope — one section,
+no re-litigation of anything already ruled:
+
+- What she tested and how, with her actual numbers (the original 20x5 repro, the WS3 flake rate,
+  the concurrency-suite trials).
+- The 122s stall as a **still-open finding**: the observed rate, the two independent
+  reproductions, what she ruled out (SQLite contention alone, argon2 alone), why it is out of
+  scope here, and why it is not evidence about the NAS (Risk 7 — Windows/CPython 3.14.6 local vs
+  Python 3.12 Linux container).
+- What she did **not** cover, stated as plainly as what she did.
+
+**Routing if the stall is ever picked up:** jet-li (latency/performance analysis), with
+ronda-rousey holding the repro. A strikingly fixed ~122.0-122.1s that always recovers with
+correct data reads as a timeout-and-retry somewhere in the anyio/Starlette/argon2 stack, not as
+a concurrency defect. Named so a future conversation starts in the right lane. **Not ordered.**
+
+### C5. `viewer/registrar_client.py` has no retry — deferred, with the shape named.
+
+Confirmed at `viewer/registrar_client.py:157`: any status >= 400 raises `RegistrarError`, and
+`_session()` mounts no retry adapter. B3's "any 503 must be retryable" is true of the API and
+unexercised by the one consumer.
+
+**Ruling: do not action now. Named follow-up, same treatment as B3's `last_used_at` lever and
+jackie-chan's `sqlite_errorcode` swap.** Four reasons, in order of weight:
+
+1. **This job did not create the gap.** The Registrar already returned 503 before any of this
+   work — `invoke()`'s `Unavailable`, `ready()`'s pragma failure, and `verify`'s two
+   configuration guards — and the viewer has never retried any of them. B1 adds one more, rare
+   source of a status the client was already unable to handle. Fixing a pre-existing client-side
+   robustness gap because this job made it marginally more reachable is scope drift with a
+   plausible cover story.
+2. **The right fix is a policy decision, not a patch.** A `urllib3.Retry` mounted on
+   `_session()` changes behavior for every call and every status, adds latency on genuine
+   outages, and interacts with `TIMEOUT = (3.05, 15.0)` and Streamlit's `@st.cache_data`. That
+   is a small design decision deserving its own note, not a reflex `for attempt in range(3)`.
+3. **Exposure is bounded and low.** Tens of milliseconds per in-flight read, during
+   operator-initiated imports, on a home LAN, and only for a read whose body was already
+   executing when the import took the write lock (B3's corrected blast radius).
+4. `viewer/registrar_client.py` has been at zero diff as a standing constraint of this job since
+   the original scope line. Round four is the wrong time to breach that for a low-severity
+   pre-existing condition.
+
+**Shape, so the follow-up does not start from zero:** a `urllib3.util.Retry` with
+`status_forcelist=[503]`, `allowed_methods=["GET"]` (safe — this module is read-only by design),
+a small `total` and short `backoff_factor`, mounted on the `@st.cache_resource` session. The
+non-obvious part is what the user sees when retries are exhausted mid-`sweep_posts()` walk, and
+whether a partial walk is allowed to render — that is the actual design question, not the retry
+itself.
+
+**Lane when raised: tony-jaa** — consuming an external API is his, not bruce-lee's.
+
+### C6. Closeout gate
+
+This job is closed when C1's amendment is applied with its two pieces of structural evidence
+re-run and shown, C2 is pinned and clean-resolve verified, C3's test file is green and
+peer-reviewed, and C4's section is in this doc. C1's test fix and C5 are separate, smaller
+jobs raised after closeout. Nothing in Addendum C reopens A, B, or any ruling already signed off.
