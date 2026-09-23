@@ -1,4 +1,4 @@
-import base64,hashlib,json,sqlite3,tempfile,threading,unittest,uuid
+import base64,hashlib,json,sqlite3,tempfile,threading,time,unittest,uuid
 from pathlib import Path
 from registrar.app.db import connect,migrate
 import registrar.app.db as db_module
@@ -15,6 +15,64 @@ ASSIGN=lambda who:[{"agent_id":who,"role":"responsible"}]
 # main.py's cursor_keys() resolves from REGISTRAR_CURSOR_KEY_FILE.
 CURSOR_KEY_A=("key-a",b"unit-test-cursor-signing-key-aaaa")
 CURSOR_KEY_B=("key-b",b"unit-test-cursor-signing-key-bbbb")
+
+# --- Addendum C1 (docs/town-registrar-connection-concurrency.md): bounded
+# retry-on-locked for the WS3 100-thread concurrency tests below ---
+#
+# WHY THIS EXISTS -- read before "simplifying" it away: test_concurrent_
+# root_allocation and test_concurrent_children_and_publication each spin up
+# 100 threads, every thread its own sqlite3 connection, all racing
+# BEGIN IMMEDIATE for ONE SQLite write lock. Measured dev hardware has 6
+# cores / 12 logical processors, so 100 threads is ~8x oversubscription
+# before any other process on the machine is even counted. db.py's
+# busy_timeout=5000 is a WALL-CLOCK timeout, not a CPU-time budget: a thread
+# that is holding the write lock and gets descheduled by the OS can stay
+# off-CPU long enough, in real elapsed time, for every waiting thread's
+# 5-second clock to expire -- with zero external load required. This was
+# reproduced directly (jackie-chan: 5/5 and 3/5 failures across 5 runs each,
+# CPU load under 15% throughout) and root-caused in the design doc's
+# "'zero flakiness' was wrong" correction section and ruled on in Addendum
+# C1 (docs/town-registrar-connection-concurrency.md), which chose this
+# bounded-retry approach over reducing the thread count (would weaken the
+# uniqueness assertion's contention coverage) or a flaky-comment (leaves a
+# permanently red suite). This is NOT general robustness scaffolding -- it
+# tolerates exactly the known oversubscription-induced lock timeout and
+# nothing else.
+_LOCK_RETRY_ATTEMPTS=5          # small, fixed cap -- see rationale below
+_LOCK_RETRY_BACKOFF_BASE_S=0.05 # linear backoff: 0.05s, 0.10s, 0.15s, 0.20s
+
+def _is_locked_or_busy(exc):
+    """Same locked/busy message discrimination registrar/app/main.py's
+    `operational_error` app-level exception handler uses (`main.py`,
+    `if "locked" in message or "busy" in message`) -- kept in lockstep with
+    that handler on purpose, so this test only tolerates precisely the
+    condition production itself treats as a retryable 503, nothing wider."""
+    message=str(exc).lower()
+    return "locked" in message or "busy" in message
+
+def _call_with_locked_retry(fn):
+    """Call fn(), retrying ONLY sqlite3.OperationalError(locked/busy), up to
+    _LOCK_RETRY_ATTEMPTS total tries with brief linear backoff between them.
+
+    Any other exception -- including a different sqlite3.OperationalError
+    (e.g. schema skew) or any non-OperationalError -- propagates immediately
+    on the first occurrence, no retry. Exhausting every attempt on a genuine
+    lock/busy condition re-raises the last such exception: that is a real
+    test failure, never swallowed as a skip or a warning.
+
+    This changes how a thread handles a transient lock timeout; it does not
+    change what the calling test accepts as a correct result -- the
+    uniqueness assertions downstream (`assertEqual(100, len(set(results)))`
+    and equivalent) are untouched and stay exactly as strict as before.
+    """
+    for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            if not _is_locked_or_busy(exc): raise
+            if attempt==_LOCK_RETRY_ATTEMPTS-1: raise
+            time.sleep(_LOCK_RETRY_BACKOFF_BASE_S*(attempt+1))
+
 class RegistrarTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.path=str(Path(self.tmp.name)/"r.db")
@@ -30,7 +88,7 @@ class RegistrarTests(unittest.TestCase):
         results=[]; errors=[]
         def run(i):
             db=connect(self.path); reg=Registrar(db)
-            try: results.append(reg.reserve_root("bishop",f"r{i}",{"prefix":"TS","utc_date":"20260917","namespace":"bishop","board":"requests","creator":"bishop","assignments":ASSIGN("bishop")})["thread_id"])
+            try: results.append(_call_with_locked_retry(lambda: reg.reserve_root("bishop",f"r{i}",{"prefix":"TS","utc_date":"20260917","namespace":"bishop","board":"requests","creator":"bishop","assignments":ASSIGN("bishop")}))["thread_id"])
             except Exception as exc: errors.append(exc)
             finally: db.close()
         threads=[threading.Thread(target=run,args=(i,)) for i in range(100)]
@@ -39,8 +97,8 @@ class RegistrarTests(unittest.TestCase):
     def test_concurrent_children_and_publication(self):
         root=self.root(); results=[]
         def run(i):
-            db=connect(self.path)
-            try: results.append(Registrar(db).reserve_post("bishop",f"p{i}",root["thread_id"],{"board":"requests","author":"bishop","state":"WORKING","assignments":ASSIGN("bishop")}))
+            db=connect(self.path); reg=Registrar(db)
+            try: results.append(_call_with_locked_retry(lambda: reg.reserve_post("bishop",f"p{i}",root["thread_id"],{"board":"requests","author":"bishop","state":"WORKING","assignments":ASSIGN("bishop")})))
             finally: db.close()
         threads=[threading.Thread(target=run,args=(i,)) for i in range(100)]
         [t.start() for t in threads]; [t.join() for t in threads]
