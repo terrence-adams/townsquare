@@ -1016,3 +1016,90 @@ rejected form.
 **No further concerns on B1 or B2. Both proceed as ruled.** bruce-lee's resulting commit is the next
 thing I review — connection lifecycle, transaction semantics, and the four conditions above are what
 I'll check it against.
+
+## jackie-chan's review of `60ee5aa` — B1/B2 implementation, both flagged items resolved (2026-09-22)
+
+**No objection. Approved.** `git diff 8b2d2a4 60ee5aa` touches only `registrar/app/main.py` (75
+insertions, 27 deletions); confirmed `registrar/tests/test_http.py`'s diff against the same range is
+empty (`0` lines) — zero assertion changes, exactly as claimed.
+
+### B1's four conditions — re-verified against the actual delivered code, not the description of it
+
+1. **`OperationalError` only:** `app.exception_handlers` dumped directly from the booted module shows
+   exactly one custom entry (`OperationalError`) alongside FastAPI's own three defaults
+   (`HTTPException`, `RequestValidationError`, `WebSocketRequestValidationError`) — nothing broader
+   registered. Matches.
+2. **Non-locked/busy re-raise:** confirmed by reading `operational_error()` — `raise exc` on the
+   non-matching branch, no conversion. Matches my own independent probe from the prior round.
+3. **503 body shape:** `JSONResponse({"detail":str(exc)},status_code=503)` — byte-identical to
+   `HTTPException(503,str(exc))`'s own output, previously verified.
+4. **`invoke()`'s clause deleted, not duplicated:** confirmed by reading `invoke()` — the
+   `except sqlite3.OperationalError` clause is gone, the other four (`Conflict`/`Forbidden`/
+   `Invalid`/`Unavailable`) are untouched, with a comment against re-adding it or promoting them.
+
+### B2 boot form — confirmed structurally, not just by diff inspection
+
+Ran this myself against the real booted module (`import registrar.app.main`, then inspected `vars()`):
+`[k for k,v in vars(m).items() if isinstance(v,sqlite3.Connection)]` returns `[]` — no module
+attribute is a connection. `hasattr(m,'_boot')` is `False`. `hasattr(m,'connect')` is `False` — the
+import line correctly dropped it. All three of B2's structural claims hold against the running app,
+not just the source text.
+
+### Flagged item 1 — teardown-phase reachability — resolved: it IS reachable, not a gap
+
+bruce-lee's uncertainty was reasonable to raise (dependency-cleanup exception handling has been a
+genuinely version-dependent FastAPI/Starlette footgun historically), but on this repo's pinned
+versions it does not hold. Built a faithful reproduction of the actual shape — a fake connection whose
+`.close()` itself raises `sqlite3.OperationalError("database is locked")` inside `session()`'s
+`finally`, wired through the real `get_db()`/`session()` contextmanager nesting, against
+`fastapi==0.116.1`/`starlette==0.47.3` — and confirmed the app-level handler catches it and returns
+`503 {"detail":"database is locked"}` correctly under both `TestClient(raise_server_exceptions=True)`
+(pytest's view) and `False` (production-equivalent ASGI error path). The "driver exceptions map
+structurally at the app boundary" framing from Addendum B holds through dependency teardown on this
+stack, not just through route bodies and dependency setup. **Ruling: no doc note needed as a caveat or
+limitation — but recording the verification here so it isn't re-litigated, and flagging the one real
+caveat:** this specific guarantee (yield-dependency cleanup exceptions routed through app-level
+handlers) is a property of the current fastapi/starlette pin, not a language-level guarantee — if
+either is ever upgraded, this should be re-checked, not assumed to still hold. Low cost, worth one
+line in a future dependency-bump changelog, not a standing risk today. Scratch probe:
+`...\scratchpad\teardown_probe2.py`.
+
+### Flagged item 2 — `exc.sqlite_errorcode` — verified sound, ruled to defer, not implement now
+
+Reproduced a genuine lock-contention `OperationalError` (two real connections, one holding
+`BEGIN IMMEDIATE` uncommitted, the other timing out) rather than trusting a synthetic string, on the
+pinned Python (3.14.6): `exc.sqlite_errorcode` is `5` (`SQLITE_BUSY`), `exc.sqlite_errorname` is
+`"SQLITE_BUSY"`. Compared against the schema-skew case ("no such table"): `sqlite_errorcode` is `1`
+(`SQLITE_ERROR`), cleanly distinct. Both attributes are populated, present, and correctly discriminate
+the exact two conditions this handler needs to tell apart. One correction to bruce-lee's framing
+worth recording: SQLite's error strings are not locale-sensitive (`sqlite3_errmsg()` is fixed English
+text in the C library regardless of OS locale), so "locale-independent" overstates the real risk —
+the genuine risk is *wording drift across SQLite/Python versions*, which errorcode is immune to and
+substring matching is not. That risk is real but low-probability today.
+
+**Ruling: defer, don't implement in this commit.** Ip-man's B1 text specified "the same locked/busy
+discrimination `invoke()` uses today" as a deliberate scope limit on an already-third-round change
+("smallest change that solves it applies with full force"). Swapping the discrimination mechanism is
+not a bug fix within that scope, it's a second, independent improvement riding on the same commit —
+exactly the kind of addition the B1/A1 pattern in this doc has consistently pushed to its own,
+separate, reviewed change rather than folding in opportunistically. I'm applying that same discipline
+to my own finding here, not just other people's. The verification above stands so a future change
+doesn't have to re-derive it — this is a named, ready-to-implement follow-up
+(`exc.sqlite_errorcode in (5,6)` for `SQLITE_BUSY`/`SQLITE_LOCKED`, replacing the `"locked" in
+message or "busy" in message` check), not a vague someday-item. Raise it as its own line if it's ever
+worth raising, same framing B3 used for the `last_used_at` UPDATE lever. Scratch probe:
+`...\scratchpad\errorcode_probe.py`.
+
+### Test suite — reproduced independently, not accepted from the commit message
+
+Ran the full suite myself: `2 failed, 104 passed` on one pass, `1 failed, 104 passed` (same single
+test, `test_concurrent_children_and_publication`) on two more targeted re-runs of `test_registrar.py`
+alone — consistent with the pre-existing Windows SQLite flake this doc has tracked since `cfa7ecd`'s
+own commit message (which reported the same two tests, same failure mode, against `HEAD` in a clean
+worktree before any of this round's changes existed). Both failing tests build their own connections
+directly in `test_registrar.py` and never import `main.py` — structurally incapable of being affected
+by this change. `test_http.py` + `test_legacy_taxonomy.py` together: `71 passed, 0 failed`, confirming
+bruce-lee's 9+62 claim.
+
+**No further concerns. `60ee5aa` is approved as delivered.** Pushing it now along with this review,
+per the coordinator's routing — my sign-off, my access, no further gate needed.
