@@ -24,6 +24,8 @@ from urllib.parse import quote
 
 import requests
 import streamlit as st
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 # ---------------------------------------------------------------- configuration
 # The Registrar's Compose service name on the shared `registrar-internal`
@@ -113,13 +115,74 @@ def _read_token() -> str:
         return ""
 
 
+# A 503 from this API means one specific thing: the Registrar's write path
+# briefly held the SQLite write lock (an import in progress) and a retry
+# after that clears is guaranteed to succeed -- see
+# docs/town-registrar-connection-concurrency.md, Addendum C5/D. That is the
+# ONLY status retried here. Every other >=400 status means something else
+# entirely -- bad credential, no such record, a real server bug -- and
+# retrying those blindly would just repeat a failure that isn't going to
+# change, so status_forcelist is deliberately narrow.
+#
+# connect=0 / read=0 / redirect=0: do NOT add retries for network-level
+# failures. A Registrar that is actually down should fail exactly as fast
+# as it does today (one attempt, immediate ConnectionError/Timeout) --
+# widening that to "retry a dead service 3 times" would turn a fast, clear
+# "cannot reach the Registrar" error into a multi-second hang for a
+# completely different failure mode nobody asked to change. Only a
+# *response* with a forced status (503) consumes the retry budget.
+#
+# total=3, backoff_factor=0.2: urllib3's schedule for this is 0s, 0.4s,
+# 0.8s between attempts (~1.2s of added delay in the worst case, on top of
+# the request round-trips themselves) against a contention window measured
+# in tens of milliseconds -- generous headroom without turning a rare event
+# into a multi-second stall. Comfortably inside TIMEOUT's 15s per-call read
+# timeout and fine for sweep_posts()'s "Reading the Registrar..." spinner.
+#
+# allowed_methods=["GET"]: this module issues nothing else -- see the
+# module docstring and Readonly's AST checks in test_viewer.py -- so this
+# is confirmation, not a restriction that changes anything in practice.
+#
+# raise_on_status=False: let a still-503 response after retries are
+# exhausted flow back to _get() as a normal response object, so the
+# existing `response.status_code >= 400` handling below classifies it
+# (RegistrarError with status=503, a message naming the status) exactly
+# like any other error status. The alternative -- leaving this True --
+# makes urllib3 raise MaxRetryError instead, which requests re-wraps as
+# RetryError, which _get()'s `except requests.RequestException` below
+# would then catch and mis-report as "Cannot reach the Registrar" -- a
+# connectivity message for what is actually "the Registrar answered every
+# time, and every answer was 503." One code path handling one failure
+# shape is simpler than two.
+_RETRY = Retry(
+    total=3,
+    connect=0,
+    read=0,
+    redirect=0,
+    status=3,
+    status_forcelist=[503],
+    allowed_methods=["GET"],
+    backoff_factor=0.2,
+    raise_on_status=False,
+)
+
+
 @st.cache_resource
 def _session() -> requests.Session:
-    """One connection pool for the whole server process."""
+    """One connection pool for the whole server process.
+
+    Mounts _RETRY so a 503 caused by momentary write-lock contention (see
+    _RETRY's comment above) is retried transparently. Every other failure
+    -- bad status, unreachable host, timeout -- behaves exactly as it did
+    before this session carried a retry adapter.
+    """
     session = requests.Session()
     session.headers.update(
         {"Accept": "application/json", "User-Agent": "townsquare-viewer/1"}
     )
+    adapter = HTTPAdapter(max_retries=_RETRY)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     return session
 
 
@@ -292,7 +355,43 @@ def sweep_posts(
     is worse than one that admits it cannot see them all.
 
     Returns `(rows, saturated)` where `saturated` names every partition that
-    returned exactly API_MAX_LIMIT rows and so may be incomplete.
+    either returned exactly API_MAX_LIMIT rows (may be incomplete -- the
+    200-row cap) or came back 503 with its retry budget exhausted (definitely
+    incomplete -- that partition's rows are entirely missing, not just
+    possibly truncated). See the design note below for why a partition-level
+    503 does not abort the whole sweep.
+
+    Design decision -- a 503 that survives _session()'s retry (see _RETRY)
+    skips only its own partition, not the whole sweep:
+    docs/town-registrar-connection-concurrency.md's Addendum C5 named this as
+    the real design question, not the retry mechanism itself. Resolution,
+    recorded here because this function is where it's implemented:
+
+    - A 503 this deep (retries already exhausted) means contention outlasted
+      ~1.2s of backoff during a call that, per the design note, is normally
+      won or lost within tens of milliseconds -- rare enough that losing an
+      entire multi-partition sweep over one stuck partition would be a worse
+      user experience than the alternative, not a more honest one.
+    - Every row already collected from the OTHER partitions in this sweep is
+      real, valid data -- the Registrar answered those calls correctly.
+      Discarding it because one unrelated partition is temporarily
+      unavailable throws away information the user already has a use for
+      (this mirrors the existing API_MAX_LIMIT saturation handling below,
+      which was already choosing "return what's known, label what isn't"
+      over "fail the whole call" for a different kind of incompleteness).
+    - The alternative (raise, blank the page) is not silently avoided here:
+      it is *kept* for every other failure. A 401/403/404/non-JSON/network
+      failure still aborts the whole sweep immediately, same as before this
+      change -- those mean "this call cannot be trusted" (bad credential,
+      real bug, total outage), where a partial render would misrepresent the
+      data rather than merely omit some of it. Only status==503 -- the one
+      status this API defines as "temporary, not a data problem" -- gets the
+      partial-render treatment.
+    - Unlike an API_MAX_LIMIT-saturated partition, an unavailable partition
+      is deliberately NOT added to `full` and so is never retried by the
+      board-subdivision loop below: hammering an already-contended write
+      lock with more reads is the wrong response to a 503, not a path to a
+      better answer.
     """
     base = {"assigned_to": assigned_to, "role": role, "state": state, "root": root}
     reg_values = [registration_state] if registration_state else list(REGISTRATION_STATES)
@@ -300,13 +399,20 @@ def sweep_posts(
     rows: dict[str, dict[str, Any]] = {}
     seen: set[tuple[str, str | None]] = set()
     full: set[tuple[str, str | None]] = set()
+    unavailable: set[tuple[str, str | None]] = set()
     subdivided: set[str] = set()
 
     def run(reg: str, brd: str | None) -> None:
         if (reg, brd) in seen:
             return
         seen.add((reg, brd))
-        batch = list_posts(**base, registration_state=reg, board=brd, limit=API_MAX_LIMIT)
+        try:
+            batch = list_posts(**base, registration_state=reg, board=brd, limit=API_MAX_LIMIT)
+        except RegistrarError as exc:
+            if exc.status != 503:
+                raise  # not a contention signal -- abort the whole sweep, as before
+            unavailable.add((reg, brd))
+            return
         rows.update({r["post_uid"]: r for r in batch})
         if len(batch) == API_MAX_LIMIT:
             full.add((reg, brd))
@@ -340,7 +446,22 @@ def sweep_posts(
         # thing that truncated; only its still-full children are.
         if brd is not None or reg not in subdivided
     )
+    # Folded into the same list `views.truncation_warning()` already renders,
+    # rather than widening this function's return signature -- every caller
+    # in app_pages/ unpacks `rows, saturated = sweep_posts(...)`, and this
+    # follow-up's scope is registrar_client.py only (see the design note).
+    # Each label says *why* on its own -- "Registrar unavailable" reads
+    # differently from "came back full" -- since the two causes share one
+    # list and views.py's fixed banner text was written for the 200-row-cap
+    # case only. A tighter dual-reason banner in views.py is a fine, small,
+    # separate follow-up if this wording ever bothers someone; not done here.
+    unavailable_labels = sorted(
+        f"registration_state={reg}"
+        + (f", board={brd}" if brd else "")
+        + " -- Registrar unavailable (HTTP 503, contention did not clear after retry)"
+        for reg, brd in unavailable
+    )
     ordered = sorted(
         rows.values(), key=lambda r: (r.get("created_at") or "", r.get("post_uid") or "")
     )
-    return ordered, saturated
+    return ordered, saturated + unavailable_labels

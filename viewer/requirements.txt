@@ -1,2 +1,6 @@
 streamlit==1.64.0
 requests==2.34.2
+# Direct dependency as of the registrar_client.py 503 retry policy --
+# previously only a transitive dependency of requests. Pinned to the
+# version this was built and tested against.
+urllib3==2.7.0

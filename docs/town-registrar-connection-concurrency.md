@@ -1813,3 +1813,83 @@ before I reverted cleanly (`git status`/`git diff --stat` empty). Nothing in ron
 section contradicts any ruling I've made earlier in this job. C3 is closed. This does not reopen C1,
 C2, C4, or C5 — those stand as ruled in Addendum C. Per C6, this was the last open review item on my
 lane; pending only helio-gracie's closing gateway pass.
+
+## Addendum D. tony-jaa — C5 implemented: retry policy + the partial-sweep resolution (2026-09-23)
+
+C5 named this as a separate, smaller job raised after closeout (C6), routed to my lane
+("consuming an external API is his, not bruce-lee's"). Scope: `viewer/registrar_client.py`
+only, plus `viewer/requirements.txt` to pin `urllib3` now that it's a direct import, not just
+a transitive one. No other file changed — `views.py`, `app_pages/*.py`, and `registrar/app/`
+are all untouched, and `sweep_posts()`'s `(rows, saturated)` return signature is unchanged, on
+purpose (see below).
+
+**Retry policy, mounted on `_session()`'s `HTTPAdapter`:**
+
+    Retry(total=3, connect=0, read=0, redirect=0, status=3,
+          status_forcelist=[503], allowed_methods=["GET"],
+          backoff_factor=0.2, raise_on_status=False)
+
+- `status_forcelist=[503]` only, per C5's shape and B3's characterization: this API's 503 means
+  "contention, safe to retry," nothing else does.
+- `connect=0/read=0/redirect=0` is the one addition to C5's named shape, not spelled out
+  there: without it, a genuinely unreachable Registrar would also get retried up to `total`,
+  turning today's fast, clear "Cannot reach the Registrar" failure into a multi-second one for
+  a failure mode nobody asked to change. Verified this adds zero delay over the pre-change
+  baseline (see Testing below) rather than just reasoning it should.
+- `raise_on_status=False`: lets a still-503 response after exhaustion flow back to `_get()`'s
+  existing status-code handling instead of urllib3 raising `MaxRetryError` (which requests
+  re-wraps as `RetryError`, which `_get()`'s generic `RequestException` handler would then
+  mis-report as a connectivity failure rather than "the Registrar answered every time, and
+  every answer was 503").
+- `total=3`, `backoff_factor=0.2` -> urllib3's schedule is 0s/0.4s/0.8s (~1.2s worst case),
+  against a contention window C5/the original design note measured in tens of milliseconds.
+  Comfortably inside `TIMEOUT`'s 15s read timeout.
+
+**The partial-sweep design question (the actual point of this job, per C5):** a 503 that
+survives the retry above skips only its own partition in `sweep_posts()`, not the whole sweep.
+Every other partition's already-fetched rows are still returned; the stuck partition is named
+in the same `saturated` list `views.truncation_warning()` already renders for the pre-existing
+200-row-cap case, with a label that says why ("... -- Registrar unavailable (HTTP 503,
+contention did not clear after retry)") so the two causes read differently even though they
+share one list. Reasoning is written in full in `sweep_posts()`'s docstring in the diff, not
+just here. Short version: real data from unaffected partitions is worth keeping, a stuck
+partition is rare and now retried before it ever gets this far, and the alternative (blank the
+whole page over one partition) is a worse answer, not a more honest one. This is deliberately
+**not** the treatment for any other failure: a non-503 `RegistrarError` (bad credential, real
+bug, total outage) still aborts the whole sweep exactly as before, unchanged — those mean "this
+call cannot be trusted," where a partial render would misrepresent data rather than merely omit
+some of it. Kept the return signature at `(rows, saturated)` rather than widening it, since six
+call sites in `app_pages/` unpack it positionally and this job's scope is `registrar_client.py`
+only — the cost is that `views.py`'s fixed banner sentence ("...these partitions came back full
+and may be incomplete") is written for the 200-row-cap case and reads slightly off for a
+503-skipped one; each label is self-explanatory regardless, and a two-sentence banner rewrite in
+`views.py` is a fine, separate, small follow-up if that ever bothers someone. Not done here,
+named so it isn't rediscovered as a surprise.
+
+**Testing:** no live Registrar reachable in this environment, so a real local HTTP server (not
+a transport-level mock) stood in, per C5's "your call" on approach — the thing being verified
+was "does the mounted Retry policy behave as designed against a real HTTP round trip and real
+backoff timing," which a mock of `requests`/`urllib3` internals would have assumed rather than
+tested. Scratch probe (throwaway, same treatment as jackie-chan's Issue-1 exception-handler
+probe elsewhere in this doc — not committed):
+`registrar_client_503_probe.py`, 19/19 checks passed:
+
+- Normal 200 (1 request), transient 503x2-then-200 (retried transparently, 0.40s, matching the
+  documented 0s+0.4s backoff schedule), persistent 503 (4 attempts, 1.21s, raises with
+  `status=503` and a message naming the status rather than "Cannot reach"), a non-503 status
+  (404, exactly 1 attempt -- confirms `status_forcelist` is respected, not just declared).
+- Unreachable host: measured a ~2.0s baseline on this Windows machine for `WinError 10061`
+  connection-refused with **no** retry adapter involved at all (confirmed identical with a raw
+  `socket.connect()`, nothing to do with this change) -- the mounted retry session added no
+  measurable delay on top of that baseline. Noting the baseline number itself so it isn't
+  mistaken for something this change introduced if it's ever seen again.
+- `sweep_posts()` partial-sweep logic (list_posts() monkeypatched, no HTTP needed for this
+  part): one partition raising `RegistrarError(status=503)` still returns every other
+  partition's rows with the stuck one named and distinctly labelled; a non-503 error from one
+  partition still aborts the whole sweep; an all-success sweep returns `saturated == []`
+  exactly as before this change.
+- Full existing `test_viewer.py` suite (11 tests, none of which exercise the real HTTP/retry
+  layer -- `Canned`/monkeypatched fakes replace `_get` entirely) re-run before and after:
+  unchanged, all green.
+
+No objection raised, nothing reopened here. This closes C5's named follow-up.
