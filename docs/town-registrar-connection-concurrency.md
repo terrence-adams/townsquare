@@ -1343,8 +1343,8 @@ ran `pip install "fastapi==0.116.1" "starlette==0.47.3"` together (not sequentia
 resolver had to satisfy both at once), install succeeded, and `pip check` reported "No broken
 requirements found." Venv deleted afterward. Condition 3: `test_dependency_exception_handling.py`
 7/7 passed; full suite 120 passed / 2 failed / 1 error (the two documented pre-existing WS3
-hardware-oversubscription flakes, plus one unexpected hit on `MixedReadWriteConcurrencyTests` —
-isolated and re-run alone, it passed at 125.23s, matching ronda-rousey's documented ~122s stall
+hardware-oversubscription flakes, plus one unexpected hit on `MixedReadWriteConcurrencyTests`).
+Isolated and re-run alone, it passed at 125.23s, matching ronda-rousey's documented ~122s stall
 signature rather than a real regression; confirmed via `git stash`/`pop` that his diff was
 `requirements.txt`-only and could not have caused it. See ronda-rousey's QA report below for the
 fuller picture this data point feeds into — it's the first evidence the stall can present as an
