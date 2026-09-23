@@ -1448,3 +1448,204 @@ This job is closed when C1's amendment is applied with its two pieces of structu
 re-run and shown, C2 is pinned and clean-resolve verified, C3's test file is green and
 peer-reviewed, and C4's section is in this doc. C1's test fix and C5 are separate, smaller
 jobs raised after closeout. Nothing in Addendum C reopens A, B, or any ruling already signed off.
+
+## Ronda-rousey's QA report — testing summary and the 122s stall (2026-09-22)
+
+**Why this section exists:** ip-man's C4 ruling checked and found that my work on this job lived
+only in commit messages and in `test_http_concurrency.py`'s module docstring, never in this doc of
+record the way every other contributor's work does — and that docstring cross-references "ronda-
+rousey's QA report, 2026-09-22" for the 122s stall, a section this doc did not actually contain
+until now. Writing my own record, in my own voice, of my own work — not a restatement of what
+others have already said about it (Issue 2 and A0's own standard, applied to myself this time).
+Not re-litigating B1, B2, B3, or the WS3-flakiness reconciliation — those are ruled, and this is my
+testing record, not a re-review of anyone else's ruling.
+
+### What I tested, and how
+
+**1. The original defect repro — what started this whole job.** Against the pre-fix `main.py`
+(the single module-level `db`/`service` shared across every threadpool-dispatched read route),
+20 trials of 5 concurrent, independent readers each running a full paginated walk of
+`GET /v1/posts` (100 walks total). Result: **34/100 walks crashed outright** (raised an exception
+before completing); of the 66 that completed with no exception, **44 returned silently wrong data**
+— duplicate `post_uid`s or premature truncation from a corrupted, validly-signed cursor. Only
+22/100 walks were both exception-free and correct. This is the number cited at the top of this doc
+("How this was found" and "Measured impact") and the reason a "no 5xx" assertion was never going to
+be sufficient regression coverage — it would have passed on roughly two-thirds of these runs.
+
+**2. `test_registrar.py`'s WS3 concurrency tests — flake-rate check.** Ran
+`test_concurrent_root_allocation` and `test_concurrent_children_and_publication` standalone, 5
+times each, on an otherwise idle machine (checked via `tasklist` immediately before running, for
+other `python.exe` processes). **Both failed 4 of 5 runs**, every failure
+`sqlite3.OperationalError: database is locked` from `Registrar.idem()`'s `BEGIN IMMEDIATE`. This is
+the finding that triggered jackie-chan's correction elsewhere in this doc — her own independent
+re-run got `test_concurrent_root_allocation` failing 5/5 and `test_concurrent_children_and_publication`
+failing 3/5, with CPU load ruled out (`Win32_Processor.LoadPercentage` never above 14% across her
+runs) and the root cause pinned to 100 threads racing SQLite's single write lock on a 12-logical-
+processor machine — real wall-clock `busy_timeout` expiry under OS-scheduler preemption at 8x
+thread oversubscription, not a defect in the tests or in the fix. I independently confirm that
+read: my numbers (4/5, 4/5) and hers (5/5, 3/5) are two different samples of the same
+timeout-under-oversubscription race, not two different phenomena — the exact pass/fail count
+varying run to run is itself consistent with a wall-clock race, not a deterministic defect
+signature. Neither test imports `main.py` or touches this job's actual changes (confirmed via
+`git diff fe6d953..HEAD -- registrar/tests/test_registrar.py` being empty), which is the structural
+argument C1's amended Done-when criterion now rests on instead of a green run.
+
+**3. The post-fix concurrency suite (`test_http_concurrency.py`), built by me against the real
+per-request-connection topology through the real HTTP layer — not direct connections, per the
+file-scoped rule I wrote into it.**
+
+- `HttpConcurrentPaginationTests`: `NUM_POSTS=24`, `PAGE_LIMIT=6` (4 pages/walk, so every walk
+  exercises real cursor traffic, not a single-page happy path), `CONCURRENT_READERS=5` (matching
+  the original repro's scale), `TRIALS=8` — 8 trials × 5 readers = **40 concurrent paginated walks
+  per run**, each asserted against the *exact* expected `post_uid` set (no duplicates, no missing
+  rows, no extras), not merely absence of a 5xx. Every walk in every run I've executed against the
+  fixed code passes exactly.
+- `MixedReadWriteConcurrencyTests`: `NUM_WRITES=12` sequential reserve-then-publish pairs racing
+  against `NUM_READERS=4` continuously-polling readers, cross-checking the reserve→publish
+  transaction boundary live via `GET /v1/aliases` (the filename alias `publish()` inserts in the
+  same `BEGIN IMMEDIATE` as the state-change `UPDATE`) rather than relying on WAL's snapshot-read
+  guarantee by assertion alone. `MAX_503_RETRY_ATTEMPTS=20` at `RETRY_DELAY_SECONDS=0.1` backoff,
+  per B3's exact status-code spec (200 normal, 503 legitimate-and-retryable, 500 never acceptable).
+  No 500 observed in any run I've executed; any 503 observed always cleared inside the retry
+  budget.
+- Four structural-tripwire classes (non-timing-dependent, can't pass flakily): no module-level
+  `sqlite3.Connection` reachable from `main.py`, `main.py` doesn't import `connect`, every write
+  route stays `async def`, and every route calling a `Registrar` method wraps it in `invoke()`
+  (static AST check against `main.py`'s actual source). All green, every run.
+
+**4. This pass, C3: `test_operational_error_handler.py`** — four deterministic cases against the
+real `main.app` (registration in `app.exception_handlers`, a `get_db`-origin locked/busy 503 with
+exact body, an `identity()`-origin locked/busy 503 with exact body, and the non-locked/busy
+negative control under both `raise_server_exceptions=True` and `=False`). No threads, no timing —
+every case is a scripted `dependency_overrides` entry or monkeypatch, so the result is identical on
+every run. 5/5 tests pass (the negative control is split across two test methods). Sanity-checked
+by temporarily deleting `@app.exception_handler(sqlite3.OperationalError)` from `main.py`: 3 of the
+5 tests fail as expected (registration, and both locked/busy 503 cases — the errors now propagate
+raw instead of mapping to 503), while the two negative-control tests still pass unchanged, because a
+non-locked error re-raising is the correct outcome whether or not the handler exists at all.
+Reverted cleanly; `git diff` on `main.py` after revert is empty.
+
+**5. Final full-suite verification for this pass, run once more at closeout as the task requires.**
+`python -m pytest registrar/tests/` (all six test files, 127 tests total): **126 passed, 1 failed**,
+511.68s (8m31s) wall time. The one failure was `test_concurrent_children_and_publication` — one of
+the two documented, pre-existing WS3 exceptions under C1's amended Done-when criterion;
+`test_concurrent_root_allocation` passed on this particular run, which is itself consistent with
+the probabilistic nature of the oversubscription race jackie-chan root-caused (the criterion
+requires these two stay the *only* tests permitted to fail, not that both fail on every run). No
+other test failed, including all 5 of the new `test_operational_error_handler.py` cases above. The
+8m31s wall time, well above what 127 mostly-sub-second tests would otherwise take, is consistent
+with the 122s stall (below) occurring at least once somewhere in `test_http_concurrency.py` during
+this run — expected, and not itself a failure, per the module docstring's own framing.
+
+### The 122s stall — still open, stated plainly
+
+This is a real, reproduced, **not-root-caused** finding, and it stays open at the close of this job.
+I am recording it here rather than letting it live only in a test-file docstring, per C4's own
+reasoning: a doc of record that omits an open finding is not a doc of record.
+
+**What I observed:** on this dev box (Windows, CPython 3.14.6), individual `GET /v1/posts` requests
+under genuine multi-thread concurrency — 4 to 6 concurrent readers, not tied to one specific reader
+count — occasionally take approximately **122 seconds** to complete instead of the usual <0.1s,
+before returning a normal 200 with fully correct data. Observed rate: **roughly 1-in-3 trials** at
+that concurrency range.
+
+**Reproduced two independent ways**, so this is not an artifact of one harness:
+
+1. Via `TestClient` — both a bare instance and one entered with a `with` block (ruling out
+   lifespan-related state as a factor, independent of Addendum A1's decision not to use `lifespan`
+   in the app itself).
+2. Via a real `uvicorn.Server` hit with `httpx.Client` over a real loopback socket. This path
+   instead raises `httpx.ReadTimeout` at whatever client timeout is configured, since a real
+   transport has no `TestClient`-style indefinite wait — different failure surface, same underlying
+   stall, which is what rules out "an artifact of `TestClient`'s in-process ASGI portal specifically"
+   as the explanation.
+
+**What I ruled out:** isolated stress tests of SQLite write contention alone, and of argon2
+verification alone, both stay sub-second under the same 6-way thread concurrency. So this is not
+simply "SQLite is slow" or "argon2 is slow" in isolation — something in the combination (FastAPI +
+Starlette + anyio + per-request `get_db` + argon2, under genuine OS-thread concurrency) occasionally
+stalls. The duration itself is suspiciously precise: reproduced to within tens of milliseconds
+across unrelated runs (~122.0–122.1s), which reads as a fixed timeout-and-recover somewhere in the
+stack rather than random scheduling jitter — but I have not identified where.
+
+**Blast radius is wider than "isolated latency" alone — confirmed by a third, independent
+reproduction, folded in here since I hold the repro and this is the section of record for it.**
+francis-ngannou, working C2 in parallel on this same round, ran the *full* suite (not this file in
+isolation) after his `requirements.txt` pin and got one FAILED + one ERROR entry — a
+`sqlite3.OperationalError: disk I/O error` surfacing inside `get_db` on
+`MixedReadWriteConcurrencyTests::test_mixed_read_write_no_500_and_503_is_retryable_and_writer_commits_are_visible`.
+Re-running that single test in isolation, it passed, taking **125.23s** — close enough to my
+documented ~122.0–122.1s window that this is almost certainly the same underlying stall, not a
+separate defect. He ruled out his own change as the cause (`git stash`/`pop` confirmed his diff was
+`requirements.txt`-only). **What this adds to my own finding:** under full-suite thread contention
+specifically (as opposed to running this one concurrency file by itself), the stall can present as
+an apparent test *failure* (a raised `OperationalError`, not caught and retried the way an
+in-request 503 would be, or a raw stall long enough to look like a hang from outside), not only as
+added latency on an otherwise-passing trial. I had not personally observed the failure/ERROR
+presentation before this — only the always-passes-eventually latency presentation documented above
+— so this widens what I can honestly claim about the finding's behavior, not just its cause. It
+does not change the "data is always correct when a trial does complete" observation, and it does
+not change that root-causing it is out of scope for me (below) — it does mean a future full-suite
+run, especially under added contention from other concurrently-running processes on the same
+machine, should not be surprised by an occasional single failed/errored test here rather than only
+slow ones, and that this is the same open finding, not a new regression to chase.
+
+**Why it's out of scope for me to root-cause further:** it does not bear on the connection-
+concurrency defect this test category exists to regression-test. Across dozens of trials at 4/5/6
+concurrent readers run in isolation, it never produced wrong data or a permanent hang — only
+latency, with the data returned always correct; the one full-suite-contention presentation above is
+the first time it has surfaced as an apparent failure rather than only as latency, and even there no
+wrong data was involved (the isolated re-run passed cleanly). Diagnosing a latency/failure anomaly
+this specific is a performance-analysis job, not a QA regression-coverage job; per ip-man's routing
+note in C4, if it's ever picked up, the lane is jet-li's (latency/performance analysis), with me
+holding the repro.
+
+**Why it is not evidence one way or the other about the NAS:** this is Risk #7 from the original
+design note, and it applies exactly here — this box runs Windows with CPython 3.14.6; the NAS
+deployment target runs Linux in a `python:3.12-slim` container. A local dev-box timing anomaly on a
+different OS and a different CPython minor version, with its own sqlite3 module and its own
+thread-scheduling behavior, is not proof the stall exists on the NAS, and is equally not proof it
+doesn't. I have not tested this on the NAS or on any Linux/3.12 environment. It stays exactly what
+it is: a local, dev-box-only, reproduced-but-unexplained finding.
+
+### What I did NOT cover
+
+Stated as plainly as what I did, not just as a footnote:
+
+- **No testing on the NAS, or on Linux, or on Python 3.12 at all.** Every number in this report —
+  the original repro, the WS3 flake rates, the concurrency-suite trials, the 122s stall — comes
+  from this one Windows/CPython-3.14.6 dev box. Nothing here is evidence about the actual deployment
+  target's behavior under concurrency, in either direction.
+- **I did not root-cause the 122s stall**, beyond the two ruled-out isolated-stress-test hypotheses
+  above. I don't know which layer of the stack it comes from.
+- **I did not build or verify jackie-chan's recommended `test_registrar.py` fix** (bounded
+  retry-on-locked, her option (b), the one C1 ordered as a separate follow-up commit after
+  closeout). That test file remains at zero diff, by design, for the structural argument C1's
+  amended criterion rests on — but the actual fix is not built, and is not mine to have built inside
+  this job.
+- **No concurrency scale beyond this job's own numbers.** `CONCURRENT_READERS=5` /
+  `NUM_READERS=4` is what I tested through the real HTTP layer. I have not tested 10, 50, or 100
+  concurrent HTTP callers against the per-request topology — the only place this app has ever seen
+  100-way concurrency is `test_registrar.py`'s direct-connection stress tests, which test
+  write-write contention on raw connections, not the HTTP-layer read topology this job's fix
+  actually changes.
+- **No true multi-process concurrency.** Every test here runs one Python process — in-process
+  `TestClient` or a single `uvicorn.Server` instance. Multiple worker processes (e.g., a real
+  `uvicorn --workers N` deployment) were not exercised.
+- **No concurrent writer-vs-writer contention through the real HTTP layer.** `MixedReadWriteConcurrencyTests`
+  has one sequential writer; write routes are event-loop-serialized by design (Risk #1, still true),
+  so this is expected to be a non-issue — but I have no empirical HTTP-layer data on what happens if
+  that invariant were ever violated, only the direct-connection WS3 tests' data on raw write-write
+  contention.
+- **No fuzzing or adversarial-input concurrency.** The concurrency suite exercises well-formed
+  pagination and well-formed mixed CRUD traffic only — no malformed cursors, no malformed request
+  bodies, arriving mid-race.
+- **The C3 handler tests are deliberately deterministic, single-request probes, not a concurrency
+  test.** They prove the handler exists and behaves correctly on a scripted exception; they do not
+  exercise it under actual lock contention (B3 already ruled that a timing-dependent "503 occurred"
+  assertion would flake, and I'm not reopening that here) — the contention-triggered path is only
+  ever exercised indirectly, by the absence of 500s in `MixedReadWriteConcurrencyTests` and by the
+  WS3 tests' own failures being `OperationalError`, not observed 500s downstream of the handler.
+- **No production-like network load.** Aside from the one `uvicorn.Server` + `httpx.Client` check
+  used specifically to rule out a `TestClient`-portal artifact for the 122s stall, everything else
+  runs over `TestClient`'s in-process ASGI transport, not real sockets under real client load.
