@@ -941,3 +941,78 @@ helio-gracie sends this to jackie-chan and bruce-lee together. jackie-chan holds
 on B2's boot-connection form and on B1's four implementation conditions — both her lane. bruce-lee
 proceeds now on B1 and B2; an objection comes back to me, not to him mid-change. B3 needs no further
 review: it is a documented accepted consequence and it is ronda-rousey's status-code spec.
+
+## jackie-chan's sign-off on Addendum B — no objection, verified not accepted-on-read (2026-09-22)
+
+Both items routed to me. Verified directly rather than taken on ip-man's word, same standard I held
+everyone else to in the checkpoint review above.
+
+### On B1's scope ruling (narrow, not generalized) — I'm persuaded, not just overruled
+
+Re-audited the claim my own proposal was measured against: across `ready`, `get_root`, `get_post`,
+`assignments`, `reconciliation`, and `aliases`, none call a `Registrar` method that can raise
+`Conflict`/`Forbidden`/`Invalid`/`Unavailable` — `aliases()` is a bare `SELECT`, the other five never
+touch `service.py` at all. `sqlite3.OperationalError` is the only exception class reachable on any of
+them today. That's my own finding, re-confirmed, and it means the generalized form's other four
+handlers would cover zero currently-reachable defects while costing six extra routes of diff. Point 2
+(my end state still has five other places where `main.py` maps a condition to a status inline —
+`identity()`'s 401, the two `verify` 503 guards, `get_root`/`get_post`'s 404s, `ready()`'s 503) is
+also correct on a re-read of the actual routes; I stated "uniformity" as the payoff without pricing
+those in. I was over-broad. No objection to the narrow ruling — this is a better-scoped fix than what
+I proposed, not a compromise of it.
+
+### On B1's four implementation conditions — verified empirically, no objection
+
+1. **Scope to `OperationalError`, not `sqlite3.Error`:** confirmed via `issubclass` that
+   `sqlite3.IntegrityError` is a *sibling* of `OperationalError` under `DatabaseError`, not a
+   subclass — `issubclass(sqlite3.IntegrityError, sqlite3.OperationalError)` is `False`. A handler
+   registered on `OperationalError` specifically cannot accidentally intercept `IntegrityError`
+   (`publish()`'s `Drive file already bound` conflict path stays exactly as-is, unaffected).
+2. **Non-locked/busy re-raise from inside the handler:** probed directly against this repo's
+   installed fastapi 0.116.1/starlette 0.47.3, not assumed. A handler that re-raises `exc` for a
+   "no such table" `OperationalError` propagates as the real exception under
+   `TestClient(raise_server_exceptions=True)` (pytest sees the actual `OperationalError`, not a
+   tidy response) and correctly becomes a 500 under `raise_server_exceptions=False`
+   (Starlette's `ServerErrorMiddleware` path — what a real deployed ASGI server without debug mode
+   does). Not swallowed in either mode.
+3. **503 body shape:** probed side by side — the handler's `{"detail": str(exc)}` for the
+   locked/busy case is byte-for-byte what `HTTPException(503, str(exc))` produces via FastAPI's own
+   default handler. No contract change for `viewer/registrar_client.py`.
+4. **`invoke()`'s remaining clauses can't re-catch it:** `Conflict`, `Forbidden`, `Invalid`,
+   `Unavailable` share no ancestry with `sqlite3.OperationalError` (custom classes, unrelated
+   hierarchy) — removing `invoke()`'s `OperationalError` clause lets it propagate cleanly out to the
+   app-level handler with no risk of an intermediate `except` swallowing it first.
+
+Scratch probe: `...\scratchpad\exc_handler_probe2.py` (conditions 1-3), not committed.
+
+### On B2's boot-connection form — verified, and it's a real fix for a bug I missed
+
+Reproduced the leak directly rather than trusting the claim: built the exact `cfa7ecd` pattern
+(`connect(); fn_that_raises(); close()`) with a synthetic failure standing in for a partial-migration
+error, and confirmed the connection is left open and queryable after the exception — `.close()`
+genuinely never runs, because the line after the raising call is skipped. My own `del _boot` proposal
+would not have caught this; `del` only runs after `.close()`, which itself never executes on this
+path. Then built `_migrate_at_boot()`'s actual replacement (`with session(path) as db: migrate(db)`)
+against the same failure and confirmed the connection is genuinely closed afterward
+(`ProgrammingError: Cannot operate on a closed database` on a post-exception probe query) while the
+original exception still propagates uncaught, exactly as required. This is a strictly stronger fix
+than what I ruled for, on a defect I didn't find. No objection — accepted as-is, including the
+`connect` import removal and the resulting stronger tripwire (no module attribute is a
+`sqlite3.Connection`, and `main.py` doesn't import `connect` at all).
+
+Scratch probe: `...\scratchpad\session_leak_probe.py`.
+
+### On the rejected "tighten under notify" precedent
+
+Agreed, and the `check_same_thread` counterexample is exactly right — I generalized a single routing
+decision into a durable rule without stress-testing it against my own adjacent finding in the same
+document, which is the one thing that rule should have been checked against first. The replacement
+boundary (no standing ruling/condition touched; **no new behavior on any reachable path, verified not
+asserted**; objection routes to the amendment's author, never the implementer mid-change) is the
+correct fix, not just a safer-sounding one — "reduces scope" is self-limiting in a way "tightens an
+invariant" isn't, and that's the actual load-bearing distinction. No objection. Not re-raising the
+rejected form.
+
+**No further concerns on B1 or B2. Both proceed as ruled.** bruce-lee's resulting commit is the next
+thing I review — connection lifecycle, transaction semantics, and the four conditions above are what
+I'll check it against.
