@@ -1,7 +1,8 @@
 import os,sqlite3
 from fastapi import Depends,FastAPI,Header,HTTPException,Query,Request
+from fastapi.responses import JSONResponse
 from .auth import authenticate_identity
-from .db import connect,migrate,session
+from .db import migrate,session
 from .service import Conflict,Forbidden,Invalid,Registrar,Unavailable
 from .attestation import verify as verify_attestation
 from .runtime import ensure_runtime_mode,verification_enabled
@@ -10,12 +11,30 @@ ensure_runtime_mode(os.environ.get("REGISTRAR_ENV","development"))
 
 DB_PATH=os.environ.get("REGISTRAR_DB","/data/registrar.db")
 
-# Migrate at import on a boot connection that is closed on the same line,
-# before `app` exists and long before any request can arrive. This used to be
-# the same call that left its connection behind as the process-lifetime `db`
-# global every handler then shared -- the defect this change removes
-# (docs/town-registrar-connection-concurrency.md). Nothing is retained: no
-# handler can reach a module-level connection even by accident.
+# Migrate at import, inside a function, on a `session` that closes in its own
+# `finally` -- before `app` exists and long before any request can arrive.
+# This used to be the same call that left its connection behind as the
+# process-lifetime `db` global every handler then shared -- the defect this
+# change removes (docs/town-registrar-connection-concurrency.md).
+#
+# Two deliberate properties (Addendum B2), neither of which a bare
+# connect/migrate/close achieved:
+#
+# - Function scope, not a module-level `_boot` name that is merely closed.
+#   "No handler can reach a module-level connection" becomes structurally
+#   true instead of true-by-convention -- there is no module attribute of
+#   this module that is a sqlite3.Connection, so a future edit cannot
+#   resurrect the shared-global topology by dropping a `.close()` while
+#   leaving the name.
+# - `session` closes on the failure path too. The previous line closed only
+#   on success: if `migrate()` raises (partial migration, DDL error, a busy
+#   BEGIN EXCLUSIVE) the traceback frame holds the connection open, and on
+#   Windows an open handle blocks deleting the file -- exactly the hazard
+#   `session` exists for.
+#
+# `connect` is deliberately not imported into this module: `session` is the
+# only door out of db.py it uses, so everything main.py opens is closed in a
+# `finally` by construction.
 #
 # Deliberately NOT a `lifespan` handler (Addendum A1): `main.py`'s other two
 # startup gates -- ensure_runtime_mode above and
@@ -25,9 +44,44 @@ DB_PATH=os.environ.get("REGISTRAR_DB","/data/registrar.db")
 # force a rewrite of the startup-probe security regression tests that assert a
 # misprovisioned key raises on *import*. Moving all three gates into lifespan
 # together, with the matching harness rewrite, is its own change.
-_boot=connect(DB_PATH); migrate(_boot); _boot.close()
+def _migrate_at_boot(path):
+    with session(path) as db: migrate(db)
+_migrate_at_boot(DB_PATH)
 
 app=FastAPI(title="Town Registrar",version="1")
+
+@app.exception_handler(sqlite3.OperationalError)
+async def operational_error(request,exc):
+    """Map a lost SQLite busy-lock race to a retryable 503 wherever in a
+    request it happens -- including `get_db`'s `connect()`, which runs during
+    dependency resolution before any route body exists, and `identity()`'s
+    `last_used_at` UPDATE, which runs before the route's `invoke(...)` call.
+    Neither is reachable from `invoke()`, which is why this maps at the app
+    boundary (Addendum B1).
+
+    The rule that partition creates needs no memory to apply: driver
+    exceptions map structurally here, because they can originate anywhere;
+    domain exceptions (Conflict/Forbidden/Invalid/Unavailable) are raised
+    deliberately by service.py and keep mapping in `invoke()`, at the call
+    site that raised them. Partition by origin, not a split posture.
+
+    Registered on `sqlite3.OperationalError` only -- never `sqlite3.Error`.
+    IntegrityError and friends are bugs, not contention, and must keep
+    surfacing as unhandled 500s.
+
+    Only the locked/busy condition is retryable. OperationalError also covers
+    "no such table"/"no such column", so anything else is re-raised from
+    inside this handler rather than converted into a tidy error body: schema
+    skew has to keep producing a real server exception and a logged
+    traceback. Reporting a permanent fault as *retryable* is the exact
+    silent-wrongness this whole change exists to remove.
+
+    The 503 body is `{"detail": ...}`, byte-identical to the
+    `HTTPException(503,str(exc))` this replaces -- viewer/registrar_client.py
+    and every other consumer read that shape."""
+    message=str(exc).lower()
+    if "locked" in message or "busy" in message: return JSONResponse({"detail":str(exc)},status_code=503)
+    raise exc
 
 def get_db():
     """One SQLite connection per request, closed in `session`'s `finally`.
@@ -68,29 +122,17 @@ def identity(db,authorization,scope):
     except Forbidden as exc: raise HTTPException(403,str(exc)) from exc
 
 def invoke(fn):
+    # Domain exceptions only: deliberate raises from service.py, mapped at the
+    # call site that raised them. sqlite3.OperationalError is NOT handled here
+    # -- it can originate outside any route body (get_db's connect, identity()'s
+    # last_used_at UPDATE), so it maps structurally in the app-level handler
+    # above. One rule, one place: do not re-add a clause for it here, and do
+    # not move these four up to app level either (Addendum B1 rules on both).
     try: return fn()
     except Conflict as exc: raise HTTPException(409,str(exc)) from exc
     except Forbidden as exc: raise HTTPException(403,str(exc)) from exc
     except Invalid as exc: raise HTTPException(400,str(exc)) from exc
     except Unavailable as exc: raise HTTPException(503,str(exc)) from exc
-    except sqlite3.OperationalError as exc:
-        # Belt-and-braces for risk #1 of the connection-concurrency note.
-        # Writers are serialized on the event loop (every write route is
-        # `async def`), so the SQLite write lock is not contended today --
-        # but a loser of the busy_timeout=5000 race must surface as a
-        # retryable 503, like every other Unavailable, rather than an
-        # unhandled 500.
-        #
-        # Discriminate on the locked/busy condition instead of catching
-        # OperationalError wholesale: that class also covers "no such
-        # table"/"no such column", and reporting an unmigrated or
-        # schema-skewed database as *retryable* would hide a permanent
-        # fault behind a green health check -- exactly the class of
-        # silent-wrongness this change exists to remove elsewhere. Anything
-        # that isn't locked/busy keeps propagating as a 500.
-        message=str(exc).lower()
-        if "locked" in message or "busy" in message: raise HTTPException(503,str(exc)) from exc
-        raise
 
 CURSOR_KEY_MIN_BYTES=32
 def _load_cursor_key_material(path):
@@ -213,7 +255,13 @@ def posts(assigned_to:str|None=None,role:str|None=None,state:str|None=None,board
     return invoke(lambda:Registrar(db).posts(assigned_to=assigned_to,role=role,state=state,board=board,registration_state=registration_state,root=root,limit=limit,cursor=cursor,cursor_keys=(current,previous)))
 @app.get("/v1/aliases/{alias:path}")
 def aliases(alias:str,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
-    identity(db,authorization,"post:read"); return Registrar(db).aliases(alias)
+    # `Registrar.aliases` is a bare SELECT today and raises no domain
+    # exception, so this wrap changes nothing reachable -- it makes the
+    # convention exact and auditable instead of remembered: every route that
+    # calls a Registrar method wraps it in `invoke()`, true of all eight with
+    # no exceptions. The next person who adds a validation branch to
+    # `aliases()` is caught by a structural test, not by memory (Addendum B1).
+    identity(db,authorization,"post:read"); return invoke(lambda:Registrar(db).aliases(alias))
 @app.get("/v1/assignments/{agent_id}")
 def assignments(agent_id:str,active:bool=True,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     identity(db,authorization,"post:read")
