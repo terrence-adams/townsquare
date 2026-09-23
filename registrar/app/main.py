@@ -1,7 +1,7 @@
-import os
-from fastapi import FastAPI,Header,HTTPException,Query,Request
+import os,sqlite3
+from fastapi import Depends,FastAPI,Header,HTTPException,Query,Request
 from .auth import authenticate_identity
-from .db import connect,migrate
+from .db import connect,migrate,session
 from .service import Conflict,Forbidden,Invalid,Registrar,Unavailable
 from .attestation import verify as verify_attestation
 from .runtime import ensure_runtime_mode,verification_enabled
@@ -9,10 +9,60 @@ from .runtime import ensure_runtime_mode,verification_enabled
 ensure_runtime_mode(os.environ.get("REGISTRAR_ENV","development"))
 
 DB_PATH=os.environ.get("REGISTRAR_DB","/data/registrar.db")
-db=connect(DB_PATH); migrate(db); service=Registrar(db)
+
+# Migrate at import on a boot connection that is closed on the same line,
+# before `app` exists and long before any request can arrive. This used to be
+# the same call that left its connection behind as the process-lifetime `db`
+# global every handler then shared -- the defect this change removes
+# (docs/town-registrar-connection-concurrency.md). Nothing is retained: no
+# handler can reach a module-level connection even by accident.
+#
+# Deliberately NOT a `lifespan` handler (Addendum A1): `main.py`'s other two
+# startup gates -- ensure_runtime_mode above and
+# ensure_cursor_signing_key_at_startup below -- are import-time side effects,
+# and a split startup is worse than either pure option. Starlette only runs
+# lifespan inside `TestClient.__enter__`, so moving migration alone would also
+# force a rewrite of the startup-probe security regression tests that assert a
+# misprovisioned key raises on *import*. Moving all three gates into lifespan
+# together, with the matching harness rewrite, is its own change.
+_boot=connect(DB_PATH); migrate(_boot); _boot.close()
+
 app=FastAPI(title="Town Registrar",version="1")
 
-def identity(authorization,scope):
+def get_db():
+    """One SQLite connection per request, closed in `session`'s `finally`.
+    SQLite in WAL mode is built for many connections to one file, not one
+    connection across many threads -- and FastAPI dispatches every sync
+    (`def`) read route to a worker threadpool, so the old shared global
+    produced silently wrong result sets under concurrent reads.
+
+    Two invariants a future reader should not "tidy away", both ruled on in
+    jackie-chan's review of the design note:
+
+    - `connect()` keeps `check_same_thread=False`, and tightening it to the
+      default would be a regression, not defense in depth. A sync
+      yield-dependency's setup, the route body, and its teardown are three
+      separate `run_in_threadpool` calls, and AnyIO guarantees no thread
+      affinity between them -- so one request's connection may legitimately
+      be opened on thread A, queried on thread B and closed on thread C.
+      Sequential handoff, never simultaneous use; the guard would only fire
+      false positives on it.
+    - No WAL pin. Per-request open/close means SQLite checkpoints and tears
+      down `-wal`/`-shm` during idle gaps; that is cheap at this scale, and a
+      process-lifetime connection held open purely to pin the WAL file would
+      be the exact shape of object that caused this defect, sitting in
+      `main.py` looking reusable. Considered and declined -- revisit only
+      against a measured checkpoint-I/O problem on the NAS.
+
+    Routes take this connection and build `Registrar(conn)` per request
+    (a stateless wrapper -- construction is free). Resolve it with a single
+    `Depends(get_db)` per route and never with `use_cache=False`: the
+    per-request caching is what keeps `verify_attestation` and
+    `verify_publication` on one connection, preserving the verifier-nonce
+    transaction ordering."""
+    with session(DB_PATH) as db: yield db
+
+def identity(db,authorization,scope):
     if not authorization or not authorization.startswith("Bearer "): raise HTTPException(401,"Bearer token required")
     try: return authenticate_identity(db,authorization[7:],scope)
     except Forbidden as exc: raise HTTPException(403,str(exc)) from exc
@@ -23,6 +73,24 @@ def invoke(fn):
     except Forbidden as exc: raise HTTPException(403,str(exc)) from exc
     except Invalid as exc: raise HTTPException(400,str(exc)) from exc
     except Unavailable as exc: raise HTTPException(503,str(exc)) from exc
+    except sqlite3.OperationalError as exc:
+        # Belt-and-braces for risk #1 of the connection-concurrency note.
+        # Writers are serialized on the event loop (every write route is
+        # `async def`), so the SQLite write lock is not contended today --
+        # but a loser of the busy_timeout=5000 race must surface as a
+        # retryable 503, like every other Unavailable, rather than an
+        # unhandled 500.
+        #
+        # Discriminate on the locked/busy condition instead of catching
+        # OperationalError wholesale: that class also covers "no such
+        # table"/"no such column", and reporting an unmigrated or
+        # schema-skewed database as *retryable* would hide a permanent
+        # fault behind a green health check -- exactly the class of
+        # silent-wrongness this change exists to remove elsewhere. Anything
+        # that isn't locked/busy keeps propagating as a 500.
+        message=str(exc).lower()
+        if "locked" in message or "busy" in message: raise HTTPException(503,str(exc)) from exc
+        raise
 
 CURSOR_KEY_MIN_BYTES=32
 def _load_cursor_key_material(path):
@@ -94,60 +162,65 @@ ensure_cursor_signing_key_at_startup()
 @app.get("/health/live")
 def live(): return {"ok":True}
 @app.get("/health/ready")
-def ready():
+def ready(db:sqlite3.Connection=Depends(get_db)):
     checks={"foreign_keys":db.execute("PRAGMA foreign_keys").fetchone()[0],"journal_mode":db.execute("PRAGMA journal_mode").fetchone()[0],"synchronous":db.execute("PRAGMA synchronous").fetchone()[0]}
     if checks!={"foreign_keys":1,"journal_mode":"wal","synchronous":2}: raise HTTPException(503,checks)
     return {"ok":True,"schema_version":db.execute("SELECT max(version) FROM schema_migrations").fetchone()[0]}
 @app.post("/v1/roots/reserve",status_code=201)
-async def reserve_root(request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None)):
-    who,_=identity(authorization,"post:write"); body=await request.json(); return invoke(lambda:service.reserve_root(who,idempotency_key,body))
+async def reserve_root(request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=identity(db,authorization,"post:write"); body=await request.json(); return invoke(lambda:Registrar(db).reserve_root(who,idempotency_key,body))
 @app.post("/v1/roots/{thread_id}/posts/reserve",status_code=201)
-async def reserve_post(thread_id:str,request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None)):
-    who,_=identity(authorization,"post:write"); body=await request.json(); return invoke(lambda:service.reserve_post(who,idempotency_key,thread_id,body))
+async def reserve_post(thread_id:str,request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=identity(db,authorization,"post:write"); body=await request.json(); return invoke(lambda:Registrar(db).reserve_post(who,idempotency_key,thread_id,body))
 @app.put("/v1/posts/{post_uid}/publication")
-async def publish(post_uid:str,request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None)):
-    who,scopes=identity(authorization,"post:write"); body=await request.json(); return invoke(lambda:service.publish(who,idempotency_key,post_uid,body,scopes))
+async def publish(post_uid:str,request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,scopes=identity(db,authorization,"post:write"); body=await request.json(); return invoke(lambda:Registrar(db).publish(who,idempotency_key,post_uid,body,scopes))
 @app.post("/v1/verifications/{post_uid}")
-async def verify(post_uid:str,request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None)):
+async def verify(post_uid:str,request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     if not verification_enabled(os.environ.get("REGISTRAR_EXPERIMENTAL_VERIFICATION")): raise HTTPException(503,"experimental verification disabled")
-    who,_=identity(authorization,"admin:verify"); body=await request.json(); evidence=body.get("evidence"); attestation=body.get("attestation")
+    who,_=identity(db,authorization,"admin:verify"); body=await request.json(); evidence=body.get("evidence"); attestation=body.get("attestation")
     key_file=os.environ.get("REGISTRAR_VERIFIER_KEY_FILE"); key_id=os.environ.get("REGISTRAR_VERIFIER_KEY_ID")
     if not key_file or not key_id: raise HTTPException(503,"verifier attestation not configured")
+    # One `Depends(get_db)` above, one connection: the nonce INSERT
+    # (autocommit) and verify_publication's BEGIN IMMEDIATE stay two
+    # sequential transactions on the same connection, byte-identical replay
+    # semantics to the old shared global. Do not split these across
+    # connections or add use_cache=False.
     invoke(lambda:verify_attestation(db,evidence,attestation,key_id,open(key_file,"rb").read().strip()))
-    return invoke(lambda:service.verify_publication(who,idempotency_key,post_uid,evidence))
+    return invoke(lambda:Registrar(db).verify_publication(who,idempotency_key,post_uid,evidence))
 @app.post("/v1/import-runs",status_code=201)
-async def import_run(request:Request,authorization:str|None=Header(None)):
-    who,_=identity(authorization,"admin:import-stage"); body=await request.json(); return invoke(lambda:service.stage_import(who,body))
+async def import_run(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=identity(db,authorization,"admin:import-stage"); body=await request.json(); return invoke(lambda:Registrar(db).stage_import(who,body))
 @app.post("/v1/import-runs/{run_id}/promote")
-async def promote(run_id:str,request:Request,authorization:str|None=Header(None)):
-    who,_=identity(authorization,"admin:import-promote"); body=await request.json(); return invoke(lambda:service.promote_import(who,run_id,body.get("manifest_digest","")))
+async def promote(run_id:str,request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=identity(db,authorization,"admin:import-promote"); body=await request.json(); return invoke(lambda:Registrar(db).promote_import(who,run_id,body.get("manifest_digest","")))
 @app.get("/v1/roots/{thread_id}")
-def get_root(thread_id:str,authorization:str|None=Header(None)):
-    identity(authorization,"post:read")
+def get_root(thread_id:str,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    identity(db,authorization,"post:read")
     row=db.execute("SELECT * FROM roots WHERE thread_id=?",(thread_id,)).fetchone()
     if not row: raise HTTPException(404,"unknown root")
     return dict(row)
 @app.get("/v1/posts/{post_uid}")
-def get_post(post_uid:str,authorization:str|None=Header(None)):
-    identity(authorization,"post:read")
+def get_post(post_uid:str,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    identity(db,authorization,"post:read")
     row=db.execute("SELECT * FROM posts WHERE post_uid=?",(post_uid,)).fetchone()
     if not row: raise HTTPException(404,"unknown post")
     return dict(row)
 @app.get("/v1/posts")
-def posts(assigned_to:str|None=None,role:str|None=None,state:str|None=None,board:str|None=None,registration_state:str|None=None,root:str|None=None,limit:int=Query(100,ge=1,le=200),cursor:str|None=None,authorization:str|None=Header(None)):
-    identity(authorization,"post:read")
+def posts(assigned_to:str|None=None,role:str|None=None,state:str|None=None,board:str|None=None,registration_state:str|None=None,root:str|None=None,limit:int=Query(100,ge=1,le=200),cursor:str|None=None,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    identity(db,authorization,"post:read")
     current,previous=cursor_keys()
-    return invoke(lambda:service.posts(assigned_to=assigned_to,role=role,state=state,board=board,registration_state=registration_state,root=root,limit=limit,cursor=cursor,cursor_keys=(current,previous)))
+    return invoke(lambda:Registrar(db).posts(assigned_to=assigned_to,role=role,state=state,board=board,registration_state=registration_state,root=root,limit=limit,cursor=cursor,cursor_keys=(current,previous)))
 @app.get("/v1/aliases/{alias:path}")
-def aliases(alias:str,authorization:str|None=Header(None)):
-    identity(authorization,"post:read"); return service.aliases(alias)
+def aliases(alias:str,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    identity(db,authorization,"post:read"); return Registrar(db).aliases(alias)
 @app.get("/v1/assignments/{agent_id}")
-def assignments(agent_id:str,active:bool=True,authorization:str|None=Header(None)):
-    identity(authorization,"post:read")
+def assignments(agent_id:str,active:bool=True,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    identity(db,authorization,"post:read")
     return {"assignments":[dict(r) for r in db.execute("SELECT * FROM assignments WHERE agent_id=? AND active=? ORDER BY post_uid,role",(agent_id,int(active)))]}
 @app.get("/v1/reconciliation")
-def reconciliation(status:str,authorization:str|None=Header(None)):
-    identity(authorization,"post:read")
+def reconciliation(status:str,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    identity(db,authorization,"post:read")
     if status=="missing-publication": rows=db.execute("SELECT * FROM posts WHERE registration_state='reserved'")
     elif status=="legacy-collision": rows=db.execute("SELECT p.* FROM posts p JOIN posts q ON p.root_uid=q.root_uid AND p.legacy_seq=q.legacy_seq AND p.post_uid<>q.post_uid WHERE p.source='legacy_import'")
     elif status=="unresolved-responsibility":

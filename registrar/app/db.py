@@ -1,9 +1,21 @@
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 MIGRATIONS=Path(__file__).parents[1]/"migrations"
 def connect(path):
     db=sqlite3.connect(path,timeout=5,isolation_level=None,check_same_thread=False); db.row_factory=sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON"); db.execute("PRAGMA journal_mode=WAL"); db.execute("PRAGMA synchronous=FULL"); db.execute("PRAGMA busy_timeout=5000"); return db
+@contextmanager
+def session(path):
+    """One connection for one unit of work, always closed -- what main.py's
+    per-request `get_db` dependency yields, so a request cannot leak a
+    connection down an error path (Windows holds an exclusive lock on an open
+    DB file, so a leak is not merely untidy). All four PRAGMAs are re-applied
+    by `connect` on every call, so a session-scoped connection carries the
+    full posture `/health/ready` asserts."""
+    db=connect(path)
+    try: yield db
+    finally: db.close()
 def migrate(db):
     exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone()
     applied=set() if not exists else {r[0] for r in db.execute("SELECT version FROM schema_migrations")}

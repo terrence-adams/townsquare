@@ -13,8 +13,14 @@ probe added for F1 -- as *module-level* side effects at import time, the
 same convention ensure_runtime_mode already used before this change.
 Exercising different key-provisioning scenarios therefore means
 reimporting the module fresh under a controlled os.environ for each one
-(see _FreshAppCase._boot below), not monkeypatching an already-imported
-app object after the fact.
+(see FreshAppCase._boot in app_harness.py), not monkeypatching an
+already-imported app object after the fact.
+
+The boot harness lives in registrar/tests/app_harness.py, extracted there
+so the concurrency tests can share it (Addendum A3 of
+docs/town-registrar-connection-concurrency.md). Everything below is
+unchanged security regression coverage for gsp's F1/F2/F4 and
+ronda-rousey's cursor="" finding.
 
 Run pytest from the parent of registrar/ (the repo root, e.g.
 C:\\Repo\\townsquare), not from inside registrar/tests: `registrar`
@@ -22,70 +28,13 @@ resolves as an implicit namespace package, and running from inside tests/
 gives a spurious ModuleNotFoundError (noted in OPERATIONS.md).
 """
 from __future__ import annotations
-import base64,gc,json,os,sys,tempfile,unittest
+import base64,gc,json,os,tempfile,unittest
 from pathlib import Path
 from fastapi.testclient import TestClient
-
-_ENV_KEYS=("REGISTRAR_ENV","REGISTRAR_DB","REGISTRAR_CURSOR_KEY_FILE","REGISTRAR_CURSOR_KEY_ID")
-
-
-class _FreshAppCase(unittest.TestCase):
-    """Base class: boot a fresh registrar.app.main under a controlled,
-    isolated environment and tear it back down afterward. Each test gets
-    its own temp SQLite DB -- main.py's module-level `db=connect(...)` is
-    otherwise process-global and would leak state between scenarios."""
-
-    def _key_file(self,data=b"unit-test-http-cursor-signing-key-0123456789"):
-        """A standalone temp key file (independent of _boot/self.tmp, so it
-        can be created either before or after _boot is called -- some tests
-        need the file to exist and be deleted again mid-test)."""
-        fd,path=tempfile.mkstemp(); os.close(fd)
-        with open(path,"wb") as fh: fh.write(data)
-        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
-        return path
-
-    def _boot(self,cursor_key_file=None,cursor_key_id=None):
-        self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
-        saved={k:os.environ.get(k) for k in _ENV_KEYS}
-        def restore():
-            for k,v in saved.items():
-                if v is None: os.environ.pop(k,None)
-                else: os.environ[k]=v
-        self.addCleanup(restore)
-        os.environ["REGISTRAR_ENV"]="development"
-        os.environ["REGISTRAR_DB"]=str(Path(self.tmp.name)/"registrar.db")
-        if cursor_key_file is None: os.environ.pop("REGISTRAR_CURSOR_KEY_FILE",None)
-        else: os.environ["REGISTRAR_CURSOR_KEY_FILE"]=cursor_key_file
-        if cursor_key_id is None: os.environ.pop("REGISTRAR_CURSOR_KEY_ID",None)
-        else: os.environ["REGISTRAR_CURSOR_KEY_ID"]=cursor_key_id
-        sys.modules.pop("registrar.app.main",None)
-        self.addCleanup(sys.modules.pop,"registrar.app.main",None)
-        # NOTE: if a startup probe (e.g. ensure_cursor_signing_key_at_startup)
-        # raises here, main.py's module-level `db=connect(...)` already ran,
-        # orphaning an open sqlite3.Connection kept alive by the exception's
-        # own traceback (a refcount cycle) until that traceback is dropped.
-        # Callers expecting this to raise must gc.collect() after their
-        # `assertRaises` block, or Windows' exclusive file lock on
-        # registrar.db will fail tearDown's TemporaryDirectory cleanup --
-        # see the two startup-probe-failure tests below, and the same
-        # gc.collect() convention test_registrar.py already uses around
-        # auth.main().
-        import registrar.app.main as main_module  # runs main.py's import-time startup work under the env above
-        # addCleanup is LIFO: registering this last means it runs *first*,
-        # closing the sqlite3.Connection before the TemporaryDirectory
-        # cleanup above tries to remove registrar.db -- required on
-        # Windows, which (unlike POSIX) refuses to delete a file that's
-        # still open, and this module-level `db` is otherwise never closed.
-        self.addCleanup(main_module.db.close)
-        return main_module
-
-    def _bearer(self,main_module,scope="post:read",principal="http-test-principal"):
-        from registrar.app import auth
-        credential=auth.create_token(main_module.db,principal,[scope])
-        return {"Authorization":f"Bearer {credential}"}
+from registrar.tests.app_harness import FreshAppCase
 
 
-class CursorSigningKeyStartupProbeTests(_FreshAppCase):
+class CursorSigningKeyStartupProbeTests(FreshAppCase):
     """F1's second half: a misprovisioned REGISTRAR_CURSOR_KEY_FILE must
     fail the boot loudly, not surface as a 500 on first use."""
 
@@ -93,11 +42,14 @@ class CursorSigningKeyStartupProbeTests(_FreshAppCase):
         missing=str(Path(tempfile.mkdtemp())/"does-not-exist")
         with self.assertRaises(RuntimeError):
             self._boot(cursor_key_file=missing)
-        # The raised exception's traceback keeps main.py's module frame (and
-        # its already-opened sqlite3.Connection) referenced in a cycle until
-        # the `with` block's own context manager is itself collected; force
-        # it now so tearDown's TemporaryDirectory cleanup can delete
-        # registrar.db without hitting Windows' open-file lock.
+        # Kept deliberately. This used to be required: the raised exception's
+        # traceback held main.py's module frame -- and its module-level
+        # `db=connect(...)` -- in a refcount cycle, so tearDown's
+        # TemporaryDirectory cleanup hit Windows' open-file lock on
+        # registrar.db unless the cycle was collected first. main.py no longer
+        # keeps a connection past import (see the NOTE in app_harness._boot),
+        # so there is nothing left to orphan, but this is harmless and the
+        # platform knowledge is worth keeping next to the test that taught it.
         gc.collect()
 
     def test_fails_loudly_when_key_material_is_undersized(self):
@@ -121,7 +73,7 @@ class CursorSigningKeyStartupProbeTests(_FreshAppCase):
         self.assertIsNotNone(main_module.app)
 
 
-class NoCursorRequestBackwardCompatibilityTests(_FreshAppCase):
+class NoCursorRequestBackwardCompatibilityTests(FreshAppCase):
     """F1's core regression: gsp proved that a GET /v1/posts call with no
     `cursor` param at all -- including plain, pre-pagination clients --
     500'd whenever the cursor-signing key was present in env but unreadable
@@ -163,7 +115,7 @@ class NoCursorRequestBackwardCompatibilityTests(_FreshAppCase):
         self.assertEqual(503,r2.status_code)
 
 
-class MalformedCursorRejectionTests(_FreshAppCase):
+class MalformedCursorRejectionTests(FreshAppCase):
     """F2 and the cursor="" minor finding: every malformed cursor shape
     must land on Invalid->400, never an unhandled 500 or a silent
     fresh-start. Requires a valid signing key configured so decode_cursor()
