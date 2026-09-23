@@ -753,3 +753,191 @@ notify-not-re-gate precedent. None of these block ronda-rousey's QA work order, 
 `cfa7ecd` to `internal` alongside this review so it's available for that work; the exception-handler
 widening and the `_boot` cleanup land as separate follow-up commits, reviewed on their own merits
 when bruce-lee delivers them.
+
+## Addendum B — ruling on jackie-chan's checkpoint review: exception-mapping scope, `del _boot`, import-window availability (ip-man, 2026-09-22)
+
+One round, three rulings. B1 is the scope call, B2 is a governance-precedent call, B3 is
+ronda-rousey's status-code spec.
+
+### B1. Narrow, not generalized. One app-level handler for `sqlite3.OperationalError`; `invoke()` stays.
+
+**Ruling:** add exactly one FastAPI app-level exception handler, for `sqlite3.OperationalError`,
+with the same locked/busy discrimination `invoke()` uses today. **Move** that clause out of
+`invoke()` rather than duplicating it. `Conflict`/`Forbidden`/`Invalid`/`Unavailable` stay in
+`invoke()`, untouched. No route body changes except one line in `aliases` (below).
+
+The rule this creates is one sentence and needs no memory to apply: **driver exceptions map
+structurally at the app boundary, because they can originate anywhere — including inside `get_db`
+before a route body exists; domain exceptions raised deliberately by `service.py` map at the call
+site that raised them.** That is a partition by origin, not a split posture.
+
+Why jackie-chan's split-invariant argument does not carry here — three reasons, in order of weight:
+
+1. **The A1 analogy inverts.** A1's split-startup problem was *ambiguity with no rule*: two
+   mechanisms doing the same job, nothing telling the next person which to use. Here the rule is
+   mechanical. `get_db`'s `connect()` cannot be wrapped in `invoke()` by construction — that is
+   jackie-chan's own finding and it is what makes the app-level handler necessary — so
+   infrastructure exceptions *must* be structural. Domain exceptions can only arise where
+   `service.py` is called, which is exactly where `invoke()` already is. There is no guess to make.
+
+2. **Her end state is not a single posture either.** After full retirement, `main.py` still maps
+   conditions to statuses inline in at least five places: `identity()`'s 401 (she excludes it
+   explicitly) and its `Forbidden`→403, `get_root`/`get_post`'s 404s, `verify`'s two 503
+   configuration guards, and `ready()`'s 503. The uniformity being bought does not exist at the end
+   of the purchase. The argument pays for a seven-route diff and does not deliver the invariant it
+   is justified by.
+
+3. **Zero additional reachable defects.** Her own audit establishes this: `aliases()` is a bare
+   `SELECT` with no validation branch, and the other five uncovered surfaces (`ready`, `get_root`,
+   `get_post`, `assignments`, `reconciliation`) call no service method at all — `OperationalError`
+   is the only exception class they can raise. The generalized form's four extra handlers cover
+   nothing that can happen today. This is round three on one commit, with ronda-rousey already
+   building against `cfa7ecd`; smallest change that solves it applies with full force.
+
+**Her real point — the `aliases` future trap — is valid and the narrow form closes it, cheaply.**
+Wrap the call: `return invoke(lambda:Registrar(db).aliases(alias))`. That makes the convention exact
+and *auditable* instead of remembered: **every route that calls a `Registrar` method wraps it in
+`invoke()`** — after this one line that is true of all eight such routes with no exceptions, and
+ronda-rousey can assert it structurally (item-4 tripwire class). The next person who adds a
+validation branch to `aliases()` is caught by a failing test, not by memory — which is the outcome
+jackie-chan wanted, at one line instead of seven routes. The five raw-`db.execute` routes never call
+a service method; the tripwire must not require `invoke()` of them.
+
+**Implementation conditions for bruce-lee, not optional:**
+
+1. Register on `sqlite3.OperationalError` only — **not** `sqlite3.Error`. `IntegrityError` and
+   friends must keep surfacing as 500; they are bugs, not contention.
+2. Non-locked/busy `OperationalError` must **re-raise from inside the handler**, not be converted to
+   a tidy 500 response. "no such table"/"no such column" must keep producing a logged traceback and
+   must keep behaving as a server exception under `TestClient`. Swallowing it would hide schema skew
+   behind a clean error body — the exact silent-wrongness this whole change exists to remove.
+   **Verify this empirically** (extend jackie-chan's probe); do not assume Starlette's re-raise
+   semantics.
+3. The 503 response body must be byte-identical in shape to what `HTTPException(503,str(exc))`
+   produces today (`{"detail": ...}`). An app-level handler that invents its own JSON is a silent
+   contract change for `viewer/registrar_client.py` and every other consumer.
+4. `invoke()`'s `OperationalError` clause is deleted in the same commit. One rule, one place — this
+   is what keeps the narrow form from being a duplication hazard.
+
+**Retiring `invoke()` is deferred, not rejected on the merits.** If it is wanted, it is its own
+design note and its own review, judged on whether one uniform mechanism beats two with the inline
+`HTTPException` raises counted honestly. Not smuggled into a contention fix. Same call A1 made on
+`lifespan`, for the same reason.
+
+### B2. `del _boot`: instance approved, generalized rule rejected as phrased — and the line is amended.
+
+**The instance:** approved. `del _boot` is right in substance and notify was acceptable here.
+
+**The rule she stated: rejected, replaced.** A1's notify rule never rested on direction — a reviewer
+amending the author's snippet is fine, direction was never the load-bearing part. It rested on three
+conditions: touches no standing ruling or implementation condition; strictly reduces scope; an
+objection routes back to the amendment's author, never to the implementer mid-change.
+
+The load-bearing one is the second, and **"strictly tightens an invariant" is not a safe substitute
+for "strictly reduces scope."** Reducing scope is self-limiting — a smaller diff cannot introduce new
+behavior. Tightening an invariant is not self-limiting — tightening can break a consumer. The
+counterexample is in her own first review: tightening `check_same_thread` to `True` strictly tightens
+an invariant and is a regression. A rule that would license that as notify-only is too broad, and it
+is the rule, not this instance, that gets quoted next time.
+
+**Replacement boundary, binding from here.** Notify-don't-re-gate applies when (a) the change touches
+no standing ruling or implementation condition, (b) it introduces **no new behavior on any reachable
+path — verified, not asserted**, and (c) an objection routes back to the amendment's author, never to
+the implementer mid-change. Direction is irrelevant; (b) is the test. `del _boot` passes (b) because
+helio-gracie *verified* the name is unreferenced. That verification is what earned the notify, not
+the tightening.
+
+**Amendment to the line.** This does not qualify as notify under the rule I just wrote, so it is
+gated here rather than notified. Replace the whole boot line instead of appending `del`:
+
+```python
+def _migrate_at_boot(path):
+    with session(path) as db: migrate(db)
+_migrate_at_boot(DB_PATH)
+```
+
+- Achieves jackie-chan's invariant **structurally, by scope**, rather than by a cleanup statement a
+  future refactor can drop while keeping the connection. Strictly stronger than `del`.
+- **Fixes a leak `del _boot` leaves in place.** The current line closes only on the success path: if
+  `migrate()` raises — partial migration, DDL error, `BEGIN EXCLUSIVE` busy — `_boot` is never
+  closed, and the traceback holds the frame and the connection alive. That is precisely the hazard
+  `db.py`'s `session()` exists for ("Windows holds an exclusive lock on an open DB file, so a leak is
+  not merely untidy") and the one `_FreshAppCase`'s Windows-lock NOTE documents from the test side.
+  The boot path should use the helper the rest of the app already uses.
+- **Consequence:** `connect` becomes unused in `main.py` — drop it from the import line
+  (`from .db import migrate,session`). After this, `main.py` cannot open a raw connection at all;
+  `session()` is the only door and everything it opens closes in a `finally`. Ronda-rousey's item-4
+  tripwire gets simpler and stronger: assert no module attribute of `registrar.app.main` is a
+  `sqlite3.Connection`, and assert `main.py` does not import `connect`.
+
+This is connection lifecycle, so jackie-chan holds the objection route on the form. bruce-lee
+proceeds now; an objection comes back to me, not to him mid-change.
+
+### B3. Import-window 503: (a) accept and document. Risk 6 stays out of scope.
+
+**First, a correction to the finding's blast radius, because it changes the test design.**
+`promote_import` blocks the event loop, so requests that *arrive* during the import cannot advance at
+all — they are served normally once it returns. Only a read whose **body was already executing on a
+worker thread** when the import took the write lock can contend. The window is not instantaneous,
+though: `authenticate()` runs an argon2 verify — deliberately expensive, tens of milliseconds —
+between the body's start and its `last_used_at` UPDATE. So there is a real several-tens-of-ms window
+per in-flight read. Reachable, rare, bounded. Not "all reads 503 during imports."
+
+**Why accept:**
+
+1. **The 503 is correct, and it is what we paid for.** What it replaces is a write that silently
+   joined a stranger's transaction, subject to that transaction's rollback, on a connection being
+   driven from two threads. Trading a silent correctness violation for a loud, retryable,
+   correctly-signalled unavailability *is the change*. Engineering the 503 away here would be
+   re-buying the thing we just removed.
+2. **The degradation is reshaped, not new.** Risk 6 always said an import stalls every request
+   including health checks. A caller during an import already could not get a response — they got a
+   stall, which past any client timeout is indistinguishable from unavailability. A fast, retryable,
+   observable 503 is the *better* failure mode: it appears in metrics instead of as mysterious
+   latency. The new finding weakens the case for urgency rather than strengthening it.
+3. **Bounding `promote_import` is a different change in a different lane.** It means chunking one
+   atomic transaction, which changes what an import promotion *guarantees* — partial visibility,
+   resumability, what `import_runs.status` means after a mid-way failure. That is a `service.py`
+   transaction-semantics redesign, jackie-chan's lane, its own note and its own review, against this
+   note's standing zero-changes-to-`service.py` constraint. It would be the largest scope expansion
+   proposed on this job, on round three, for a rare and already-accepted condition.
+
+**Cheaper lever, named so a future conversation does not start in the wrong place:**
+`authenticate()`'s `last_used_at` UPDATE is the only write on the read path, and it is *telemetry* —
+nothing reads it to make a decision. Making that write contention-tolerant, or moving it off the
+synchronous path, removes read-path write contention entirely at a fraction of the cost of
+restructuring imports. **Not ordered now:** it is `auth.py`, which this change has deliberately held
+at zero diff, and gsp has a stake in token-liveness observability. Raise it after this ships, if it
+is ever worth raising.
+
+**Do not raise `busy_timeout` to mask this.** That trades a fast retryable failure for a longer stall
+and hides the condition. Any change there needs a measurement first.
+
+**Expected status codes — ronda-rousey's answer, explicit:**
+
+- Reads in flight when an import takes the write lock: **200 normally; 503 is legitimate** and must
+  be retryable — a retry after the import completes succeeds.
+- Reads arriving *during* an import: **200**, after a delay. They do not 503.
+- **500 is never acceptable for lock contention.** That is the defect B1 closes and it is the
+  assertion that matters.
+- **Do not assert that a 503 occurs.** That is timing-dependent and will flake, against this note's
+  own rule that tripwires must not pass flakily. Assert the negative and the recovery: no 5xx other
+  than 503 under import-window load, and any 503 is followed by a successful retry.
+
+### B4. Added to "Done when"
+
+- No `sqlite3.OperationalError` with a locked/busy message — from `get_db`'s `connect()`,
+  `identity()`'s `last_used_at` UPDATE, or any of the six bare route surfaces — surfaces as a 500.
+- A non-locked/busy `OperationalError` still surfaces as a server exception with its traceback,
+  verified empirically, not assumed.
+- Every route that calls a `Registrar` method is wrapped in `invoke()`, enforced by a structural test.
+- `registrar.app.main` has no module attribute that is a `sqlite3.Connection`, and `main.py` does not
+  import `connect`.
+- 503 response bodies are unchanged in shape from `cfa7ecd`.
+
+### B5. Routing
+
+helio-gracie sends this to jackie-chan and bruce-lee together. jackie-chan holds the objection route
+on B2's boot-connection form and on B1's four implementation conditions — both her lane. bruce-lee
+proceeds now on B1 and B2; an objection comes back to me, not to him mid-change. B3 needs no further
+review: it is a documented accepted consequence and it is ronda-rousey's status-code spec.
