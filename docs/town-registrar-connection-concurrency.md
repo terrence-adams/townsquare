@@ -17,7 +17,7 @@ During independent QA review of the cursor-pagination change (`466c55d`), ronda-
 - `Registrar.__init__` stores that one connection as `self.db`; every one of its ~12 methods uses it.
 - **The read/write split is asymmetric, and that asymmetry is load-bearing.** Every *write* route (`reserve_root`, `reserve_post`, `publish`, `verify`, `import_run`, `promote`) is `async def` — needs `await request.json()` — so it runs synchronously on the event-loop thread and writers have never contended with each other. Every *read* route (`ready`, `get_root`, `get_post`, `posts`, `aliases`, `assignments`, `reconciliation`) is plain `def`, so it goes to the threadpool.
 - Consequences: read↔read on the shared connection is the corruption ronda-rousey measured. Read↔write is a second, previously unreported risk — a threadpool read issued while a writer holds `BEGIN IMMEDIATE` executes inside that writer's uncommitted transaction, a dirty read that can return rows subsequently rolled back. Write↔write has never been exercised under contention in the live topology — **any fix that moves writes off the event loop introduces real SQLite lock contention where none exists today.**
-- **The test suite cannot see `main.py` at all.** `tests/test_registrar.py` builds `Registrar(self.db)` directly and gives each concurrency-test thread its own connection — so the suite has zero coverage of the wiring where the defect actually lives, and would not catch a regression here even after a fix.
+- **No test exercises `main.py` under concurrency.** *[Corrected 2026-09-22 — the original text read "The test suite cannot see `main.py` at all." That was true of `test_registrar.py` only, the one test file I had read. See Addendum A0.]* `tests/test_registrar.py` builds `Registrar(self.db)` directly and gives each concurrency-test thread its own connection, so it has zero coverage of the wiring where the defect actually lives. `tests/test_http.py` *does* import `registrar.app.main` and drive `TestClient(main_module.app)`, but only for single-threaded cursor/key regression cases — so it would not catch a regression here either. It is also a direct consumer of the module globals this fix deletes; see Addendum A.
 - **Likely mechanism:** `Connection.execute()` draws prepared statements from the connection's shared LRU statement cache. Two threads running the same SQL text can get the same `sqlite3_stmt`; the second resets/re-binds it while the first is mid-fetch. This produces exactly the symptom set seen: duplicate rows from the start, premature exhaustion, `InterfaceError`.
 - **Severity amplifier:** `service.py`'s `next_cursor` is derived from the last row of a (possibly corrupted) result set. A corrupted final row produces a *correctly signed* cursor pointing at the wrong position — corruption persists across requests, poisoning every subsequent page of a multi-page walk with a validly-signed cursor.
 
@@ -71,7 +71,7 @@ Roughly 50 lines, mechanical, no logic changes. Estimated half a day done carefu
 
 ## New regression test category needed
 
-The existing suite would not catch a regression here even after a correct fix — it never loads `main.py` and gives every thread its own connection. Keep those tests (they remain valuable for file-level contention); add a new category built on the real topology:
+The existing suite would not catch a regression here even after a correct fix — `test_registrar.py` gives every thread its own connection, and `test_http.py`, which *does* load `main.py`, is entirely single-threaded. *[Corrected 2026-09-22 — the original text read "it never loads `main.py`." See Addendum A0.]* Keep those tests (they remain valuable for file-level contention); add a new category built on the real topology, reusing `test_http.py`'s boot harness — see Addendum A3:
 
 1. HTTP-layer concurrency through the real app (`TestClient`/httpx + a thread pool, real bearer tokens) — already proven to reproduce the defect.
 2. **Assert data correctness, not just absence of exceptions.** A full paginated walk under concurrent load must return exactly the expected set of `post_uid`s — no duplicates, no missing rows, no premature termination. A "no 5xx" assertion alone would have passed against the broken code roughly two-thirds of the time.
@@ -323,3 +323,192 @@ pointing at this section) rather than something that survives by accident and ge
    accidentally disturb.
 
 No further concerns. Design sign-off given — helio-gracie can proceed to a GAME PLAN.
+
+## Addendum A — `test_http.py` ownership and the startup-work split (ip-man, 2026-09-22)
+
+helio-gracie's GAME PLAN routed three items back to me as scope calls under D·D·D rather than
+deciding them himself. Ruling below. This does not reopen jackie-chan's review; two of the three
+items *reduce* scope.
+
+### A0. Correction to this note: the "suite cannot see `main.py`" claim was wrong
+
+I asserted twice that the test suite never loads `main.py`, citing `tests/test_registrar.py`.
+That file does build `Registrar(self.db)` directly and never imports `main.py` — but it is not
+the whole suite. `tests/test_http.py`, added in the same cursor-pagination review pass that
+surfaced this concurrency bug, imports `registrar.app.main` and builds
+`TestClient(main_module.app)`. Both sites are corrected in place above; this addendum is the
+authority.
+
+Two consequences I got wrong as a result:
+
+1. **The blindness is narrower than I described, and the starting position is better.** The suite
+   is not blind to `main.py`; it is blind to `main.py` *under concurrency*. The new test category
+   below is still needed for exactly the reason given, and the structural tripwires in item 4 are
+   still the right idea — but it now has a working HTTP-layer harness to build on rather than
+   starting from nothing.
+2. **`test_http.py` is a consumer of the globals this fix deletes**, at two sites in
+   `_FreshAppCase`: `self.addCleanup(main_module.db.close)` in `_boot`, and
+   `auth.create_token(main_module.db, ...)` in `_bearer`. Both break the moment `main.py`'s
+   module-level `db`/`service` are removed. My "Files changed" line was therefore incomplete;
+   corrected in A4.
+
+Lesson worth keeping: I asserted a *negative* about a test suite ("it cannot see X") from a
+single file read. A negative claim about a suite needs a directory listing, not one file.
+helio-gracie's catch.
+
+### A1. Decision: migration stays at import time. Do NOT introduce `lifespan` in this change.
+
+This item decides the other two, so it comes first.
+
+The recommendation above ("Migration moves to app startup (lifespan)") is **withdrawn**. Replace
+it with a dedicated boot connection at module level, closed immediately:
+
+    DB_PATH=os.environ.get("REGISTRAR_DB","/data/registrar.db")
+    _boot=connect(DB_PATH); migrate(_boot); _boot.close()
+
+Reasoning — why this is right, not merely convenient:
+
+1. **A split startup is worse than either pure option.** `main.py` already performs two startup
+   gates as import-time side effects: `ensure_runtime_mode()` (line 9) and
+   `ensure_cursor_signing_key_at_startup()` (line 92). Moving *only* migration into `lifespan`
+   leaves the app with two startup mechanisms and no rule governing which work goes where. The
+   next person adding a startup check has to guess.
+
+2. **`lifespan` would churn gsp's security regression tests, by mechanism, for no correctness
+   gain.** Starlette runs the lifespan protocol only inside `TestClient.__enter__`; a bare
+   `TestClient(app)` invokes the ASGI app with an `http` scope and never fires startup.
+   helio-gracie flagged this as inferred-not-measured — it is correct, and I am ruling on it
+   rather than leaving it to be measured, because the ruling is to not go there. Under
+   full-lifespan, `CursorSigningKeyStartupProbeTests` stops working as written: two of its four
+   tests assert `RuntimeError` escapes `self._boot(...)`, i.e. escapes the *import*. Under
+   lifespan that error surfaces only at `with TestClient(app)`, so all four need restructuring.
+   Rewriting the security regression tests that exist *because a bug got past a first review
+   round* as collateral of an unrelated concurrency fix is exactly the blast-radius creep this
+   note is supposed to prevent.
+
+3. **It does not weaken the fix.** The defect is the *shared, long-lived, request-serving*
+   connection. A migration connection opened before any request can arrive, used single-threaded,
+   and closed on the same line is not that object. `migrate()` is already idempotent (it checks
+   `schema_migrations`), and it takes `BEGIN EXCLUSIVE` — both fine at import, neither safe to
+   leave racing under a lifespan started per worker. Consistent with jackie-chan's Risk 4 ruling:
+   the boot connection closes, it does not linger as a WAL pin.
+
+4. **It shrinks the diff** in `main.py`, and reduces the `test_http.py` delta from a harness
+   rewrite to roughly five lines.
+
+**Accepted trade-off, stated so nobody rediscovers it as a finding:** DDL still runs as an import
+side effect, so `import registrar.app.main` still writes to disk. That is pre-existing, it is this
+module's established convention, and it is worth fixing — as its own change, moving *all three*
+startup gates into `lifespan` together with the matching harness rewrite, designed and reviewed on
+its own merits. All-or-nothing, never a split. Not smuggled in here. Raise it after this ships.
+
+**Routing:** this amends a line in a note jackie-chan reviewed. It touches none of her rulings
+(Risks 2, 4, 5) and none of her four implementation conditions (single `Depends`, no
+`use_cache=False` near `get_db`, keep `check_same_thread=False`, no lazily-iterated cursor past
+the response boundary), and it strictly reduces scope. **Notify, do not re-gate:** helio-gracie
+sends her this addendum, bruce-lee proceeds now, and if she objects it comes back to me — not to
+bruce-lee mid-change.
+
+### A2. Ownership of `test_http.py`: bruce-lee, inside the implementation change
+
+Three reasons:
+
+- **Removing a symbol and leaving its consumer broken is not "done."** The `main_module.db`
+  references in `_boot` and `_bearer` are not test *design* — they are wiring to a global
+  bruce-lee is deleting. Repairing a consumer of a deleted global belongs to the commit that
+  deletes it. Any other split leaves `internal` red across a handoff, where nobody can tell a real
+  failure from known-broken scaffolding.
+- **It is small.** Under A1 the delta is: drop `addCleanup(main_module.db.close)` (there is no
+  module-global to close; `main.py` closes its own boot connection before import returns), and
+  give `_bearer` its own short-lived connection — `auth.create_token(db, principal, scopes)`
+  accepts any connection, so it opens `connect(os.environ["REGISTRAR_DB"])`, mints the token, and
+  closes in a `finally` (the Windows lock applies to this connection too). That is not a QA
+  workstream.
+- **QA independence.** ronda-rousey must not be the person who makes the implementer's change go
+  green. Her job is to find what he missed; owning the repair of his breakage compromises that —
+  the same reason implementers do not write their own peer review.
+
+**Hard constraint, and this is the part that matters: bruce-lee adapts the harness only. He may
+not change, weaken, skip, `expectedFailure`, or delete a single assertion in `test_http.py`.**
+Every existing test must still assert exactly what it asserts today. The four
+`CursorSigningKeyStartupProbeTests` and the three `MalformedCursorRejectionTests` are gsp's and
+ronda-rousey's regression coverage for F1/F2/F4; they are not his to trim. If he concludes an
+assertion *must* change, that is a deviation — stop, route through helio-gracie to me. Not a
+judgment call at the keyboard.
+
+Two riders:
+
+- **Comments and docstrings that describe deleted mechanics must be updated** — `_FreshAppCase`'s
+  docstring ("main.py's module-level `db=connect(...)` is otherwise process-global"), and the
+  `_boot` NOTE block about an orphaned connection kept alive by a traceback. Those describe
+  behavior that will no longer exist. Updating prose is required; it is not an assertion change.
+- **Do not delete the `gc.collect()` calls or the Windows file-lock commentary**, even if A1
+  makes them unnecessary. They are harmless, and removing them discards hard-won platform
+  knowledge for no gain. Separate cleanup, if ever.
+
+ronda-rousey reviews the harness diff as part of her QA pass and holds a **veto on any
+assertion-semantics change**. jackie-chan's peer review stays scoped to connection lifecycle and
+transaction semantics; the test harness is not her lane.
+
+### A3. New concurrency tests: separate file, shared harness — extract it
+
+**Separate file: `registrar/tests/test_http_concurrency.py`. Do not grow `test_http.py`.**
+
+- Different purpose, different runtime profile. `test_http.py` is fast, deterministic regression
+  coverage for named security findings. Concurrency tests run thread pools over repeated trials:
+  slow, and — however carefully written — the file most likely to be quarantined if it ever goes
+  flaky. Same file means nobody can run gsp's F1/F2/F4 guards without paying for the concurrency
+  run, and a quarantine of one takes out the other.
+- Concrete collision risk right now: bruce-lee is editing `_FreshAppCase` in the same window
+  ronda-rousey is writing tests. Separate files means no conflict and no serialization between
+  them.
+- Item 5 of the test-category list above ("no test in this category may give a thread its own
+  connection") is a **file-scoped rule**. It needs a file to scope to. It is false for
+  `test_registrar.py` by design, and irrelevant to `test_http.py`'s existing single-threaded
+  tests.
+
+**Extract the harness rather than importing a private class across test modules.** Move
+`_FreshAppCase` from `test_http.py` to a new `registrar/tests/app_harness.py` as `FreshAppCase`
+(`registrar/tests/__init__.py` exists, so `from registrar.tests.app_harness import FreshAppCase`
+resolves), and have `test_http.py` import it.
+
+- **bruce-lee does the move**, in the same pass — he is already rewriting those exact lines, so it
+  is one edit instead of two, and ronda-rousey builds on a stable base instead of rebasing onto
+  his change mid-flight.
+- **Move only.** No behavior change beyond the two `main_module.db` repairs in A2. The env
+  save/restore, the per-test temp DB, the `sys.modules.pop` + fresh re-import, and the LIFO
+  `addCleanup` ordering that solves the Windows open-file lock are all load-bearing. They move
+  byte-for-byte.
+- ronda-rousey may add concurrency-only helpers (seeding, thread-pool runner, trial loop) to
+  `app_harness.py` or keep them in her own file — her call. She may **not** change `FreshAppCase`'s
+  existing behavior without coming back through helio-gracie, since `test_http.py` depends on it.
+
+helio-gracie's read that the harness is "also an asset" is correct and is the deciding factor: it
+already solved fresh-boot env isolation and the Windows open-file lock, both of which
+ronda-rousey would otherwise rediscover the hard way.
+
+### A4. Corrected scope (supersedes the "Files changed" line above)
+
+bruce-lee's implementation:
+
+- `registrar/app/main.py` — the bulk (remove module-level `db`/`service`, boot-connect/migrate/
+  close, `get_db` dependency, thread the connection through ~14 routes and `identity()`,
+  `OperationalError`→503 in `invoke()`)
+- `registrar/app/db.py` — small context-manager/dependency helper
+- `registrar/tests/app_harness.py` — **NEW**; `_FreshAppCase` moved out of `test_http.py`, plus
+  the two `main_module.db` repairs
+- `registrar/tests/test_http.py` — import line, plus the stale comments named in A2. **No
+  assertion changes.**
+- Unchanged: `service.py`, `auth.py`, `attestation.py`, `test_registrar.py`,
+  `viewer/registrar_client.py`
+
+ronda-rousey's QA: `registrar/tests/test_http_concurrency.py` (new), optionally concurrency-only
+additions to `app_harness.py`.
+
+### A5. Added to "Done when"
+
+- `registrar/tests/test_http.py` passes with every assertion it has today, unmodified, against the
+  new wiring.
+- No file in the repo references `registrar.app.main.db` or `registrar.app.main.service` as
+  module attributes.
+- No `lifespan=` / `@app.on_event` handler was added to `main.py` (A1).
