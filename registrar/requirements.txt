@@ -1,3 +1,9 @@
 fastapi==0.116.1
+# Transitive dependency of fastapi==0.116.1, pinned explicitly because
+# test_dependency_exception_handling.py and the teardown-phase reachability
+# verification in docs/town-registrar-connection-concurrency.md are scoped
+# to this exact version -- bump it together with fastapi and re-run that
+# verification.
+starlette==0.47.3
 uvicorn==0.35.0
 argon2-cffi==25.1.0
