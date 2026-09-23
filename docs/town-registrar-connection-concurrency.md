@@ -512,3 +512,239 @@ additions to `app_harness.py`.
 - No file in the repo references `registrar.app.main.db` or `registrar.app.main.service` as
   module attributes.
 - No `lifespan=` / `@app.on_event` handler was added to `main.py` (A1).
+
+## jackie-chan's checkpoint review — Issues 1-3, coverage-gap ruling, Addendum A sign-off (2026-09-22)
+
+**Status: reviewed `cfa7ecd` (parent `fe6d953`) directly with `git show`/`git diff`, re-read
+`main.py`, `db.py`, `auth.py`, `service.py`, `attestation.py` at their current state (not from
+memory of my first pass), and independently verified two technical claims by running code rather
+than trusting them (see below). helio-gracie routed three issues to me plus a checkpoint list;
+rulings below. Nothing here reopens my original Risk 2/4/5 sign-offs — Issue 1 corrects a premise
+in Risk 5's supporting reasoning, not its conclusion (see Issue 1).**
+
+### Work-order line, confirmed directly: BEGIN IMMEDIATE / busy_timeout / cursor-pagination unchanged
+
+- `git diff fe6d953 cfa7ecd -- registrar/app/service.py registrar/app/auth.py
+  registrar/app/attestation.py` is empty — byte-identical, exactly as the commit message claims.
+  `idem()` (service.py:98) and `promote_import()` (service.py:230) still open `BEGIN IMMEDIATE` on
+  `self.db`; `Registrar.posts()` (the cursor-pagination method) is untouched.
+- `db.py`'s `connect()` still applies all four PRAGMAs, `busy_timeout=5000` last, on every call —
+  the only change is that `connect()` (via the new `session()` context manager) now runs once per
+  request instead of once per process. That is not a change to the invariant, it's the invariant
+  being enforced more consistently: previously it was set once on the one long-lived connection;
+  now every connection any code path opens gets it, including per-request connections that did not
+  exist before.
+- All six write routes (`reserve_root`, `reserve_post`, `publish`, `verify`, `import_run`,
+  `promote`) are still `async def`; all seven read routes plus `ready` are still plain `def`
+  (`grep -n "async def\|^def "` against the current file). Risk #1's invariant — writers stay off
+  the threadpool — holds.
+- `Registrar(db)` is constructed against the connection resolved by exactly one
+  `Depends(get_db)` parameter per route (checked every route signature); the `verify` route threads
+  that same object into both `verify_attestation(db,...)` and `Registrar(db)`, preserving the
+  nonce-then-verify transaction ordering on one connection, per my condition in the first review.
+- **Confirmed: no regression on any of these. Ruling stands as originally given.**
+
+One caveat stated plainly: this is a *static* re-verification — I read the diff and the code, I did
+not run a concurrency test myself. I am not treating bruce-lee's 8x15 smoke test (run from an
+uncommitted, now-discarded scratchpad — no durable evidence in the repo) as proof the original
+corruption is fixed. That proof is explicitly ronda-rousey's work-order line, not mine, and my
+sign-off below does not stand in for it.
+
+### Issue 1 — `identity()`'s embedded write, and a correction to my own Risk 5 reasoning
+
+Confirmed at `auth.py:25`: `authenticate()` ends with an autocommit
+`UPDATE tokens SET last_used_at=? WHERE token_id=?` on every successful authentication, read or
+write route alike — `identity()` (`main.py:65`) is called as a bare statement at the top of all 13
+DB-touching routes, *separately from and before* any `invoke(...)` call, including in the six write
+routes. `identity()`'s own `try/except` catches only `Forbidden`; nothing catches
+`sqlite3.OperationalError` there, and no route wraps its `identity(...)` call in `invoke()`. If that
+UPDATE loses the busy-lock race, it is an unhandled 500, confirmed by reading the code, not
+inferred.
+
+**Correction to my own Risk 5 ruling, not just a new finding.** My first-pass text says "writes have
+always been serialized on the event loop" as a blanket premise. That statement is accurate for the
+six enumerated write *routes* (their own internal transactions genuinely never contended, because
+those routes are `async def`) but I stated it more broadly than the evidence supported — I did not
+separately audit every `db.execute` call in the codebase for which thread class runs it, only the
+route-level `async def`/`def` split the design note itself enumerated. `authenticate()`'s UPDATE is
+a write that has *never* been event-loop-serialized: it runs inside `identity()`, called from all
+seven plain-`def` read routes too, so under the OLD shared-connection design it already ran
+concurrently, from multiple threadpool threads, on the ONE shared connection — i.e. it was already
+exposed to the exact LRU-statement-cache-aliasing hazard that produced ronda-rousey's corruption
+numbers, just never specifically isolated as its own finding (a 1-row UPDATE with no read-back has
+no consumer-visible corruption signature the way a paginated SELECT does, so it could have been
+misfiring silently and nobody would see it in the response body).
+
+**What changes for THIS write, specifically, from old to new design:** old design — shared-cache
+corruption hazard, present but unmeasured; new design — that hazard is fully eliminated (own
+connection, own statement cache), but real SQLite single-writer lock contention is introduced in its
+place, and it is uncaught on this specific path. My Risk 5 *conclusion* (verifier-nonce ordering
+survives the fix) is unaffected — the `verify` route is genuinely `async def`, so that specific pair
+of writes stays event-loop-serialized exactly as I described. What's corrected is the *general*
+premise text, which I should not have stated without the caveat "for the six named write routes
+specifically."
+
+**Is the contention risk hypothetical? No — the design note already documents the exact collision
+window.** Risk 6 (endorsed, out of scope) states `promote_import` holds `BEGIN IMMEDIATE` across all
+imported rows on the event-loop thread, "stalling every request (including health checks) for the
+duration." Any GET request already dispatched to the threadpool *before* that block begins continues
+running on its own OS thread in parallel — threadpool dispatch is real OS-thread parallelism, it
+does not stop just because the event loop can't schedule anything new. That in-flight GET's
+`identity()` UPDATE then contends for SQLite's single writer lock against `promote_import`'s
+long-held transaction, for however long the import batch takes — plausibly longer than
+`busy_timeout=5000` for anything beyond a handful of rows. This is the accepted, already-documented
+Risk 6 scenario colliding with the newly-per-connection auth write, not a new abstract worry.
+
+**Ruling: not acceptable as-is.** I am not persuaded by the 8x15 smoke test (evidence-gap caveat
+above applies) and the promote_import collision window is a real, already-accepted condition of this
+system, not a hypothetical. Of the three options offered, I rule for the third, generalized: **move
+exception-to-HTTP-status mapping out of `invoke()`'s per-call-site convention and into FastAPI
+app-level exception handlers** (`@app.exception_handler(Conflict)`, `Forbidden`, `Invalid`,
+`Unavailable`, and `sqlite3.OperationalError` with the same locked/busy string discrimination
+`invoke()` uses today). I verified this mechanism works for exactly this failure mode before ruling
+on it, rather than assuming FastAPI semantics: a probe against this repo's installed versions
+(fastapi 0.116.1 / starlette 0.47.3) confirms an app-level exception handler catches an exception
+raised *inside a `Depends()` dependency before `yield`* — status 503 came back for both a
+dependency-raised and a route-body-raised instance of the same custom exception type, via a bare
+`TestClient(app)` with no `with` block (so this does not depend on, or reopen, Addendum A1's
+lifespan-vs-import-time decision — exception handlers are unrelated to the lifespan protocol A1
+declined). Scratch probe kept at
+`C:\Users\terre\AppData\Local\Temp\claude\...\scratchpad\exc_handler_probe.py` for reproducibility,
+not committed (throwaway, not part of the suite).
+
+This closes Issue 1 (identity()'s UPDATE, at all 13 call sites, uniformly) and Issue 2 (below) with
+the same mechanism, which is why I'm ruling for the general form rather than patching
+`sqlite3.OperationalError` alone: patching only the one exception type asked about in Issue 1 while
+leaving `Conflict`/`Forbidden`/`Invalid`/`Unavailable` on the old per-call-site convention would
+create exactly the kind of split invariant ip-man's own A1 reasoning warns against ("a split startup
+is worse than either pure option") — here, a split *error-mapping* posture, structural for one
+exception type and convention-remembered for four others, is worse than either "all convention" or
+"all structural." Once the app-level mechanism exists for one exception type, extending it to all
+five costs nothing extra and removes the remembered-per-call-site burden entirely.
+
+**Implementation note, not mine to make (routes to bruce-lee via helio-gracie, not made here):**
+`invoke()`'s lambda-wrapping becomes redundant once handlers are structural; I'd expect `invoke()`
+to shrink to nothing or be deleted with call sites simplified to direct calls, but that shape
+decision belongs to whoever implements it. `identity()`'s own `HTTPException(401,...)` for a
+missing/malformed bearer header stays exactly as-is — that's an input-validation guard clause with
+no underlying service exception to map, not something the new handlers touch.
+
+### Issue 2 — coverage-gap count and the busy_timeout/PRAGMA-ordering claim
+
+**My own audit, independent of both bruce-lee's and helio-gracie's counts:** grepping every route
+and reading each body, I count exactly **six** route/handler-level surfaces where a `db.execute` or
+service call runs outside `invoke()`: `get_root`, `get_post`, `assignments`, `reconciliation`
+(bruce-lee's original four, confirmed) plus `aliases` (`Registrar(db).aliases(alias)` called bare)
+and `ready` (three direct PRAGMA/schema_migrations calls). That matches helio-gracie's "six, not
+four" exactly once `get_db` is read as a *separate*, more severe finding rather than a seventh item
+in the same list — which is how I read it too: `get_db`'s `connect()` call happens during dependency
+resolution, before any route body runs, for all 13 DB-touching routes at once. It's not route-level
+at all, it's upstream of every route, so folding it into a route-count would understate it, not
+overstate it. Between the six route-level surfaces, `get_db`, and `identity()`'s embedded write
+(Issue 1, a distinct angle — not a `db.execute` in a route body, a write buried in an auth
+helper), there are eight things I can point to, and none of them overlap. I'm stating my own count
+explicitly rather than restating "six" uncritically, per this doc's own established norm (Addendum
+A0: a negative/count claim needs a directory listing, not a restatement).
+
+One precision on `aliases` specifically: `Registrar.aliases()` does not currently raise `Invalid`
+or `Conflict` — I read it, it's a bare `SELECT` with no validation branch. So the specific "service-
+layer Invalid/Conflict escapes as 500" scenario named for `aliases` isn't reachable *today*. It's
+still correctly flagged: (a) `OperationalError` could still hit that `db.execute` and escape as 500
+regardless, and (b) it's a live trap for the next person who adds a validation branch to `aliases()`
+with nothing forcing them to remember the `invoke()` convention.
+
+**Technical claim, independently verified rather than accepted:** confirmed by direct test against
+this repo's Python/sqlite3, not read from documentation —
+`sqlite3.connect(path, timeout=5)` sets the C-level busy handler to 5000ms *at connection-open time*,
+before any Python-level statement executes:
+
+    >>> sqlite3.connect(':memory:', timeout=5).execute('PRAGMA busy_timeout').fetchone()
+    (5000,)
+
+confirmed immediately after `connect()`, with no PRAGMA statement issued yet. So `db.py`'s first
+three PRAGMAs (`foreign_keys`, `journal_mode=WAL`, `synchronous`) all run under an already-active
+5-second busy handler; the explicit fourth `PRAGMA busy_timeout=5000` is redundant in effect (same
+value) but not harmful, and it's useful self-documentation plus a safety net if someone changes the
+`timeout=5` kwarg without noticing it's paired with the literal `5000` in the PRAGMA string, or vice
+versa — those two now encode the same 5-second value in two places with nothing enforcing they stay
+in sync. **Minor finding, not blocking:** worth a one-line comment in `db.py`'s `connect()` noting
+the pairing (`timeout=5` seconds == `PRAGMA busy_timeout=5000` ms, keep them equal), so a future
+change to one doesn't silently orphan the other. Small, non-blocking, bruce-lee's call whether to
+fold it into the same pass as the exception-handler change.
+
+**Ruling on scope: not acceptable as originally scoped, widen it.** The work order asked for the
+mapping "in `invoke()`," and what's built matches that literally — but "in `invoke()`" was always
+shorthand for "every exception a DB-touching code path can raise gets mapped correctly," and the
+actual surface (eight distinct gaps, not the four originally scoped) is bigger than that shorthand
+covered. Same ruling and same mechanism as Issue 1: app-level exception handlers close this
+uniformly, covering `ready`/`get_root`/`get_post`/`aliases`/`assignments`/`reconciliation` and
+`get_db` itself in one change, rather than hand-patching six-plus call sites and hoping the next
+addition remembers the convention.
+
+### Issue 3 — module-level `_boot`: ruling for `del _boot`, routed to ip-man per A1's own precedent
+
+Confirmed at `main.py:28`: `_boot=connect(DB_PATH); migrate(_boot); _boot.close()`. `_boot` remains
+bound at module scope after import — a closed, inert `sqlite3.Connection` object, and grepped: not
+referenced anywhere else in `main.py` (the `_boot` hits in `app_harness.py`/`test_http.py` are an
+unrelated test-harness *method* name on a different class, not this module global — no collision).
+
+**Ruling: (b) — `main.py` should `del _boot` immediately after `.close()`.** Reasoning, mirroring
+the logic I already used for my own WAL-pin ruling and A1's "attractive nuisance" framing for the
+same reason: a closed connection sitting at module scope is the same *shape* of object that caused
+this entire defect, just currently inert. "Closed, so it's harmless" is exactly the kind of
+invariant that survives by accident today and breaks tomorrow — a future edit that adds a line before
+`.close()`, or reopens `_boot` for "a quick fix," or drops the `.close()` call in a refactor while
+leaving the name, would silently reintroduce the leaked-global topology this whole fix removes, and
+nothing would flag it as a regression because the name was already sitting there looking normal.
+`del _boot` costs one line and makes the test-category item 4 spec ("no module-level connection is
+reachable from handlers") literally, unconditionally true instead of true-with-a-footnote that a
+future reader has to independently know and keep in sync with the code. It lets ronda-rousey write
+the structural tripwire as a plain assertion instead of one carrying an unexplained special case.
+
+**Routing, not deciding unilaterally:** this changes one line of ip-man's literal Addendum A1
+snippet. Per A1's own rule ("this amends a line in a note jackie-chan reviewed... Notify, do not
+re-gate"), I'm applying the same precedent in the direction it wasn't originally written for: this
+is a one-line, purely additive change on top of A1's snippet, touches none of A1's actual reasoning
+(the boot-connection-instead-of-lifespan decision, the split-startup argument, the
+`TestClient.__enter__` point are all untouched), and strictly tightens an invariant rather than
+loosening one. **Notify, do not re-gate: helio-gracie sends ip-man this ruling, bruce-lee proceeds
+with `del _boot` now, and if ip-man objects it comes back to her, not to bruce-lee mid-change** —
+same shape as A1 itself, applied symmetrically.
+
+### Also flagged by helio-gracie — my confirmation
+
+- **13 of 14 routes thread the connection, not all 14 — confirmed correct behavior, not an
+  oversight.** Grepped every route: `/health/live` has no `Depends(get_db)` parameter and touches
+  nothing DB-related. A liveness probe that touches the DB collapses the live/ready distinction this
+  app already deliberately maintains (my own Risk 3 in the first review flagged `/health/ready`'s
+  semantics as a liveness-adjacent contract worth being careful with — this is the same care applied
+  correctly on the live side). Agreed, not a defect.
+- **Evidence gap — agreed, and my sign-off above does not treat the concurrency claim as proven
+  in-repo.** Stated explicitly in the BEGIN IMMEDIATE/busy_timeout confirmation section above: this
+  was a static re-verification, not a dynamic one. That proof is ronda-rousey's work-order line.
+
+### Addendum A — no objection, written down
+
+I gave this verbally when notified; recording it here as the doc of record. I have no objection to
+Addendum A0-A5 (ip-man, 2026-09-22): the correction to the "test suite can't see `main.py`" claim,
+the decision to keep migration at import time on a closed boot connection rather than introduce
+`lifespan` (A1), the `test_http.py` ownership assignment to bruce-lee with the hard
+no-assertion-changes constraint (A2), the harness extraction to `app_harness.py` (A3), and the
+corrected file-scope list (A4/A5). None of it touches my Risk 2/4/5 rulings or my four
+implementation conditions from the first review, and A1/A2's reasoning is sound on its own terms
+independent of my lane. Read `cfa7ecd`'s actual diff against these commitments (not just the design
+note) before signing off here: `test_http.py`'s diff shows harness extraction and the two
+`main_module.db` repairs only, no assertion text changed — matches A2's hard constraint exactly.
+
+### Net ruling
+
+`cfa7ecd`'s connection-lifecycle and transaction-semantics work is sound and matches what was
+designed and reviewed — **BEGIN IMMEDIATE, busy_timeout, and cursor-pagination invariants are
+confirmed unchanged.** It is not yet "Done" per the work order's own checklist: Issues 1 and 2 need
+a follow-up commit widening exception mapping to app-level handlers (routes to bruce-lee via
+helio-gracie), and Issue 3 needs one line (`del _boot`) routed through ip-man per A1's own
+notify-not-re-gate precedent. None of these block ronda-rousey's QA work order, which is orthogonal
+(new test file, existing harness) — she can and should proceed against `cfa7ecd` now. Pushing
+`cfa7ecd` to `internal` alongside this review so it's available for that work; the exception-handler
+widening and the `_boot` cleanup land as separate follow-up commits, reviewed on their own merits
+when bruce-lee delivers them.
