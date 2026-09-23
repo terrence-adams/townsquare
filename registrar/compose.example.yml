@@ -34,7 +34,15 @@ services:
     ports:
       # Prototype HTTP is loopback-only. LAN clients must use an authenticated SSH tunnel.
       - "127.0.0.1:8790:8790"
-    networks: [registrar-internal]
+    # registrar-internal alone is not enough to publish the port above: Docker never
+    # wires up host-side port publishing for a container whose only network is
+    # internal:true (confirmed directly on this NAS, 2026-09-23 -- no docker-proxy
+    # process is created at all, regardless of the 127.0.0.1 host-ip prefix). registrar-edge
+    # is a second, non-internal network added solely so the loopback bind above actually
+    # works; it does not widen LAN reachability -- the 127.0.0.1 prefix on the port mapping
+    # is what enforces that, independent of which network(s) the container is attached to.
+    # Same pattern already used by the viewer's own compose file for the same reason.
+    networks: [registrar-internal, registrar-edge]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/health/ready', timeout=2).read()"]
       interval: 30s
@@ -50,6 +58,7 @@ services:
       options: {max-size: 10m, max-file: "5"}
 networks:
   registrar-internal: {internal: true}
+  registrar-edge: {}
 secrets:
   token_pepper:
     file: ${REGISTRAR_TOKEN_PEPPER_FILE:?set REGISTRAR_TOKEN_PEPPER_FILE}
