@@ -12,8 +12,13 @@ rotating secrets, or restoring data are live actions requiring explicit operator
 - Run exactly one Registrar worker and one writable database volume.
 - `/var/lib/town-registrar` must be durable NAS-local storage. **Never** place the live
   SQLite database/WAL on SMB, NFS, Google Drive, rclone, or synchronized storage.
-- Prototype HTTP binds only NAS loopback. LAN clients reach it through an authenticated SSH
-  tunnel; do not bind port 8790 to a LAN/WAN interface or add router port forwarding.
+- Prototype HTTP publishes as `127.0.0.1:8790:8790`. Note this NAS does not actually enforce
+  host-only reachability for a loopback-bound published port — confirmed 2026-09-23, a plain
+  throwaway loopback-bound container is equally reachable from another LAN host over the
+  NAS's LAN IP, independent of this service's own config. Operator has accepted this: the
+  loopback-only intent was a PoC-stage default, not a long-term restriction, and the LAN is
+  already governed by its own controls. Still: do not add router port forwarding or a
+  LAN/WAN bind beyond what the NAS itself already exposes.
 - Keep token pepper and cursor signing keys distinct, root-readable, and outside Git,
   images, logs, backups, TownSquare events, and shell history.
 - Registrar has no Drive credential. Import and verification are not automatic and
