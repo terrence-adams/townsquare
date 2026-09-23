@@ -37,7 +37,7 @@ One connection per request, opened and closed by a FastAPI dependency. Keep ever
 
 SQLite in WAL mode is designed for many connections to one file, not one connection across many threads. The app already has WAL, `busy_timeout=5000`, and `BEGIN IMMEDIATE` on every write — a complete, correct multi-connection posture the deployment currently undermines by handing out a single connection.
 
-Decisive point: the multi-connection topology is the one the test suite *already* proves. `test_concurrent_root_allocation`/`test_concurrent_children_and_publication` run 100 threads with independent connections and pass. This fix moves production *into* the configuration already battle-tested since WS3, not out of it — inverting the usual risk calculus.
+Decisive point: the multi-connection topology is the one the test suite *already* proves. `test_concurrent_root_allocation`/`test_concurrent_children_and_publication` run 100 threads with independent connections and pass. This fix moves production *into* the configuration already battle-tested since WS3, not out of it — inverting the usual risk calculus. *[Corrected 2026-09-22 — these two tests do not reliably pass; see jackie-chan's correction near the end of this note. The multi-connection *read* topology this fix actually adopts for production is not what these tests exercise regardless — see the same correction for why the core recommendation is unaffected.]*
 
 Cost at this scale (1,070 rows, home LAN, a handful of viewer sessions): a `sqlite3.connect` plus four PRAGMAs per request. Sub-millisecond. No new dependency, no async rewrite.
 
@@ -253,10 +253,15 @@ before agreeing.
   `journal_mode=WAL`, `synchronous=FULL`, `busy_timeout=5000` — all four are
   re-applied by `connect()` on every call, so per-request connections don't need any
   extra PRAGMA setup beyond what `db.py` already does), same `BEGIN IMMEDIATE` write
-  pattern. Zero flakiness reported in this suite. Ip-man's framing that this "inverts
+  pattern. Zero flakiness reported in this suite. *[Corrected 2026-09-22 — wrong; these
+  tests fail at high, reproducible rates on this machine. See jackie-chan's correction
+  near the end of this note — this claim should not have been made as worded, and the
+  session had direct disconfirming evidence in hand before ronda-rousey surfaced it.]*
+  Ip-man's framing that this "inverts
   the usual risk calculus" is correct and I'd put it more strongly: production today
   runs a *worse-tested* configuration (single shared connection) than the one this
-  fix adopts (already exercised at 100-way concurrency in the test suite).
+  fix adopts (already exercised at 100-way concurrency in the test suite). *[Same
+  correction applies — see below.]*
 
 **Ruling: endorsed, no changes to the approach. Confirm `BEGIN IMMEDIATE` +
 `busy_timeout=5000` invariants are unchanged — verified directly, `idem()` and
@@ -1103,3 +1108,121 @@ bruce-lee's 9+62 claim.
 
 **No further concerns. `60ee5aa` is approved as delivered.** Pushing it now along with this review,
 per the coordinator's routing — my sign-off, my access, no further gate needed.
+
+## jackie-chan's correction — "zero flakiness" was wrong; reconciled against ronda-rousey's finding (2026-09-22)
+
+ronda-rousey ran `test_concurrent_root_allocation`/`test_concurrent_children_and_publication`
+standalone, 5 times each, on an idle machine (checked via `tasklist` for other python processes):
+**4 of 5 failed, each time, with `sqlite3.OperationalError: database is locked`.** This directly
+contradicts my first-pass review's "Zero flakiness reported in this suite" and the "already
+battle-tested"/"inverts the usual risk calculus" framing built on it (line 40, ip-man's original
+text; line 256, my endorsement of it). Investigated rather than accepted or defended, per this doc's
+own standard applied to everyone else all session.
+
+### Was the original claim ever actually run? Honest answer: I don't know, and the evidence available points the wrong way
+
+I have no record from that first-pass session of these two tests being executed with output captured
+— nothing resembling the pass/fail counts I've shown my work with everywhere else in this file. The
+phrasing itself ("I *read* `test_concurrent_root_allocation`... directly... Zero flakiness *reported*")
+uses a code-reading verb and an absence-of-complaints framing, not an execution-and-observation one.
+I cannot rule out that it was run once, quietly, and passed — but I can rule out that it was run
+enough times to support the word "zero," because five is enough to falsify that word and one or two
+would not have been. **Worse: this session had direct disconfirming evidence already in hand and
+didn't connect it.** My own checkpoint-review commit (`8b1ae27`) and my `60ee5aa` review commit
+(`95990ac`) both separately ran the full suite, both saw these exact two tests fail, and both
+described it — accurately, in isolation — as "the pre-existing Windows SQLite flake this doc has
+tracked since `cfa7ecd`." I used the word "flake" about these tests twice this session without ever
+going back to reconcile it against my own earlier "zero flakiness" claim about the *same two tests*
+in the *same document*. That is exactly the kind of contradiction-across-sections this doc's own
+culture (Addendum A0, B1's audits) exists to catch, and I should have caught it myself without
+needing ronda-rousey to surface it. Recording that plainly rather than only fixing the text.
+
+### Reproduced directly, with the confound explicitly checked
+
+Ronda-rousey checked for other *python* processes only. The coordinator's confound — this session
+running many parallel background agents on this machine for hours, which could look like "the design
+is flaky" when it's really "the machine was busy" — is a real thing to rule out before accepting
+either the original claim or the contradiction of it at face value. Checked properly:
+
+- `Win32_Processor.LoadPercentage` immediately before/after each of 5 runs:
+  `0, 5, 4, 3` before; `14, 6, 6, 4, 3` after. **Never above 14%.** Multiple `claude` processes are
+  indeed running (confirmed via `Get-Process`, matching the coordinator's premise about this
+  session's background load), but CPU load at the moments these tests actually ran was low, not
+  saturated.
+- Ran the two tests 5 times (`pytest -k "test_concurrent_root_allocation or
+  test_concurrent_children_and_publication"`), matching ronda-rousey's methodology:
+  `test_concurrent_root_allocation` failed **5 of 5**; `test_concurrent_children_and_publication`
+  failed **3 of 5**. Same failure mode both times: `sqlite3.OperationalError: database is locked`,
+  from `self.db.execute("BEGIN IMMEDIATE")` inside `Registrar.idem()` — a genuine SQLite write-lock
+  timeout, not an application bug or a test-harness artifact.
+- **Conclusion: "the machine was busy" is not a sufficient explanation.** These failures reproduce
+  reliably at measured CPU load under 15%, which is not what a saturated machine looks like. I can't
+  produce a true zero-other-process baseline on this shared, long-running session host, so I can't
+  rule out background load as a *partial* contributor — but the load readings make it clearly
+  insufficient as the *primary* cause, at the magnitude observed (worse than or matching
+  ronda-rousey's own rate).
+
+### The actual mechanism, best-supported by the evidence: thread-count oversubscription, not a design flaw
+
+This machine (`AMD Ryzen 5 5600G`) has **6 cores / 12 logical processors**. Both tests spin up
+**100 threads**, each opening its own connection and immediately racing for `BEGIN IMMEDIATE`'s
+single SQLite write lock — roughly 8x thread oversubscription before any other process on the system
+is counted at all. `busy_timeout=5000` is a *wall-clock* timeout, not a CPU-time budget: a thread
+holding the write lock that gets preempted by the OS scheduler under 8x oversubscription can stay
+descheduled long enough, in real elapsed time, for every other waiting thread's 5-second clock to run
+out — with zero unrelated processes required to make that happen, just this test's own thread count
+against this machine's core count. This is the best-supported explanation for reproducing at 0-14%
+measured load: the contention is mostly self-inflicted by the test's own concurrency level, not
+externally imposed.
+
+**One more scoping point, independent of the flakiness finding, that further limits what these tests
+ever proved:** they are pure **write-write** contention stress tests — 100 threads all doing
+`BEGIN IMMEDIATE` writes concurrently. They say nothing about **read** concurrency, which is what
+`cfa7ecd` actually changes for production (`main.py`'s read routes moving off a shared connection).
+Citing them as proof the *production read topology* was "already battle-tested" was importing
+evidence from the wrong axis, flakiness aside.
+
+### What this does and does not change
+
+**Does not change:** `BEGIN IMMEDIATE`/`busy_timeout` invariants are still confirmed unchanged
+mechanically (verified by diff, independent of this finding). Production's write routes are still
+all `async def`, still fully serialized on the event loop — so production itself never subjects
+`BEGIN IMMEDIATE` to 100-way simultaneous contention the way this stress test artificially does; the
+mechanism that makes these two tests flaky is not a mechanism production traffic exercises. B1/B2
+stand as reviewed and approved.
+
+**Does change, and strengthens rather than weakens the case for it:** this is now direct, reproduced
+evidence that `busy_timeout=5000` *can* be legitimately exceeded under real concurrent-writer
+contention on this exact hardware — not a hypothetical. That's the precise condition Issue 1 and B1's
+503 mapping exist to handle gracefully instead of surfacing as an unhandled 500. Bruce-lee's own
+8x15 smoke test read as clean partly because it never approached this thread count; this data doesn't
+contradict that result, it explains why "the smoke test was clean" was never strong enough evidence
+that contention was "practically negligible" — which is exactly why I didn't accept it as sufficient
+when ruling on Issue 1.
+
+**Correction to the record, stated plainly:** "Zero flakiness reported in this suite" (line 256) was
+wrong and should not have been asserted as worded. The "already battle-tested" / "inverts the usual
+risk calculus" framing (line 40, ip-man's original; line 256-259, my endorsement) is not supported
+by these two tests as evidence of reliability — it is, at best, evidence that the *pattern*
+(connect-per-caller, correct PRAGMAs, `BEGIN IMMEDIATE`) is *architecturally* the right one, which
+these tests still demonstrate by having a real, mechanical, wall-clock-bound failure mode
+(`busy_timeout` expiring) rather than the silent-corruption failure mode the whole fix targets. Real
+distinction, but "architecturally sound, mechanically clean-if-flaky under stress" is a materially
+weaker claim than "zero flakiness," and the doc should have said the weaker, true thing.
+
+### Recommendation, not actioned here — routes to ronda-rousey's QA lane
+
+`test_concurrent_root_allocation` asserts `self.assertFalse(errors)` — zero tolerance, no retry, for
+100 raw threads against a single write lock. Given the confirmed oversubscription mechanism, I'd
+recommend one of: (a) reduce these two tests' thread count to something closer to this class of
+machine's logical-processor count so they stay meaningful without guaranteeing timeout-driven
+flakiness by construction, (b) add a bounded retry-on-`OperationalError`-locked/busy inside the
+test's own writer function, mirroring what a real client would do against a 503, or (c) explicitly
+mark them as known-flaky-under-thread-oversubscription in a comment so a future CI run doesn't waste
+time treating a single red run as a regression signal. Not implementing any of these myself — test
+logic changes in `test_registrar.py` are ronda-rousey's QA lane, and this needs its own small,
+reviewed decision rather than being folded into this correction. Flagging once, per this doc's own
+norm on scope discipline.
+
+**This does not block the final gateway or reopen B1/B2.** Recorded per the coordinator's
+instruction so a wrong "already battle-tested" premise does not sit unreconciled in the design doc.
