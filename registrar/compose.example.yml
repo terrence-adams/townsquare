@@ -5,7 +5,9 @@ services:
     image: town-registrar:local
     build: {context: ., dockerfile: Dockerfile}
     restart: unless-stopped
-    init: true
+    # No `init: true` here on purpose: this NAS's /sbin/docker-init is mode 0744
+    # (root-exec only), incompatible with the non-root UID + full cap_drop below.
+    # Confirmed 2026-09-22/23 during the viewer and cursor-pagination deploys.
     user: "${REGISTRAR_UID:?set NAS account UID}:${REGISTRAR_GID:?set NAS account GID}"
     read_only: true
     cap_drop: [ALL]
