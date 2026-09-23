@@ -1649,3 +1649,143 @@ Stated as plainly as what I did, not just as a footnote:
 - **No production-like network load.** Aside from the one `uvicorn.Server` + `httpx.Client` check
   used specifically to rule out a `TestClient`-portal artifact for the 122s stall, everything else
   runs over `TestClient`'s in-process ASGI transport, not real sockets under real client load.
+
+## jackie-chan's review of C3 — `test_operational_error_handler.py`, verified not assumed (2026-09-22)
+
+**Status: read `3d997b7` directly (`git show --stat` confirms exactly two files touched — this
+doc and the new test file, zero lines changed anywhere else, including `app_harness.py` and
+`test_http.py`), read `main.py`'s current state end to end rather than from memory of the B1/B2
+rounds, ran the delivered file myself (`5 passed` in `0.39s`), and reproduced ronda-rousey's
+sanity check independently — commented out `@app.exception_handler(sqlite3.OperationalError)` in
+`main.py`, re-ran, got the same `3 failed, 2 passed` split she reported (registration and both
+locked-path cases fail; both negative-control tests still pass, correctly, since re-raise is
+right with or without the handler), then reverted with `git checkout --` and confirmed
+`git status`/`git diff --stat` empty before moving on. Addendum C, my own B1/B2 rulings, and Issue
+1/B4 are the standing reference; this section doesn't restate their reasoning, only checks the
+delivered file against it.**
+
+### 1. Tests the real `main.app`, not a synthetic stand-in — confirmed
+
+Every one of the four test classes calls `FreshAppCase._boot()`, which does
+`import registrar.app.main as main_module` under a controlled temp-DB environment (`app_harness.py`,
+unchanged — see item 5) and hands back the actual booted module. `TestClient(self.main_module.app)`
+wraps the real `FastAPI` instance from `main.py:51`, with the real `@app.exception_handler` from
+`main.py:53` on it. This is the deliberate contrast the file's own docstring draws against my
+`test_dependency_exception_handling.py`, and I re-read that file to confirm the contrast is accurate
+rather than asserted: its own docstring says outright "This file does NOT test registrar's actual
+`main.py`/`get_db`" and builds throwaway `FastAPI()` apps inline. The new file has no synthetic app
+anywhere in it. Confirmed by construction, not by docstring claim alone — my own decorator-removal
+sanity check only works at all because the test is exercising the literal production decorator.
+
+### 2. Case 4 (negative control) — genuinely proves non-reclassification, both `TestClient` modes
+
+Read `operational_error()` (`main.py:53-84`) directly: the non-matching branch is a bare `raise exc`,
+no conversion. The two tests exercise that exact branch (message `"no such table: posts"`, containing
+neither `"locked"` nor `"busy"`) through both portals:
+
+- `raise_server_exceptions=True` (TestClient's default): `assertRaises(sqlite3.OperationalError)`
+  around the request — this is the stronger of the two assertions, because it checks the real
+  exception *type* reaches the caller, not merely a non-200 status. A future regression that swapped
+  `raise exc` for some other unhandled-but-different exception, or for a caught-and-rethrown
+  `HTTPException`, would fail this specific assertion even though both would still 500 under the
+  other mode.
+- `raise_server_exceptions=False` (production-equivalent — Starlette's `ServerErrorMiddleware` path):
+  `assertEqual(500, r.status_code)`. Since both modes exercise the identical `raise exc` line in the
+  handler (the divergence is downstream, in how the ASGI portal treats an escaping exception, not in
+  the handler itself), the strict-mode test's type-level proof and the loose-mode test's status-level
+  proof are two views of one confirmed code path, not two independent risks of the same gap.
+
+My own decorator-removal run adds first-hand confirmation on top of the code read: with the handler
+gone, these two negative-control tests are the *only* two of five that still pass — because
+`raise exc`'s effective behavior for a non-matching message is identical to there being no handler at
+all. That is exactly the property the case is supposed to prove.
+
+### 3. No case is timing-dependent — confirmed, and confirmed fast
+
+Grepped the file: no `threading`, no `time.sleep`, no thread pool, no retry loop. Every case drives
+its exception through `app.dependency_overrides` (a scripted generator raising before `yield`, same
+shape as `get_db`) or a direct `setattr` monkeypatch of `main_module.authenticate_identity`, both
+undone in `addCleanup`. My own run: `5 passed in 0.39s` — that runtime alone is corroborating evidence
+against any hidden timing dependency; a file with a real contention or sleep-based mechanism could not
+plausibly complete in under half a second. B3's rule (no timing-dependent assertion — Addendum C3
+explicitly scoped this file to stay clear of it) holds.
+
+### 4. Matches B1's four implementation conditions and closes B4's first two bullets
+
+- **Condition 1 (register on `OperationalError` only, not `sqlite3.Error`):** confirmed by reading
+  `main.py:53` — one `@app.exception_handler`, scoped to `sqlite3.OperationalError`. Case 1
+  (`test_operational_error_is_a_registered_exception_handler`) checks presence in
+  `app.exception_handlers` keyed by that exact type. `sqlite3.IntegrityError` is a sibling of
+  `OperationalError` under `DatabaseError`, not a subclass (my own `issubclass` check from the B2
+  round, re-confirmed here by re-reading that this file makes no change to the registration), so
+  nothing in this delivery reopens that guarantee. Not independently re-tested against a live
+  `IntegrityError` in this file, and it doesn't need to be — that's a registration-scope fact already
+  closed by code review, not a new behavior this delivery introduces.
+- **Condition 2 (non-matching re-raise):** Case 4, both modes — see item 2 above.
+- **Condition 3 (503 body byte-identical to `{"detail": str(exc)}`):** Cases 2 and 3 both assert
+  `self.assertEqual({"detail": "database is locked"}, r.json())` against the real handler's real
+  `JSONResponse` (`main.py:83`), not a probe against a stand-in. Matches.
+- **Condition 4 (`invoke()`'s clause deleted, not duplicated):** confirmed directly by reading
+  `invoke()` (`main.py:124-135`) — no `except sqlite3.OperationalError` clause, with a comment against
+  re-adding one. This is a static fact about the source, correctly not something the new test file
+  tries to prove via HTTP behavior (there's no route path that would distinguish "deleted" from
+  "present but unreachable" at the HTTP layer); it's confirmed by direct code read, same standard I
+  applied to every other file this session.
+- **B4 bullet 1** ("no `OperationalError` with a locked/busy message ... surfaces as a 500 — from
+  `get_db`'s `connect()`, `identity()`'s `last_used_at` UPDATE, or any of the six bare route
+  surfaces"): Cases 2 and 3 cover the two *origins* (dependency-setup, auth-path) through one
+  representative route each (`/health/ready`, `/v1/posts`). That's the right level of abstraction, not
+  a shortcut: the mapping is a single app-level handler with no route-specific branching, so every
+  route that resolves `get_db` or calls `identity()` shares the exact same code path already proven
+  here — a per-route repeat of the same two cases across all six surfaces would add test count without
+  adding coverage. My own decorator-removal run confirms this mapping is real and reachable, not just
+  present in source.
+- **B4 bullet 2** ("non-locked/busy `OperationalError` still surfaces as a server exception with its
+  traceback, verified empirically, not assumed"): Case 4, confirmed empirically by me independently
+  (item 2), converting what was previously only jackie-chan's discarded scratch-probe evidence into
+  committed, durable, re-runnable coverage — which is exactly the gap Addendum C3 named.
+
+### 5. `FreshAppCase` genuinely unmodified — checked the diff, not the description
+
+`git log --oneline -- registrar/tests/app_harness.py` shows exactly one commit, `cfa7ecd` (the file's
+creation, per Addendum A3) — no commit since, including `3d997b7`, touches it.
+`git diff fe6d953..HEAD -- registrar/tests/app_harness.py` is empty. `git show 3d997b7 --stat`
+independently confirms the same at the single-commit level: two files changed
+(`docs/town-registrar-connection-concurrency.md`, `registrar/tests/test_operational_error_handler.py`),
+388 insertions, 0 deletions, 0 files besides those two touched. `test_http.py` is likewise untouched
+by this commit. Confirmed structurally, not from the commit message's own claim.
+
+### ronda-rousey's QA report section — no contradiction with any of my prior rulings
+
+Read it in full per ip-man's C4 ruling. It restates the WS3-flakiness correction accurately (matches
+my own numbers and root-cause, doesn't reopen it), and the 122s-stall material doesn't touch
+connection-lifecycle, transaction-semantics, or isolation-posture claims I ruled on — it's routed to
+jet-li, correctly, not something in my lane either way. Nothing there contradicts Risk 2/4/5, the B1/B2
+implementation conditions, or the Issue 1/2 rulings. No objection.
+
+### One concrete, non-blocking observation — named, not ordered
+
+Case 4's two negative-control tests both drive the schema-skew error through the `get_db` origin only
+(`_raise_before_yield`), not through the `identity()`/auth-path origin `AuthPathOriginTests` uses for
+the locked-path case. Since `operational_error()` is one handler with no origin-specific branching,
+this is not a coverage gap today — but it's the one place in this file where "one representative
+origin proves the general case" (my own reasoning in the B4-bullet-1 item above) is carrying weight for
+the *negative* control specifically, and the negative control is the one B1 called "the most important
+of the four" cases. A fifth test — `AuthPathOriginTests` raising a non-locked message and asserting the
+same 500/re-raise pair — would remove that last inference step entirely, at low cost (the class already
+exists and already proves the origin is reachable for the locked case). Not blocking: the current
+coverage is sound by the same reasoning that makes bullet-1's route-level abstraction sound, and I'm
+not going to ask for a sixth round on this job to add one symmetrical test. Naming it so it's cheap to
+pick up later, same treatment this doc gives the `last_used_at` lever and the `sqlite_errorcode` swap.
+
+### Net ruling
+
+**Approved, no issues.** All five review points confirmed directly, not assumed: real `main.app`
+(item 1), Case 4 proves non-reclassification in both `TestClient` modes (item 2), fully deterministic
+and non-timing-dependent (item 3, plus my own 0.39s run), matches B1's four conditions and closes B4's
+first two Done-when bullets (item 4), `FreshAppCase` confirmed unmodified by diff (item 5). My own
+independent decorator-removal sanity check reproduced ronda-rousey's exact `3 failed, 2 passed` split
+before I reverted cleanly (`git status`/`git diff --stat` empty). Nothing in ronda-rousey's QA report
+section contradicts any ruling I've made earlier in this job. C3 is closed. This does not reopen C1,
+C2, C4, or C5 — those stand as ruled in Addendum C. Per C6, this was the last open review item on my
+lane; pending only helio-gracie's closing gateway pass.
