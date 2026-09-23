@@ -63,6 +63,12 @@ here now, on top of `d9eb5a0`:
   4b. `WriteRouteCoroutineTripwireTests` -- every write route stays a
       coroutine function, converting Risk #1 (writers must never land on the
       threadpool) from a remembered invariant into an enforced one.
+  4c. `RegistrarCallsWrappedInInvokeTripwireTests` -- Addendum B1's own
+      convention, made auditable: "every route that calls a Registrar method
+      wraps it in invoke()", true of all eight such routes with no
+      exceptions. Static AST analysis of `main.py`'s source, not a live-app
+      probe -- flagged as the one remaining item in ronda-rousey's original
+      QA report and closed here.
   5. File-scoped rule (unchanged, restated below): no test in this file gives
      a thread its own `sqlite3.Connection`.
 
@@ -107,6 +113,7 @@ data still passes, exactly as it should.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import inspect
 import sqlite3
@@ -114,6 +121,9 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import registrar.app  # package __init__ only -- a docstring, no DB/migration side effects; safe to import at collection time
 from fastapi.testclient import TestClient
 from registrar.tests.app_harness import FreshAppCase
 
@@ -464,6 +474,108 @@ class NoModuleLevelConnectionTripwireTests(FreshAppCase):
 
     def test_no_boot_attribute_survives_import(self):
         self.assertFalse(hasattr(self.main_module, "_boot"), "a module-level `_boot` name survived import -- Addendum B2 replaced the closed-but-still-bound `_boot` connection with a function-scoped `_migrate_at_boot()` specifically so no module attribute of this shape exists at all, closed or otherwise")
+
+
+class RegistrarCallsWrappedInInvokeTripwireTests(unittest.TestCase):
+    """Structural tripwire, design doc item 4 / Addendum B1 and B4's own
+    "Done when" line: "Every route that calls a Registrar method is wrapped
+    in invoke(), enforced by a structural test." B1's narrow ruling made this
+    convention exact and auditable -- "true of all eight such routes with no
+    exceptions" -- instead of merely remembered; this is the enforcement,
+    flagged as the one remaining item in ronda-rousey's original QA report
+    and closed here.
+
+    Static AST analysis of registrar/app/main.py's actual source file --
+    deliberately not import-based (importing main.py runs migration/startup
+    side effects this check has no need to pay for, and AST analysis is
+    robust to reformatting in a way that, say, regex-over-source-text would
+    not be). Non-timing-dependent, cannot pass flakily: it runs once,
+    deterministically, against whatever main.py's source currently says.
+
+    Per ip-man's B1 ruling, the five routes that call `db.execute` directly
+    and never construct a `Registrar` -- `ready`, `get_root`, `get_post`,
+    `assignments`, `reconciliation` -- are NOT required to wrap anything:
+    they call no service method and cannot raise a domain exception
+    (Conflict/Forbidden/Invalid/Unavailable), so an unwrapped `db.execute` in
+    one of them is not a finding. This class checks the right population --
+    routes that call `Registrar(...)`, not all DB-touching routes -- and
+    `test_the_expected_eight_routes_are_exactly_the_ones_calling_registrar`
+    guards that population assumption itself, so a route quietly starting or
+    ceasing to call `Registrar` doesn't silently drop out of coverage."""
+
+    EXPECTED_ROUTES_CALLING_REGISTRAR = {"reserve_root", "reserve_post", "publish", "verify", "import_run", "promote", "posts", "aliases"}
+
+    @classmethod
+    def setUpClass(cls):
+        main_path = Path(inspect.getsourcefile(registrar.app)).parent / "main.py"
+        cls.tree = ast.parse(main_path.read_text(encoding="utf-8"), filename=str(main_path))
+
+    @staticmethod
+    def _is_route_function(node):
+        """A route handler: a (possibly async) def decorated with
+        `@app.<verb>(...)` -- matches every route in main.py, not just the
+        eight this test cares about; population-narrowing happens in
+        `_registrar_calls_in`, not here."""
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        return any(isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute) and isinstance(dec.func.value, ast.Name) and dec.func.value.id == "app" for dec in node.decorator_list)
+
+    @staticmethod
+    def _is_registrar_method_call(node):
+        """Matches the AST shape of `Registrar(db).some_method(...)`: a Call
+        whose func is attribute-access on the result of calling `Registrar`."""
+        return isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Call) and isinstance(node.func.value.func, ast.Name) and node.func.value.func.id == "Registrar"
+
+    @staticmethod
+    def _is_invoke_call(node):
+        return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "invoke"
+
+    def _registrar_calls_in(self, fn_node):
+        """Every Registrar(...).method(...) call anywhere inside fn_node
+        (walking through the lambda that normally wraps it), each tagged
+        with whether it is nested -- at any depth, matching the actual
+        `invoke(lambda:Registrar(db).method(...))` shape -- inside the
+        arguments of a call to `invoke(...)`. Parent links are built once
+        per function, scoped to that function's own subtree, so climbing
+        never escapes into a sibling route."""
+        parent = {}
+        for node in ast.walk(fn_node):
+            for child in ast.iter_child_nodes(node):
+                parent[child] = node
+        found = []
+        for node in ast.walk(fn_node):
+            if not self._is_registrar_method_call(node):
+                continue
+            wrapped = False
+            cur = node
+            while cur in parent:
+                cur = parent[cur]
+                if self._is_invoke_call(cur):
+                    wrapped = True
+                    break
+            found.append((node.lineno, node.func.attr, wrapped))
+        return found
+
+    def test_every_route_calling_registrar_wraps_the_call_in_invoke(self):
+        unwrapped = []
+        for node in ast.walk(self.tree):
+            if not self._is_route_function(node):
+                continue
+            for lineno, method, wrapped in self._registrar_calls_in(node):
+                if not wrapped:
+                    unwrapped.append(f"{node.name} (main.py line {lineno}): Registrar(...).{method}(...) is not wrapped in invoke()")
+        self.assertEqual([], unwrapped, "found Registrar method call(s) not wrapped in invoke() -- every route that calls a Registrar method must wrap it (Addendum B1); an unwrapped call means Conflict/Forbidden/Invalid/Unavailable raised from service.py escapes as an unhandled 500 instead of the correct mapped HTTP status:\n" + "\n".join(unwrapped))
+
+    def test_the_expected_eight_routes_are_exactly_the_ones_calling_registrar(self):
+        """Guards the population itself, not just the wrapping -- confirms
+        this test is checking the right set of routes. B1's own audit found
+        exactly eight; ready/get_root/get_post/assignments/reconciliation
+        call db.execute directly and are correctly excluded. If this set ever
+        changes, the wrapping test above needs re-auditing against the new
+        population rather than silently continuing to pass over a
+        newly-unwrapped route this test no longer looks at."""
+        routes_seen_calling_registrar = {node.name for node in ast.walk(self.tree) if self._is_route_function(node) and self._registrar_calls_in(node)}
+        self.assertEqual(self.EXPECTED_ROUTES_CALLING_REGISTRAR, routes_seen_calling_registrar, "the set of routes that call Registrar(...) has changed -- a route was added to or removed from this population without the invoke()-wrapping tripwire's assumptions being re-audited")
 
 
 if __name__ == "__main__":
