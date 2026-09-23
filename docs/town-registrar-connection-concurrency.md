@@ -105,7 +105,18 @@ The existing suite would not catch a regression here even after a correct fix �
   - Concurrent paginated walks return exactly the expected post_uid set
     -- no duplicates, no truncation, no spurious 403 on a valid token,
     no unhandled exceptions, across repeated trials.
-  - Full existing suite green, including both WS3 concurrency tests.
+  - Full existing suite green, with exactly two documented exceptions:
+    test_concurrent_root_allocation and test_concurrent_children_and_publication,
+    which fail intermittently on this hardware for a cause this job did not
+    create and cannot reach. Required evidence is structural, not statistical:
+    `git diff fe6d953..HEAD -- registrar/tests/test_registrar.py` is empty, and
+    neither test imports registrar.app.main. Both re-run and shown at closeout,
+    not remembered. [Corrected 2026-09-23 -- the original text here read "Full
+    existing suite green, including both WS3 concurrency tests," which is
+    measurably false (both tests fail intermittently, confirmed by jackie-chan
+    and ronda-rousey independently) and was caught unapplied at the final
+    gateway despite being ruled on in Addendum C1. See Addendum C1 for the full
+    reasoning and the deferred bounded-retry test fix.]
   - Structural tripwires fail if the module-level singleton or a sync
     write route is reintroduced.
   - jackie-chan has signed off on the isolation-semantics change.
@@ -1325,6 +1336,19 @@ Conditions:
    clean environment — a fresh venv is sufficient; the pip resolver is what is under test, not
    the container.
 3. Re-run `test_dependency_exception_handling.py` and the full suite after.
+
+**Executed by francis-ngannou (2026-09-23), pushed `6f58f36`.** Added `starlette==0.47.3` with
+the exact comment specified above. Condition 2 verified, not assumed: created a throwaway venv,
+ran `pip install "fastapi==0.116.1" "starlette==0.47.3"` together (not sequentially, so the
+resolver had to satisfy both at once), install succeeded, and `pip check` reported "No broken
+requirements found." Venv deleted afterward. Condition 3: `test_dependency_exception_handling.py`
+7/7 passed; full suite 120 passed / 2 failed / 1 error (the two documented pre-existing WS3
+hardware-oversubscription flakes, plus one unexpected hit on `MixedReadWriteConcurrencyTests` —
+isolated and re-run alone, it passed at 125.23s, matching ronda-rousey's documented ~122s stall
+signature rather than a real regression; confirmed via `git stash`/`pop` that his diff was
+`requirements.txt`-only and could not have caused it. See ronda-rousey's QA report below for the
+fuller picture this data point feeds into — it's the first evidence the stall can present as an
+apparent test failure under full-suite contention, not only as added latency in isolation.
 
 **Named and explicitly not ordered:** the rest of `requirements.txt` is equally unlocked
 (uvicorn's and argon2-cffi's transitives are unconstrained). Whether this project wants a full
