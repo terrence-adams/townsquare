@@ -95,3 +95,79 @@ dry run of the mechanism itself before it's relied on.
 
 Both capture files are disposable, kept in the session scratchpad, not the repo:
 `...\scratchpad\v4-prep\projection-capture{1,2}.txt`.
+
+The script itself, pinned here so P1 runs the same code this dry run proved (sha256
+`b536f6642264fbb6c7b45575b5f60836cedfde7789778d3fe4815baf06f557f1`):
+
+```python
+import json, hashlib, sys, urllib.request
+
+STABLE = ["agent","vendor","model","binding","section","os","shell","role","status","pubkey","host_address"]
+
+def main(out_path):
+    with urllib.request.urlopen("http://192.168.2.3:8789/registry", timeout=10) as r:
+        data = json.load(r)
+    rows = data["agents"] if isinstance(data, dict) and "agents" in data else data
+    projected = []
+    for row in rows:
+        if row.get("agent") == "claude-app":
+            continue
+        line = "\t".join(str(row.get(f, "")) for f in STABLE)
+        projected.append((row.get("agent",""), line))
+    projected.sort(key=lambda x: x[0])
+    text = "\n".join(line for _, line in projected) + "\n"
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    print(f"rows={len(projected)} sha256={sha} file={out_path}")
+
+if __name__ == "__main__":
+    main(sys.argv[1])
+```
+
+## Addendum, after Helio's REWORK: `poll_once()` read in full
+
+Helio's re-check (`helio-v4-recheck-20260926.md`) correctly found this prep's item (i) was
+incomplete: it confirmed `touch()`'s write shape but never chased down `poll_once()`'s
+*second* registry write, a direct `self.db.upsert(...)` call at `crier.py:303`, separate from
+the `touch()` path and never read. That gap is on this session, not on ip-man or Helio.
+
+**Read in full** (`registry/crier.py:250-312`, the NAS): `poll_once()`'s per-event loop calls
+`self.db.touch(by, ...)` unconditionally when an event names an author (line 274 — this is
+the path already confirmed safe). Separately, if `is_registration_event(tid, fn, ev)` is true,
+it logs a `log_ingest` *notification* only (line 282: `note="DETECTED registration event
+(board ingestion DEPRECATED; POST /register is canonical)"` — no agent field is written by
+this branch). Then: `if not self.ingest_registrations: continue` — **everything after this
+line, including the `self.db.upsert(...)` call at line 303, is skipped whenever
+`ingest_registrations` is false.**
+
+**Is it false on the live deployment? Yes, confirmed two ways:**
+- `CrierConsumer.__init__` (`crier.py:190-191`): `ingest_registrations=False` is the default.
+- `app.py`'s actual constructor call (`app.py:128-129`): `_consumer =
+  crier_mod.CrierConsumer(db, CRIER_URL, body_reader=None, poll_seconds=POLL_SECONDS)` --
+  `ingest_registrations` is not passed, so the default applies. `grep` for `INGEST_REG`
+  across both files: no matches, so no environment variable overrides it either.
+
+**So line 303 does not run on the deployed service today.** The docstring is explicit about
+why the flag exists at all: "The legacy upsert path is preserved behind `ingest_registrations`
+(off by default) so it stays recoverable and its parser stays tested" -- it's dead-but-kept
+code, not a live path. **v4's assumption ("nothing but /register and /retire writes a stable
+field of an existing row") holds in practice, on the current deployment**, though the more
+precise statement is "holds because the alternate path is gated off by default and the
+deployed service does not enable it" rather than "the code cannot do this at all" -- a code
+change or a differently-configured instance could reactivate it, which is exactly why Helio
+was right to ask the question rather than accept the narrower `touch()`-only read.
+
+**Helio's side question -- could B.6 or the registry's own audit posts match
+`is_registration_event`?** Read `is_registration_event` and `parse_registration_from_post`
+(`crier.py:61-123`): the detector matches on either the crier's structured `cat` field
+(exact string `"registration"`) or an exact filename token, `REG_TOKEN` -- not a substring
+match (this is bishop-009's fix, cited in v3 §3). B.6's planned filename slug
+("claude-app-registered-on-its-behalf-offsite-writer-and-posting-card-on-trial") does not
+carry that exact token, consistent with the two precedents (`BB-20260913-venom-003`,
+`BB-20260914-venom-001`) v4 already confirms don't carry it either. Whether the Crier's own
+`cat` tagging could independently mark it "registration" wasn't independently verified against
+a live Crier feed sample -- inferred from the filename-token design intent, not measured. It
+does not change the safety conclusion regardless: even a detected match only logs a
+notification (line 282-285), never a field write -- that's gated separately by
+`ingest_registrations`, which is off either way.
