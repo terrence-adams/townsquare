@@ -271,3 +271,65 @@ places. ip-man's own wording is more careful and is the one that governs: "the N
 as read on 2026-09-26, not the running process." That distinction is his whole reason for
 hardening the P5 gate in v5 -- source code and the actual running process are not
 guaranteed identical, and the gate no longer assumes they are.
+
+## Addendum 4, after Helio's GATEWAY REWORK
+
+Helio's GATEWAY run (`helio-gateway-decision6-rework-20260926.md`) held decision 6 back from
+the operator and found Addendum 3's fix was itself incomplete: the filler and the draft lived
+only in this session's temp scratchpad with no stable path; the send command didn't actually
+depend on the filler succeeding (it would run the curl regardless); and the "compare that hash
+by eye" step was nonsense -- a filled body's hash always differs from the pinned template's,
+so there was never anything valid to compare it against. A random spot-check also caught this
+doc's own prior claim of "an absolute path" as false -- it was a relative path under a `cd`.
+Corrected properly this time, each piece actually run and shown, not just described.
+
+**(1) Stable path.** Both files are now committed in the repo, not the scratchpad:
+`C:\Repo\townsquare\docs\decision-6-p2-body-draft.json` (still hashes to `96a760d0…`,
+verified after the move) and `C:\Repo\townsquare\docs\decision-6-fill-day-of-values.py`
+(sha256 `75e17655179647217bf41e2002f611352fc3d736adec111d063b4f7499055cda`). The script now
+reads both source files from these repo paths and writes its outputs to an explicit absolute
+scratchpad directory hardcoded in the script itself, not derived from where the script
+happens to sit.
+
+**(2) One send command, actually chained, tested both ways:**
+
+```bash
+python "C:/Repo/townsquare/docs/decision-6-fill-day-of-values.py" <YYYYMMDD> <NNN> \
+  && curl -sS -X POST http://192.168.2.3:8789/register \
+       -H 'Content-Type: application/json' \
+       --data-binary "@C:/Users/terre/AppData/Local/Temp/claude/C--Workspace/3db5d20b-df7f-42a6-b490-ed1667c0117d/scratchpad/v4-prep/p2-body-<YYYYMMDD>-venom-<NNN>.json" \
+       -w '\nhttp_code=%{http_code}\n'
+```
+
+Tested the chaining itself, with a harmless stand-in for curl so no network call was made:
+success (filler exits 0) let the next command run; failure (bad input, filler exits 1 via
+its own `die()`) correctly stopped the chain before it -- confirmed by literally seeing the
+stand-in's output present in the first case and absent in the second, not by inference. No
+by-eye hash comparison remains: there was never a valid comparison to make, so the step is
+gone rather than fixed.
+
+Retire command, unchanged from Addendum 2: `curl -sS -X POST
+http://192.168.2.3:8789/retire/claude-app -w '\nhttp_code=%{http_code}\n'` -- run on Venom, in
+Git Bash, in the orchestrating session, no elevation, only if P5's table calls for it.
+
+**(3) The dummy-run test, shown, not just described:**
+
+```
+$ python decision-6-fill-day-of-values.py 20261001 001
+OK: filename            = BB-20261001-venom-001.000-OPEN__to-all__impact-informational__from-venom__claude-app-registered-on-its-behalf-offsite-writer-and-posting-card-on-trial.txt
+OK: B.6 body written to = ...\B6-20261001-venom-001-body.txt
+OK: P2 body written to  = ...\p2-body-20261001-venom-001.json
+exit=0
+```
+Card's own `<YYYYMMDD>-claude-app-<NNN>` instructional pattern: 2 occurrences, unchanged
+before and after. Filled P2 body: 0 leftover `<`/`>` characters. A malformed-input run
+(`NNN=1` instead of 3 digits) correctly stopped with exit 1 and wrote nothing. All test
+output deleted afterward, including the now-superseded scratchpad-only copies of the script
+and draft from Addendum 3 -- the repo copies above are the only ones that exist now.
+
+**Where `<YYYYMMDD>` and `<NNN>` actually come from (Helio's flag, not a circular
+reference to a file the script itself creates):** `<YYYYMMDD>` is the UTC date at filing
+time, the same clock B.6's own `at:` field uses. `<NNN>` is the next free
+`BB-<YYYYMMDD>-venom-` sequence number on the live Bulletin Board at that moment, found the
+same way B.6's own card instructs `claude-app` to find its next free number -- by checking
+the board, not by any mechanism in this script.
