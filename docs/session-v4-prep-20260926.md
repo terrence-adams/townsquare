@@ -333,3 +333,83 @@ time, the same clock B.6's own `at:` field uses. `<NNN>` is the next free
 `BB-<YYYYMMDD>-venom-` sequence number on the live Bulletin Board at that moment, found the
 same way B.6's own card instructs `claude-app` to find its next free number -- by checking
 the board, not by any mechanism in this script.
+
+## Addendum 5, after ip-man's ruling: the filler-hash check, both runs
+
+Helio's second re-check found the send command still missing one thing: nothing verified
+the filler script itself hadn't changed before running it by path, in a tree other sessions
+share. Escalated to ip-man (second REWORK on the same line, per Helio's own rule); his ruling:
+required, in the exact `sha256sum -c` form below, on **both** runs of the filler on the day
+-- the first (whose output becomes B.6) and the one inside P2's send -- not just the send.
+Tested both directions myself before finalizing (correct hash -> filler runs; one hex digit
+flipped -> `FAILED`, filler never runs, nothing written), output shown raw below, not just
+described.
+
+**Test, correct hash (chain proceeds):**
+```
+$ FILLER=C:/Repo/townsquare/docs/decision-6-fill-day-of-values.py
+$ echo "75e17655179647217bf41e2002f611352fc3d736adec111d063b4f7499055cda  $FILLER" | sha256sum -c - \
+    && python "$FILLER" 20261005 003
+C:/Repo/townsquare/docs/decision-6-fill-day-of-values.py: OK
+OK: filename            = BB-20261005-venom-003.000-OPEN__to-all__impact-informational__from-venom__claude-app-registered-on-its-behalf-offsite-writer-and-posting-card-on-trial.txt
+OK: B.6 body written to = ...\B6-20261005-venom-003-body.txt
+OK: P2 body written to  = ...\p2-body-20261005-venom-003.json
+chain_exit=0
+```
+(test output deleted after)
+
+**Test, one hex digit flipped in the command's own copy of the hash (chain stops):**
+```
+$ echo "75e17655179647217bf41e2002f611352fc3d736adec111d063b4f7499055cdb  $FILLER" | sha256sum -c - \
+    && python "$FILLER" 20261006 004
+C:/Repo/townsquare/docs/decision-6-fill-day-of-values.py: FAILED
+sha256sum: WARNING: 1 computed checksum did NOT match
+chain_exit=1
+```
+(confirmed: no `20261006` files exist anywhere in the output directory)
+
+**The two commands, final form.** Both on Venom, in Git Bash, in the orchestrating
+session, no elevation. `<YYYYMMDD>` and `<NNN>` are typed once each, in the `D`/`N`
+variables, and used from there for every occurrence:
+
+Run 1, at the start of the sitting (its output becomes B.6):
+```bash
+D=<YYYYMMDD>; N=<NNN>
+FILLER=C:/Repo/townsquare/docs/decision-6-fill-day-of-values.py
+echo "75e17655179647217bf41e2002f611352fc3d736adec111d063b4f7499055cda  $FILLER" | sha256sum -c - \
+  && python "$FILLER" "$D" "$N"
+```
+Immediately after this succeeds, copy the printed B.6-body path to a **separate file** before
+hand-adding `at:`, HIS WORDS, and `Window:` -- Run 2 below re-runs the filler and would
+silently overwrite the original path with the unfilled body again, per Helio's own flag:
+```bash
+cp "C:/Users/terre/AppData/Local/Temp/claude/C--Workspace/3db5d20b-df7f-42a6-b490-ed1667c0117d/scratchpad/v4-prep/B6-${D}-venom-${N}-body.txt" \
+   "C:/Users/terre/AppData/Local/Temp/claude/C--Workspace/3db5d20b-df7f-42a6-b490-ed1667c0117d/scratchpad/v4-prep/B6-${D}-venom-${N}-TO-FILE.txt"
+```
+
+Run 2, P2's send (after B.6 is actually filed, replacing Addendum 2's command):
+```bash
+D=<YYYYMMDD>; N=<NNN>
+FILLER=C:/Repo/townsquare/docs/decision-6-fill-day-of-values.py
+echo "75e17655179647217bf41e2002f611352fc3d736adec111d063b4f7499055cda  $FILLER" | sha256sum -c - \
+  && python "$FILLER" "$D" "$N" \
+  && curl -sS -X POST http://192.168.2.3:8789/register \
+       -H 'Content-Type: application/json' \
+       --data-binary "@C:/Users/terre/AppData/Local/Temp/claude/C--Workspace/3db5d20b-df7f-42a6-b490-ed1667c0117d/scratchpad/v4-prep/p2-body-${D}-venom-${N}.json" \
+       -w '\nhttp_code=%{http_code}\n'
+```
+
+The retire command is unchanged from Addendum 2 -- Venom, Git Bash, the orchestrating
+session, no elevation, only if P5's table calls for it:
+```bash
+curl -sS -X POST http://192.168.2.3:8789/retire/claude-app -w '\nhttp_code=%{http_code}\n'
+```
+
+**On a FAILED check:** per ip-man's ruling, the sitting ends there. Nobody edits the recorded
+hash, restores the file, or runs the filler another way -- the failure (with `git status` and
+`git diff` output against the file) goes to Sensei through Helio, since in a shared tree the
+change may be someone else's legitimate work.
+
+**The projection script is now also committed**, closing the one place ip-man noted a pin
+existed only in prose: `C:\Repo\townsquare\docs\decision-6-projection.py`, re-hashed after the
+move to confirm it's unchanged: `b536f6642264fbb6c7b45575b5f60836cedfde7789778d3fe4815baf06f557f1`.
