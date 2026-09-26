@@ -372,20 +372,21 @@ chain_exit=1
 session, no elevation. `<YYYYMMDD>` and `<NNN>` are typed once each, in the `D`/`N`
 variables, and used from there for every occurrence:
 
-Run 1, at the start of the sitting (its output becomes B.6):
+Run 1, at the start of the sitting (its output becomes B.6). **Fixed per Helio's finding 1:**
+the copy is now joined to the same command with `&&`, in one shell invocation, so `D` and `N`
+are guaranteed to still hold their values when `cp` runs -- the orchestrating session's Bash
+tool does not carry shell variables between separate calls, and the two steps must not be
+split across calls:
 ```bash
 D=<YYYYMMDD>; N=<NNN>
 FILLER=C:/Repo/townsquare/docs/decision-6-fill-day-of-values.py
+OUTDIR=C:/Users/terre/AppData/Local/Temp/claude/C--Workspace/3db5d20b-df7f-42a6-b490-ed1667c0117d/scratchpad/v4-prep
 echo "75e17655179647217bf41e2002f611352fc3d736adec111d063b4f7499055cda  $FILLER" | sha256sum -c - \
-  && python "$FILLER" "$D" "$N"
+  && python "$FILLER" "$D" "$N" \
+  && cp "$OUTDIR/B6-${D}-venom-${N}-body.txt" "$OUTDIR/B6-${D}-venom-${N}-TO-FILE.txt"
 ```
-Immediately after this succeeds, copy the printed B.6-body path to a **separate file** before
-hand-adding `at:`, HIS WORDS, and `Window:` -- Run 2 below re-runs the filler and would
-silently overwrite the original path with the unfilled body again, per Helio's own flag:
-```bash
-cp "C:/Users/terre/AppData/Local/Temp/claude/C--Workspace/3db5d20b-df7f-42a6-b490-ed1667c0117d/scratchpad/v4-prep/B6-${D}-venom-${N}-body.txt" \
-   "C:/Users/terre/AppData/Local/Temp/claude/C--Workspace/3db5d20b-df7f-42a6-b490-ed1667c0117d/scratchpad/v4-prep/B6-${D}-venom-${N}-TO-FILE.txt"
-```
+Hand-add `at:`, HIS WORDS, and `Window:` in the copy (the `-TO-FILE.txt` path) only -- never
+in the filler's own output path, which Run 2 below re-runs and would silently overwrite.
 
 Run 2, P2's send (after B.6 is actually filed, replacing Addendum 2's command):
 ```bash
@@ -406,10 +407,27 @@ curl -sS -X POST http://192.168.2.3:8789/retire/claude-app -w '\nhttp_code=%{htt
 ```
 
 **On a FAILED check:** per ip-man's ruling, the sitting ends there. Nobody edits the recorded
-hash, restores the file, or runs the filler another way -- the failure (with `git status` and
-`git diff` output against the file) goes to Sensei through Helio, since in a shared tree the
-change may be someone else's legitimate work.
+hash, restores the file, or runs the filler another way -- the failure goes to Sensei through
+Helio, since in a shared tree the change may be someone else's legitimate work. Named exactly,
+per Helio's finding 3 (ip-man's ruling, "What the session does"), not paraphrased:
+```bash
+git --no-optional-locks status
+git --no-optional-locks diff 1ee6601 -- docs/decision-6-fill-day-of-values.py
+```
+
+**Superseded, per Helio's finding 2 -- do not run:** Addendum 3's original command block (the
+relative-path, no-fill, no-check version) and Addendum 4's unguarded chain (filler `&&` curl,
+no hash check). Addendum 5's Run 1 and Run 2 above are the only current form.
 
 **The projection script is now also committed**, closing the one place ip-man noted a pin
 existed only in prose: `C:\Repo\townsquare\docs\decision-6-projection.py`, re-hashed after the
 move to confirm it's unchanged: `b536f6642264fbb6c7b45575b5f60836cedfde7789778d3fe4815baf06f557f1`.
+
+**Run under the same clause at P1, per Helio's finding 4** (optional, a read step, holds
+nothing): each of P1's two `/registry` reads is followed by this, once per read:
+```bash
+PROJ=C:/Repo/townsquare/docs/decision-6-projection.py
+OUTDIR=C:/Users/terre/AppData/Local/Temp/claude/C--Workspace/3db5d20b-df7f-42a6-b490-ed1667c0117d/scratchpad/v4-prep
+echo "b536f6642264fbb6c7b45575b5f60836cedfde7789778d3fe4815baf06f557f1  $PROJ" | sha256sum -c - \
+  && python "$PROJ" "$OUTDIR/projection-p1-$(date -u +%H%M%S).txt"
+```
