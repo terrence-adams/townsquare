@@ -28,6 +28,27 @@ earlier clean value stands. An empty value ("parent:" with nothing after it)
 does not carry the field. Last activity is the event file's mtime, standing in
 for Drive createdTime: events are never modified, and at: is display-only.
 
+Rulings R1-R3 (ip-man, docs/ip-man-projector-ruling-20260926.md), on jackie-chan's
+projector findings 1-3. These are decided, not this module's own choice:
+  - R1. parent: places only as a bare thread id: completed as
+    "<value>.000-OPEN.txt", it must pass parse_filename, and the thread id that
+    comes back must equal the value itself. Any other value is flagged
+    parent_malformed, with the raw value and the ids _thread_ids finds in it,
+    and places nothing: a tracker item shows at top level, and a post is not
+    attached. The check runs on the value G3 selects, never in
+    parse_tracker_header, so a malformed newest value does not fall back to an
+    earlier clean one. Placement, attachments and _claimed_by read that one
+    validated value.
+  - R2. A collided thread (two different .000 opens under one id, D23) is never
+    placed, as a tracker item or as an attachment. It is flagged
+    thread_collided once, at whichever site would have placed it, and its
+    parent: (merged from two posts) is never followed or flagged. Anything
+    naming it in parent: is flagged parent_collided and shown at top level.
+  - R3. Intake is by level. Every tracker item whose level: is unscoped goes in
+    result["intake"] and nowhere else. Its parent: is still checked and
+    flagged as usual, but never followed, so it is never nested and never
+    counted in a rollup.
+
 Choices the design does not pin. These are this module's own, open to review, not rulings:
   - Rollup counts are over direct children. Last activity is transitive over
     the descendant tree (tracker/tests/test_rollup_status.py pins both).
@@ -35,10 +56,7 @@ Choices the design does not pin. These are this module's own, open to review, no
   - Story readiness is reported only while the Story is not CLOSED or
     CANCELLED. The DoR is a scoping checklist, so a finished Story's readiness
     is moot, and a permanent flag would decay into noise.
-  - A collided parent (two different .000 opens under one id) is ambiguous. The
-    child is reported and shown at top level, not guessed under either open.
-  - Top-level items without project: go in result["no_project"], and
-    level: unscoped roots go in result["intake"]. Nothing is dropped silently.
+  - Top-level items without project: go in result["no_project"], not dropped.
   - Archive/ is read at any depth. TSD v1.5 s8 files archived threads under
     Archive/<YYYY-Qn>/, and the tests use Archive/<board>/.
 
@@ -71,14 +89,16 @@ AUX_KEYS = ("acceptance", "for", "references")
 PARENT_LEVEL = {"unscoped": None, "epic": None, "feature": "epic", "story": "feature"}
 TERMINAL = ("CLOSED", "CANCELLED")
 
-FLAGS = (  # v1 s6's ten, in its order, then the three this module adds
+FLAGS = (  # v1 s6's ten, in its order, then the three this module adds, then R1's
     "nesting_violation", "parent_not_found", "parent_collided", "cycle",
     "open_child_under_closed_parent", "closed_parent_with_open_children",
     "level_on_non_request", "project_restated_conflict", "unreadable_header",
     "story_not_ready",
     "duplicate_header_key",  # v2 A5: "flagged for that event"
     "invalid_level",         # level: set to something that is not a level
-    "thread_collided",       # a tracker item whose id has two different opens (D23)
+    "thread_collided",       # an id with two different opens (D23). R2: never placed, so it is
+                             # flagged where it would have been: as a tracker item or an attachment
+    "parent_malformed",      # R1: parent: is not a bare thread id, so it places nothing
 )
 
 OUTPUT_CONTRACT = {
@@ -159,6 +179,17 @@ def _thread_ids(value: str) -> list[tuple[str, str]]:
                 found.append((parsed["thread"], parsed["prefix"]))
             break
     return found
+
+
+def _is_bare_thread_id(value: str) -> bool:
+    """R1: True only if `value` is one thread id and nothing else. It is completed as
+    "<value>.000-OPEN.txt" and run through parse_filename, and the thread id that comes
+    back must equal `value` itself. That equality check, not a second grammar, is what
+    rejects annotations, event ids, second ids and paths."""
+    try:
+        return parse_filename(value + ".000-OPEN.txt")["thread"] == value
+    except FilenameError:
+        return False
 
 
 # ------------------------------------------------------------------ the board
@@ -255,14 +286,16 @@ def _iso(ts: float | None) -> str | None:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _claimed_by(t: dict) -> str | None:
+def _claimed_by(t: dict, parent: str) -> str | None:
     """v2 K4: the claimer's CLOSED event on a SEEK names its new Request in references:.
-    That event may also cite the Story the SEEK serves, which is never the claim."""
+    That event may also cite the Story the SEEK serves, which is never the claim.
+    `parent` is that Story: the validated parent: the SEEK was attached under, so this
+    reads the same value placement does (R1)."""
     if t["prefix"] != "SEEK" or t["state"] != "CLOSED":
         return None
     refs = t["events"][-1]["aux"].get("references") or ""
     return next((tid for tid, prefix in _thread_ids(refs)
-                 if prefix == "TS" and tid != t["parent"]), None)
+                 if prefix == "TS" and tid != parent), None)
 
 
 # ------------------------------------------------------------------ projection
@@ -295,16 +328,22 @@ def build_projection(root) -> dict:
         if level not in PARENT_LEVEL:
             flag("invalid_level", tid, level=t["level"])
             continue
-        if len(t["openings"]) > 1:
+        if len(t["openings"]) > 1:  # R2: its fields merge two unrelated posts, so never placed
             flag("thread_collided", tid, openings=t["openings"])
+            continue
         nodes[tid] = {"id": tid, "level": level, "state": t["state"], "parent": t["parent"],
                       "project": None, "repo": None, "next": t["next"], "subject": t["subject"],
                       "current_event": t["current_event"], "children": [], "attachments": [],
                       "rollup": {}}
 
     def resolve(tid: str, parent: str) -> bool:
-        """True if `parent` is a tracker item to place under. Otherwise flags why not."""
-        if parent in threads and len(threads[parent]["openings"]) > 1:
+        """True if `parent` is a tracker item to place under. Otherwise flags why not.
+        R1: only a bare thread id can name one, so anything else is parent_malformed and
+        never reaches the other checks. Collided is checked before not found (R2 keeps
+        that order), since a collided thread is never a node."""
+        if not _is_bare_thread_id(parent):
+            flag("parent_malformed", tid, parent=parent, ids_found=[i for i, _ in _thread_ids(parent)])
+        elif parent in threads and len(threads[parent]["openings"]) > 1:
             flag("parent_collided", tid, parent=parent)
         elif parent not in nodes:
             flag("parent_not_found", tid, parent=parent, thread_exists=parent in threads)
@@ -320,8 +359,9 @@ def build_projection(root) -> dict:
         expected = PARENT_LEVEL[node["level"]]
         actual = None
         if resolve(tid, parent):
-            resolved[tid] = parent
             actual = nodes[parent]["level"]
+            if node["level"] != "unscoped":  # R3: intake is by level, so unscoped is never nested
+                resolved[tid] = parent
         # decidable only against a resolved parent, except that epic and unscoped take none at all
         if expected is None or (tid in resolved and actual != expected):
             flag("nesting_violation", tid, parent=parent, expected_level=expected, actual_level=actual)
@@ -405,14 +445,18 @@ def build_projection(root) -> dict:
             flag("story_not_ready", tid, reasons=reasons)
 
     # Attachments: SEEK, WANT, BB and OFFER posts, and TS sub-requests with no level:,
-    # that name a tracker item in parent:.
+    # that name a tracker item in parent:. R2: a collided post is never attached, and its
+    # parent: (merged from two posts) is not followed, just as a collided tracker item's is not.
     for tid, t in threads.items():
-        if tid in nodes or not t["parent"] or (t["prefix"] == "TS" and t["level"]):
+        parent = t["parent"]
+        if tid in nodes or not parent or (t["prefix"] == "TS" and t["level"]):
             continue
-        if resolve(tid, t["parent"]):
-            nodes[t["parent"]]["attachments"].append(
+        if len(t["openings"]) > 1:
+            flag("thread_collided", tid, openings=t["openings"])
+        elif resolve(tid, parent):
+            nodes[parent]["attachments"].append(
                 {"id": tid, "prefix": t["prefix"], "state": t["state"], "subject": t["subject"],
-                 "claimed_by": _claimed_by(t)})
+                 "claimed_by": _claimed_by(t, parent)})
 
     projects: dict[str, list[dict]] = {}
     no_project: list[dict] = []
