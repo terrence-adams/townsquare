@@ -227,3 +227,47 @@ work orders note this is Helio's to recommend at the GATEWAY, not the session's 
 
 **(iii) The projection script pinned.** Already done above, same hash Helio independently
 re-derived (`b536f6642264fbb6c7b45575b5f60836cedfde7789778d3fe4815baf06f557f1`).
+
+## Addendum 3, after Helio's v5 re-check: F1 and F2 fixed
+
+Helio's re-check (`helio-v5-recheck-20260926.md`) found the drafted P2 command from Addendum 2
+was not actually usable: a scratchpad-relative path a later session wouldn't have, no filling
+of the day-of values, no pre-send check, and `--data` instead of `--data-binary` (which
+silently strips newlines, so the bytes checked would not be the bytes sent). It also flagged
+that the day-of placeholders appear a second time, inside the card's own instructional text
+to `claude-app` (its filename/id examples), which must never be filled -- only B.6's own
+identity line may be.
+
+**Both fixed with one verified script**, `fill_day_of_values.py` (scratchpad, alongside the
+projection script). Given `<YYYYMMDD>` and `<NNN>`, it: re-checks the pinned B.6 template and
+P2 draft against their recorded hashes before doing anything; fills `<YYYYMMDD>-venom-<NNN>`
+in exactly one place in each (B.6's `id:` line, and the P2 draft's `annotation` field);
+confirms the card's `<YYYYMMDD>-claude-app-<NNN>` instructional pattern is untouched; confirms
+byte-for-byte that nothing else differs from the pinned templates; and refuses to write
+anything if any of those checks fail. Tested against dummy values (`20261001`, `001`) to
+prove it: exactly one substitution landed in each file, the card's own instructional lines
+were provably untouched, and the filled P2 body carried no leftover `<`/`>` placeholder
+characters. Test output deleted afterward -- nothing here is a real filing.
+
+**The exact commands**, to run once B.6 is actually filed (so the real `YYYYMMDD`/`NNN` are
+known) -- on Venom, in Git Bash, in the orchestrating session's own scratchpad, no elevation:
+
+```bash
+cd "<scratchpad>/v4-prep"
+python fill_day_of_values.py <YYYYMMDD> <NNN>
+# prints the P2 body's path and its sha256 -- compare that hash by eye against what it prints
+# for the pinned draft before sending anything.
+
+curl -sS -X POST http://192.168.2.3:8789/register \
+  -H 'Content-Type: application/json' \
+  --data-binary @p2-body-<YYYYMMDD>-venom-<NNN>.json \
+  -w '\nhttp_code=%{http_code}\n'
+
+curl -sS -X POST http://192.168.2.3:8789/retire/claude-app -w '\nhttp_code=%{http_code}\n'
+```
+
+**F3, noted:** this doc has said "confirmed off on the current deployment" in a couple of
+places. ip-man's own wording is more careful and is the one that governs: "the NAS's source
+as read on 2026-09-26, not the running process." That distinction is his whole reason for
+hardening the P5 gate in v5 -- source code and the actual running process are not
+guaranteed identical, and the gate no longer assumes they are.
