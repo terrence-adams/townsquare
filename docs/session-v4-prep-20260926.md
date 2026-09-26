@@ -171,3 +171,59 @@ a live Crier feed sample -- inferred from the filename-token design intent, not 
 does not change the safety conclusion regardless: even a detected match only logs a
 notification (line 282-285), never a field write -- that's gated separately by
 `ingest_registrations`, which is off either way.
+
+## Addendum 2, after v5: exact commands, and one blocked item
+
+v5's work order asks for three more session items before the GATEWAY. Two are done here;
+one is genuinely blocked, not skipped.
+
+**(i) P2 and the retire as exact commands. Done.** P2's body, exactly v5's closed field list
+(no more, no fewer), pinned by hash:
+
+```json
+{
+  "by": "venom",
+  "agent": "claude-app",
+  "vendor": "Anthropic",
+  "model": "unknown",
+  "binding": "offsite",
+  "os": "unknown",
+  "shell": "unknown",
+  "role": "the operator's own Claude app session (phone or web), outside the fleet's machines and LAN; files Requests to venom carrying his words; owns nothing; cannot be addressed; no key; polls nothing",
+  "status": "active",
+  "annotation": "offsite; registered by venom on its behalf (no seat, no key); info posted BB-<YYYYMMDD>-venom-<NNN>.000",
+  "pubkey": "",
+  "host_address": ""
+}
+```
+
+sha256 `96a760d088b49305668e25ff4cca9be9282cba29bd9616b9e89f0c907033c9c7`. Its only day-of
+values are `<YYYYMMDD>` and `<NNN>` inside `annotation`, filled from B.6's actual filed
+filename once it exists -- everything else is fixed now. Not sent.
+
+```bash
+curl -sS -X POST http://192.168.2.3:8789/register \
+  -H 'Content-Type: application/json' \
+  --data @p2-body-draft.json \
+  -w '\nhttp_code=%{http_code}\n'
+
+curl -sS -X POST http://192.168.2.3:8789/retire/claude-app -w '\nhttp_code=%{http_code}\n'
+```
+
+**(ii) B.6 with Sensei's words spliced in. Blocked, not skipped.** B.6's own template requires
+a "HIS WORDS" line: the operator's actual verbatim words justifying this specific
+registration, extracted via `save_verbatim.py` per the standing rule. Kano's review records
+her own recommendation ("I recommend yes") -- that is her voice, not his. No session this
+job has run has the operator's own words approving `claude-app`'s registration specifically;
+that is exactly what the GATEWAY exists to obtain. This step cannot be completed before that
+exchange happens, so it is left undone here rather than guessed at or filled with a
+placeholder that could be mistaken for his words. Once he gives that yes, splicing it into a
+repo copy of B.6 and re-pinning it by hash is a small, mechanical follow-up.
+
+**Still-unfilled values in B.6's draft, for the record (per Helio's original finding):**
+`<YYYYMMDD>` and `<NNN>` (from the filename, once filed), `at:` (a live UTC timestamp at
+filing time), `HIS WORDS` (blocked, above), and `Window:` (the trial length -- ip-man's v4/v5
+work orders note this is Helio's to recommend at the GATEWAY, not the session's to invent).
+
+**(iii) The projection script pinned.** Already done above, same hash Helio independently
+re-derived (`b536f6642264fbb6c7b45575b5f60836cedfde7789778d3fe4815baf06f557f1`).
