@@ -1,0 +1,346 @@
+{
+  "manifest_id": "TS-COMPLIANCE-MANIFEST-20261006-CANDIDATE",
+  "version": "0.1-candidate",
+  "status": "CANDIDATE_NOT_ADOPTED",
+  "effective_status": "INACTIVE",
+  "effective_at": null,
+  "adoption_reference": null,
+  "activation_allowed": false,
+  "pinned": false,
+  "sha256": "50d55e1e586f54cda28dc0f2ee21eb0351ae99da02ff4e122d18707b85e787a4",
+  "digest_definition": {
+    "algorithm": "sha256",
+    "encoding": "utf-8",
+    "material": "manifest_id + LF + version + LF + ordered governance/item sha256 values",
+    "note": "This is an identity/content-set digest, not a self-hash of this JSON file. An adopted release must separately record the byte hash of the final manifest artifact."
+  },
+  "authority_boundary": {
+    "defines_governance": false,
+    "references_governance": true,
+    "may_prove_comprehension": false,
+    "may_activate_without_operator_adoption": false,
+    "warning": "Do not mount or activate this candidate. A later adopted manifest must name the exact operator adoption record and be reviewed and tested as built."
+  },
+  "governance": [
+    {
+      "item_id": "candidate-doctrine",
+      "ref": "docs/town-square-doctrine-v2.0-draft-4-20261006.md",
+      "document_id": "TOWN-SQUARE-DOCTRINE-2.0-DRAFT-4",
+      "version": "2.0-draft-4",
+      "authority_status": "CANDIDATE_NOT_ADOPTED",
+      "sha256": "f1118869ac5d5b63e254b72b26b6c9daf2d3cb901c1a8285942d9a6175b7d37f",
+      "required_for": [
+        "OPEN_WORK",
+        "ADVANCE_WORK",
+        "RESOLVE_WORK",
+        "ACCEPT_WORK",
+        "ARCHIVE_WORK",
+        "GOVERNANCE_CHANGE"
+      ]
+    },
+    {
+      "item_id": "candidate-rules-of-engagement",
+      "ref": "docs/governance/rules-of-engagement-v0.1-candidate.md",
+      "document_id": "TS-ROE-20261006-CANDIDATE",
+      "version": "0.1-candidate",
+      "authority_status": "CANDIDATE_NOT_ADOPTED",
+      "sha256": "704006d3696e19e1f93babc823167604e31734b95469b3f348127c7c1baab818",
+      "required_for": [
+        "OPEN_WORK",
+        "ADVANCE_WORK",
+        "RESOLVE_WORK",
+        "ACCEPT_WORK",
+        "ARCHIVE_WORK",
+        "GOVERNANCE_CHANGE"
+      ]
+    }
+  ],
+  "required_items": [
+    {
+      "item_id": "candidate-lifecycle-contract",
+      "ref": "docs/governance/lifecycle-compatibility-v0.1-candidate.md",
+      "document_id": "TS-LIFECYCLE-COMPAT-20261006-CANDIDATE",
+      "version": "0.1-candidate",
+      "authority_status": "CANDIDATE_NOT_ADOPTED",
+      "sha256": "65a071def78c8dacc35015e3520d5596ec809f7d28a1980e13599ec29dc5bfd5",
+      "required_for": [
+        "OPEN_WORK",
+        "ADVANCE_WORK",
+        "RESOLVE_WORK",
+        "ACCEPT_WORK",
+        "ARCHIVE_WORK"
+      ]
+    },
+    {
+      "item_id": "mvp-design-basis",
+      "ref": "docs/townsquare-mvp-v0-design-20261006.md",
+      "document_id": "TS-MVP-DESIGN-20261006",
+      "version": "0.4-draft",
+      "authority_status": "DESIGN_CANDIDATE_NOT_ADOPTED",
+      "sha256": "f46edebb19ea85d657198ec9010ba500666697b7587ab5d0fc60e637d2e96c3d",
+      "required_for": [
+        "GOVERNANCE_CHANGE"
+      ]
+    }
+  ],
+  "action_classes": {
+    "READ": {
+      "state_changing": false,
+      "receipt_required": false,
+      "capabilities": [
+        "record:read"
+      ]
+    },
+    "OPEN_WORK": {
+      "state_changing": true,
+      "receipt_required": true,
+      "capabilities": [
+        "work:open"
+      ],
+      "required_dynamic_sets": [
+        "thread_context",
+        "operator_notes",
+        "applicable_scope",
+        "acceptance_criteria"
+      ]
+    },
+    "ADVANCE_WORK": {
+      "state_changing": true,
+      "receipt_required": true,
+      "capabilities": [
+        "work:advance"
+      ],
+      "allowed_target_states": [
+        "WORKING",
+        "BLOCKED"
+      ],
+      "required_dynamic_sets": [
+        "thread_context",
+        "operator_notes",
+        "applicable_scope",
+        "acceptance_criteria"
+      ]
+    },
+    "RESOLVE_WORK": {
+      "state_changing": true,
+      "receipt_required": true,
+      "capabilities": [
+        "work:resolve"
+      ],
+      "allowed_target_states": [
+        "RESOLVED"
+      ],
+      "required_dynamic_sets": [
+        "thread_context",
+        "operator_notes",
+        "applicable_scope",
+        "acceptance_criteria"
+      ],
+      "required_event_fields": [
+        "evidence_refs",
+        "criteria_refs"
+      ]
+    },
+    "ACCEPT_WORK": {
+      "state_changing": true,
+      "receipt_required": true,
+      "capabilities": [
+        "work:accept",
+        "work:cancel"
+      ],
+      "allowed_target_states": [
+        "CLOSED",
+        "CANCELLED"
+      ],
+      "required_dynamic_sets": [
+        "thread_context",
+        "operator_notes",
+        "applicable_scope",
+        "acceptance_criteria"
+      ],
+      "required_event_fields": [
+        "criterion_dispositions",
+        "acceptance_evidence_refs"
+      ]
+    },
+    "ARCHIVE_WORK": {
+      "state_changing": true,
+      "receipt_required": true,
+      "capabilities": [
+        "work:archive"
+      ],
+      "required_dynamic_sets": [
+        "thread_context",
+        "operator_notes",
+        "applicable_scope",
+        "acceptance_criteria"
+      ]
+    },
+    "GOVERNANCE_CHANGE": {
+      "state_changing": true,
+      "receipt_required": true,
+      "capabilities": [
+        "governance:propose"
+      ],
+      "separate_operator_adoption_required": true,
+      "required_dynamic_sets": [
+        "thread_context",
+        "operator_notes",
+        "applicable_scope",
+        "acceptance_criteria"
+      ]
+    },
+    "OPERATOR_CONTROL": {
+      "state_changing": true,
+      "receipt_required": false,
+      "capabilities": [
+        "operator:stop",
+        "operator:override",
+        "operator:resume"
+      ],
+      "ordinary_gate_exempt": true,
+      "append_only_audit_required": true,
+      "agent_invocable": false
+    }
+  },
+  "dynamic_required_sets": {
+    "thread_context": {
+      "resolver": "authoritative-thread",
+      "reference_template": "record:thread/{thread_id}?through={expected_revision}",
+      "new_thread_representation": "canonical hash of {thread_id, expected_revision:'new', events:[]}",
+      "selection": "complete thread through the server-resolved latest revision",
+      "ordering": "thread ordinal ascending",
+      "hashing": "sha256 of canonical content for every selected event plus an aggregate sha256"
+    },
+    "operator_notes": {
+      "resolver": "authoritative-operator-notes",
+      "reference_template": "record:operator-notes?action={action_class}&actor={principal}&target={thread_id}&scope={scope_id}",
+      "selection": "all effective, non-superseded operator notes whose structured scope matches the action, actor, target, or applicable scope",
+      "ordering": "authoritative commit order ascending",
+      "empty_set": "canonical empty array is required and hashed",
+      "hashing": "sha256 of canonical content for every selected note plus an aggregate sha256"
+    },
+    "applicable_scope": {
+      "resolver": "authoritative-scope",
+      "reference_template": "record:scope/{scope_id}?action={action_class}&target={thread_id}",
+      "selection": "current adopted scope, authority, constraints, and required companions for the target action",
+      "ordering": "document identity then version then content hash",
+      "hashing": "sha256 of exact content plus an aggregate sha256"
+    },
+    "acceptance_criteria": {
+      "resolver": "authoritative-acceptance",
+      "reference_template": "record:thread/{thread_id}/acceptance?through={expected_revision}",
+      "selection": "criteria fixed at opening plus later operator-authorized amendments, preserving supersession history",
+      "ordering": "criterion identity ascending",
+      "empty_set": "for a Request action, an empty set parks the action with a named requirement",
+      "hashing": "sha256 of each canonical criterion and disposition requirement plus an aggregate sha256"
+    }
+  },
+  "freshness_and_receipt": {
+    "maximum_ttl_seconds": 900,
+    "single_use": true,
+    "bearer_storage": "domain-separated keyed hash only",
+    "server_generated_bundle_only": true,
+    "client_supplied_required_items_forbidden": true,
+    "bind": [
+      "authenticated_principal",
+      "represented_actor_and_delegation_if_any",
+      "action_class",
+      "target_thread",
+      "expected_revision",
+      "control_generation",
+      "manifest_id",
+      "manifest_sha256",
+      "bundle_id",
+      "bundle_sha256",
+      "exact_ordered_required_item_ids_and_sha256",
+      "issued_at",
+      "expires_at"
+    ],
+    "transactional_revalidation": "After idempotency lookup and before commit, re-resolve the authoritative current revision, control generation, adopted governance, operator notes, scope, criteria, and every required item; reject any difference.",
+    "attestation_limit": "Retrieval and acknowledgement do not prove comprehension, agreement, truth, substantive correctness, or unobserved compliance."
+  },
+  "operator_override_path": {
+    "identity": "separately protected operator principal",
+    "ordinary_context_gate_applies": false,
+    "agent_or_delegate_may_invoke": false,
+    "required_record": [
+      "operator_principal",
+      "control_action",
+      "reason",
+      "scope",
+      "authority_reference",
+      "control_generation",
+      "committed_at",
+      "resulting_event_id"
+    ],
+    "stop_behavior": "A stop always succeeds at the serialization point, preserves committed history, and prevents later ordinary state changes until a separately authorized resume is committed.",
+    "spoof_behavior": "Reject and audit any agent-supplied override claim."
+  },
+  "audit_requirements": {
+    "append_only": true,
+    "events": [
+      "bundle_issued",
+      "required_item_selected",
+      "item_retrieved",
+      "receipt_issued",
+      "receipt_rejected",
+      "receipt_consumed",
+      "action_committed",
+      "action_rejected",
+      "escalation_recorded",
+      "operator_control_committed",
+      "operator_spoof_rejected",
+      "control_failure"
+    ],
+    "minimum_fields": [
+      "principal",
+      "represented_actor_and_delegation_if_any",
+      "action_class",
+      "target",
+      "expected_revision",
+      "observed_revision",
+      "manifest_and_bundle_ids_and_hashes",
+      "required_item_ids_and_hashes",
+      "control_generation",
+      "issued_at",
+      "expires_at",
+      "consumed_at_if_any",
+      "reason_code",
+      "resulting_event_id_if_any"
+    ],
+    "forbidden_audit_content": [
+      "receipt_bearer",
+      "credential_secret",
+      "private_key_material"
+    ]
+  },
+  "citations": [
+    {
+      "ref": "docs/townsquare-mvp-v0-design-20261006.md",
+      "sections": [
+        "Lifecycle enforcement",
+        "Durable global operator stop",
+        "Compliance-control feature",
+        "Minimum mechanism",
+        "MVP-CMP-01 through MVP-CMP-08"
+      ]
+    },
+    {
+      "ref": "docs/town-square-doctrine-v2.0-draft-4-20261006.md",
+      "sections": [
+        "W1 through W6",
+        "V7 through V8",
+        "O1 through O6"
+      ],
+      "authority_status": "CANDIDATE_NOT_ADOPTED"
+    },
+    {
+      "ref": "docs/governance/rules-of-engagement-v0.1-candidate.md",
+      "sections": [
+        "ROE-1 through ROE-10"
+      ],
+      "authority_status": "CANDIDATE_NOT_ADOPTED"
+    }
+  ]
+}
