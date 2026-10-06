@@ -23,6 +23,7 @@ The following are the release-blocking governance mismatches; this list intentio
 | GOV-RB-07 | One Request state machine is applied to every unconstrained `kind`, contrary to the explicit design boundary for other post kinds. | `_validate_event` neither restricts `kind` nor branches lifecycle by kind | Allowlist kinds and bind each to its adopted lifecycle; until then, enable governed writes only for Request events. |
 | GOV-RB-08 | Archive bypasses required context and does not test terminal state or policy eligibility. | `archive_thread` | Require an exact current receipt and enforce the adopted archive predicate before committing the archive event. |
 | GOV-RB-09 | Terminal continuation is not required to carry a typed link to the prior thread. | terminal rejection exists, but no continuation-reference validation exists | Require a new thread with a server-validated `continues` reference to the terminal thread. |
+| GOV-RB-10 | The capability policy grants one coarse `post:write` capability, so it cannot distinguish opening, advancing, resolving, accepting, cancelling, or archiving work. | `NATIVE_CAPABILITY_POLICIES`; native event route; `WRITE_PRINCIPALS` | Bind each action class to an explicit adopted capability and check it together with current owner/addressee/delegation facts. |
 
 ## Disposition
 
