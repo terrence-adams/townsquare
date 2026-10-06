@@ -22,7 +22,15 @@ class NativeLedgerTests(NativeLedgerCase):
         first = self.post()
         self.assert_code("forbidden", self.ledger.update_content, first["event_id"], "changed")
         self.assert_code("forbidden", self.ledger.delete_event, first["event_id"])
-        correction = self.post({**OPENING, "state": "CORRECTED", "body": "correction"}, key="key-correct", revision=first["event_id"])
+        # A correction is purpose/reference metadata on a later immutable
+        # event.  It does not invent CORRECTED as a seventh lifecycle state.
+        correction = self.post({
+            **OPENING,
+            "state": "OPEN",
+            "purpose": "CORRECTION",
+            "corrects_event": first["event_id"],
+            "body": "correction",
+        }, key="key-correct", revision=first["event_id"])
         self.assertGreater(correction["ledger_seq"], first["ledger_seq"])
 
     def test_mvp_ldg_03_projections_are_deterministic(self):

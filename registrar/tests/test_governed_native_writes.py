@@ -63,6 +63,18 @@ class GovernedNativeWriteTests(NativeLedgerCase):
             [item["sha256"] for item in bundle["required_items"]],
         )
 
+        # Once each exact selected item is actually retrieved, issuance is
+        # permitted and the audit gains retrieval evidence (not a synthetic
+        # claim emitted during bundle selection).
+        for item in bundle["required_items"]:
+            self.ledger.retrieve_context_item(bundle["bundle_id"], item["sha256"], principal="writer-a")
+        audit_kinds = {row["kind"] for row in self.ledger.context_audit() if row["bundle_id"] == bundle["bundle_id"]}
+        self.assertIn("item_retrieved", audit_kinds)
+        receipt = self.ledger.acknowledge_context(
+            bundle["bundle_id"], "writer-a", [item["sha256"] for item in bundle["required_items"]]
+        )
+        self.assertTrue(receipt)
+
     def test_gov_rb_03_only_resolved_adopted_effective_verified_authority_enables_writes(self):
         rejected = (
             {"status": "CANDIDATE"},

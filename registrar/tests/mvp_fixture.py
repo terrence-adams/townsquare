@@ -34,6 +34,7 @@ MANIFEST = {
         "capabilities": {
             "writer-a": {"work:open", "work:start", "work:resolve", "work:accept", "work:correct"},
             "writer-b": {"work:claim", "work:start", "work:resolve", "work:accept", "work:correct"},
+            "reviewer": {"work:accept"},
             "operator": {"work:cancel", "work:archive"},
         },
     },
@@ -85,6 +86,11 @@ class NativeLedgerCase(unittest.TestCase):
 
     def receipt(self, principal="writer-a", action="post", thread_id="thread-alpha", revision="new"):
         bundle = self.bundle(principal, action, thread_id, revision)
+        # Retrieval is a separate, observable operation.  The SHA-256 is the
+        # stable identity of an exact selected item; a caller cannot attest to
+        # items whose content it did not ask the ledger to return.
+        for item in bundle["required_items"]:
+            self.ledger.retrieve_context_item(bundle["bundle_id"], item["sha256"], principal=principal)
         return self.ledger.acknowledge_context(bundle["bundle_id"], principal, [i["sha256"] for i in bundle["required_items"]])
 
     def post(self, payload=None, *, principal="writer-a", key="key-1", revision="new", receipt=None):
