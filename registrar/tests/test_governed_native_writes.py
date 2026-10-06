@@ -39,8 +39,12 @@ class GovernedNativeWriteTests(NativeLedgerCase):
         self.ledger.set_context_manifest(governed_manifest())
 
     def governed_receipt(self, principal, payload, revision):
-        action = "request:correct" if str(payload.get("purpose", "")).upper() == "CORRECTION" else self.REQUEST_ACTIONS.get(str(payload.get("state", "")).upper(), "request:invalid")
-        return self.receipt(principal, action, payload["thread_id"], revision)
+        return self.receipt(
+            principal,
+            self.REQUEST_ACTIONS.get(str(payload.get("state", "")).upper(), "request:invalid"),
+            payload["thread_id"],
+            revision,
+        )
 
     def governed_post(self, label, payload, *, principal="writer-a", key="governed", revision="new", receipt=None):
         """Turn an unsupported prerequisite into a readable contract failure."""

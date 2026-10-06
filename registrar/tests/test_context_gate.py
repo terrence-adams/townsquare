@@ -25,15 +25,19 @@ class ContextGateTests(NativeLedgerCase):
 
     def test_mvp_cmp_04_resolution_and_closure_require_evidence_and_dispositions(self):
         first = self.post()
-        self.assert_code("context_required", self.post, {**OPENING, "state": "RESOLVED", "evidence_refs": [], "criteria_refs": []}, key="no-evidence", revision=first["event_id"])
-        resolved = self.post({**OPENING, "state": "RESOLVED", "evidence_refs": ["evidence-1"]}, key="resolved-with-evidence", revision=first["event_id"])
-        # This actor is not self-accepting; closure is invalid solely because
-        # it omits the required criterion disposition.
+        working = self.post(
+            {**OPENING, "state": "WORKING"},
+            principal="writer-b", key="evidence-work", revision=first["event_id"],
+        )
+        self.assert_code("context_required", self.post, {**OPENING, "state": "RESOLVED", "evidence_refs": [], "criteria_refs": []}, principal="writer-b", key="no-evidence", revision=working["event_id"])
+        resolved = self.post({**OPENING, "state": "RESOLVED", "evidence_refs": ["evidence-1"]}, principal="writer-b", key="resolved-with-evidence", revision=working["event_id"])
+        # This independent acceptor is not self-accepting; closure is invalid
+        # solely because it omits the required criterion disposition.
         self.assert_code("invalid_transition", self.post, {
             **OPENING,
             "state": "CLOSED",
-            "accepted_by": "writer-b",
-        }, principal="writer-b", key="close-without-disposition", revision=resolved["event_id"])
+            "accepted_by": "reviewer",
+        }, principal="reviewer", key="close-without-disposition", revision=resolved["event_id"])
 
     def test_mvp_cmp_05_context_audit_is_reconstructable(self):
         receipt = self.receipt(); self.post(receipt=receipt)

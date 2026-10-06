@@ -32,10 +32,13 @@ MANIFEST = {
         "effective": True,
         "verified": True,
         "capabilities": {
-            "writer-a": {"work:open", "work:start", "work:resolve", "work:accept", "work:correct"},
-            "writer-b": {"work:claim", "work:start", "work:resolve", "work:accept", "work:correct"},
-            "reviewer": {"work:accept"},
-            "operator": {"work:cancel", "work:archive"},
+            # Request lifecycle authority is deliberately granular.  These
+            # direct-service fixtures must not keep a legacy ``work:*``
+            # compatibility grant that could mask a governed-write bypass.
+            "writer-a": {"request:open", "request:work", "request:resolve", "request:accept"},
+            "writer-b": {"request:work", "request:resolve", "request:accept"},
+            "reviewer": {"request:accept"},
+            "operator": {"request:cancel", "request:archive"},
         },
     },
 }
@@ -103,10 +106,10 @@ class NativeLedgerCase(unittest.TestCase):
         gc.collect()
         self.tmp.cleanup()
 
-    def bundle(self, principal="writer-a", action="post", thread_id="thread-alpha", revision="new"):
+    def bundle(self, principal="writer-a", action="request:open", thread_id="thread-alpha", revision="new"):
         return self.ledger.create_context_bundle(principal, action, thread_id, revision)
 
-    def receipt(self, principal="writer-a", action="post", thread_id="thread-alpha", revision="new"):
+    def receipt(self, principal="writer-a", action="request:open", thread_id="thread-alpha", revision="new"):
         bundle = self.bundle(principal, action, thread_id, revision)
         # Retrieval is a separate, observable operation.  The SHA-256 is the
         # stable identity of an exact selected item; a caller cannot attest to
@@ -115,12 +118,25 @@ class NativeLedgerCase(unittest.TestCase):
             self.ledger.retrieve_context_item(bundle["bundle_id"], item["sha256"], principal=principal)
         return self.ledger.acknowledge_context(bundle["bundle_id"], principal, [i["sha256"] for i in bundle["required_items"]])
 
+    @staticmethod
+    def request_action(payload):
+        """Return the receipt action for the Request transition being made.
+
+        A correction is append-only purpose/reference metadata on a valid
+        lifecycle event.  It therefore uses the capability for that carried
+        state; it is not a seventh state or a coarse post permission.
+        """
+        return REQUEST_ACTIONS.get(str(payload.get("state", "")).upper(), "request:invalid")
+
     def post(self, payload=None, *, principal="writer-a", key="key-1", revision="new", receipt=None):
-        return self.ledger.post_event(principal, key, receipt or self.receipt(principal, "post", (payload or OPENING)["thread_id"], revision), revision, payload or dict(OPENING))
+        event = payload or dict(OPENING)
+        receipt = receipt or self.receipt(
+            principal, self.request_action(event), event["thread_id"], revision,
+        )
+        return self.ledger.post_event(principal, key, receipt, revision, event)
 
     def governed_receipt(self, principal, payload, revision):
-        action = "request:correct" if str(payload.get("purpose", "")).upper() == "CORRECTION" else REQUEST_ACTIONS.get(str(payload.get("state", "")).upper(), "request:invalid")
-        return self.receipt(principal, action, payload["thread_id"], revision)
+        return self.receipt(principal, self.request_action(payload), payload["thread_id"], revision)
 
     def governed_post(self, payload, *, principal="writer-a", key="governed", revision="new", receipt=None):
         return self.ledger.post_event(principal, key, receipt or self.governed_receipt(principal, payload, revision), revision, payload)
