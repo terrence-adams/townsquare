@@ -14,8 +14,11 @@ import os
 import re
 import secrets
 import sqlite3
+import subprocess
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from .db import registry_integration_status
 from .service import canonical, now
@@ -24,6 +27,10 @@ from .service import canonical, now
 MAX_BODY_BYTES = 2 ** 20
 MAX_METADATA_BYTES = 64 * 1024
 RECEIPT_TTL_SECONDS = 900
+AUTHORITY_PROOF_MAX_BYTES = 256 * 1024
+AUTHORITY_SIGNATURE_MAX_BYTES = 16 * 1024
+AUTHORITY_PUBLIC_KEY_MAX_BYTES = 16 * 1024
+MINISIGN_TIMEOUT_SECONDS = 5
 MEDIA_TYPES = {"text/plain", "text/plain; charset=utf-8", "text/markdown", "text/markdown; charset=utf-8"}
 READ_PRINCIPALS = {"writer-a", "writer-b", "reviewer", "viewer", "crier", "projector", "operator", "operator-resume"}
 NOTICE_READ_PRINCIPALS = {"viewer", "crier", "projector", "operator"}
@@ -99,9 +106,42 @@ def _load_key_file(path_name, key_id_name, label, *, require_explicit_id=True):
     return key_id, key
 
 
-def _authority_proof_mac(proof, key):
-    material = {name: value for name, value in proof.items() if name != "signature"}
-    return hmac.new(key, canonical(_jsonable(material)).encode("utf-8"), hashlib.sha256).hexdigest()
+def _read_authority_file(path_name, label, maximum):
+    path = os.environ.get(path_name)
+    if not path or not os.path.isfile(path):
+        raise RuntimeError(f"{label} file is required")
+    try:
+        with open(path, "rb") as handle:
+            value = handle.read(maximum + 1)
+    except OSError as exc:
+        raise RuntimeError(f"{label} file is unreadable") from exc
+    if not value or len(value) > maximum:
+        raise RuntimeError(f"{label} file is empty or too large")
+    return value
+
+
+def _verify_minisign(payload, detached_signature, public_key):
+    """Verify canonical proof bytes with the pinned public-only Minisign CLI."""
+    executable = os.environ.get("TOWNSQUARE_MINISIGN_EXECUTABLE", "/usr/bin/minisign")
+    if not os.path.isabs(executable) or not os.path.isfile(executable):
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="townsquare-minisign-") as directory:
+            root = Path(directory)
+            message_path = root / "authority-proof.json"
+            signature_path = root / "authority-proof.minisig"
+            public_key_path = root / "authority-public-key.pub"
+            message_path.write_bytes(payload)
+            signature_path.write_bytes(detached_signature)
+            public_key_path.write_bytes(public_key)
+            result = subprocess.run(
+                [executable, "-Vm", str(message_path), "-x", str(signature_path), "-p", str(public_key_path)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=MINISIGN_TIMEOUT_SECONDS, check=False, shell=False,
+            )
+            return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _parse_utc(value):
@@ -121,7 +161,10 @@ def ensure_receipt_key_at_startup():
 class NativeLedger:
     """Single-connection facade; callers provide a migrated SQLite handle."""
 
-    def __init__(self, db: sqlite3.Connection, *, context_manifest=None, governance_authority=None):
+    def __init__(
+        self, db: sqlite3.Connection, *, context_manifest=None, governance_authority=None,
+        authority_verifier=None, authority_public_key=None, authority_signature=None,
+    ):
         self.db = db
         self._context_manifest = context_manifest
         self._failure_boundary = None
@@ -129,6 +172,9 @@ class NativeLedger:
             "TOWNSQUARE_RECEIPT_HASH_KEY_FILE", "TOWNSQUARE_RECEIPT_HASH_KEY_ID", "receipt hash",
             require_explicit_id=False,
         )
+        self._authority_verifier = authority_verifier or _verify_minisign
+        self._authority_public_key = authority_public_key
+        self._authority_signature = authority_signature
         self._governance_authority = None
         if governance_authority is not None:
             self.set_authority_proof(governance_authority)
@@ -138,17 +184,36 @@ class NativeLedger:
     def set_context_manifest(self, manifest):
         self._context_manifest = manifest
 
-    def set_authority_proof(self, proof):
-        """Verify one resolver-produced adoption proof against a pinned key."""
-        if not isinstance(proof, dict):
+    def set_authority_proof(self, proof, *, detached_signature=None):
+        """Verify one external adoption proof against a pinned public key."""
+        if not isinstance(proof, dict) or "signature" in proof:
             _fail("context_required", "authenticated authority proof is required")
-        key_id, key = _load_key_file(
-            "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_FILE", "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_ID", "authority resolver"
-        )
-        signature = proof.get("signature")
-        if proof.get("schema") != "townsquare-authority-proof-v1" or proof.get("resolver_key_id") != key_id:
+        try:
+            public_key = self._authority_public_key or _read_authority_file(
+                "TOWNSQUARE_AUTHORITY_PUBLIC_KEY_FILE", "authority public key", AUTHORITY_PUBLIC_KEY_MAX_BYTES,
+            )
+            signature = detached_signature or self._authority_signature or _read_authority_file(
+                "TOWNSQUARE_AUTHORITY_SIGNATURE_FILE", "authority detached signature", AUTHORITY_SIGNATURE_MAX_BYTES,
+            )
+        except RuntimeError as exc:
+            _fail("context_required", str(exc))
+        if not isinstance(public_key, bytes) or not isinstance(signature, bytes):
+            _fail("context_required", "authority verification material must be bytes")
+        if (
+            proof.get("schema") != "townsquare-authority-proof-v1"
+            or not isinstance(proof.get("resolver_key_id"), str) or not proof["resolver_key_id"]
+            or not isinstance(proof.get("adoption_event_id"), str) or not proof["adoption_event_id"]
+            or proof.get("public_key_sha256") != _sha(public_key)
+        ):
             _fail("context_required", "authority proof trust binding is invalid")
-        if not isinstance(signature, str) or not hmac.compare_digest(signature, _authority_proof_mac(proof, key)):
+        payload = canonical(_jsonable(proof)).encode("utf-8")
+        if len(payload) > AUTHORITY_PROOF_MAX_BYTES:
+            _fail("context_required", "authority proof is too large")
+        try:
+            verified = self._authority_verifier(payload, signature, public_key)
+        except Exception:
+            verified = False
+        if verified is not True:
             _fail("context_required", "authority proof signature is invalid")
         self._governance_authority = _jsonable(proof)
 

@@ -1,4 +1,4 @@
-import os,sqlite3
+import json,os,sqlite3,urllib.request
 from fastapi import Depends,FastAPI,Header,HTTPException,Query,Request
 from fastapi.responses import JSONResponse
 from .auth import authenticate_identity,authenticate_native_identity
@@ -11,6 +11,8 @@ from .runtime import ensure_runtime_mode,verification_enabled
 ensure_runtime_mode(os.environ.get("REGISTRAR_ENV","development"))
 
 DB_PATH=os.environ.get("REGISTRAR_DB","/data/registrar.db")
+REGISTRY_READINESS_URL=os.environ.get("REGISTRY_READINESS_URL","http://registry:8789/health/ready")
+REGISTRY_READINESS_TIMEOUT_SECONDS=3
 
 # The separate one-shot migrator is the sole schema writer. Application boot
 # only verifies its exact release schema and never races it with DDL.
@@ -188,6 +190,32 @@ ensure_cursor_signing_key_at_startup()
 
 @app.get("/health/live")
 def live(): return {"ok":True}
+
+def _registry_peer_readiness():
+    """Fetch the live Registry tuple; deployment environment cannot attest for its peer."""
+    path=os.environ.get("REGISTRY_READINESS_TOKEN_FILE")
+    if not path: return {"compatible":False,"detail":"registry readiness credential is absent"}
+    try:
+        with open(path,"r",encoding="utf-8") as handle: token=handle.read(4097).strip()
+        if not token or len(token)>4096: return {"compatible":False,"detail":"registry readiness credential is invalid"}
+        request=urllib.request.Request(REGISTRY_READINESS_URL,headers={"Authorization":"Bearer "+token})
+        with urllib.request.urlopen(request,timeout=REGISTRY_READINESS_TIMEOUT_SECONDS) as response:
+            raw=response.read(64*1024+1)
+        if len(raw)>64*1024: return {"compatible":False,"detail":"registry readiness response is too large"}
+        peer=json.loads(raw.decode("utf-8")); compatibility=peer.get("compatibility",{})
+        compatible=(
+            peer.get("ok") is True
+            and peer.get("schema_version")==1
+            and compatibility.get("registry_service")=="townsquare-registry-v0"
+            and compatibility.get("registry_schema")==1
+            and compatibility.get("ledger_service")==LEDGER_SERVICE_VERSION
+            and compatibility.get("ledger_schema")==14
+            and compatibility.get("audit_contract")==REGISTRY_AUDIT_CONTRACT_VERSION
+        )
+        return {"compatible":compatible,"service_version":compatibility.get("registry_service"),"schema_version":peer.get("schema_version"),"audit_contract_version":compatibility.get("audit_contract")}
+    except Exception:
+        return {"compatible":False,"detail":"registry readiness exchange failed"}
+
 @app.get("/health/ready")
 def ready(db:sqlite3.Connection=Depends(get_db)):
     checks={"foreign_keys":db.execute("PRAGMA foreign_keys").fetchone()[0],"journal_mode":db.execute("PRAGMA journal_mode").fetchone()[0],"synchronous":db.execute("PRAGMA synchronous").fetchone()[0]}
@@ -196,6 +224,10 @@ def ready(db:sqlite3.Connection=Depends(get_db)):
     result={"ok":True,"service_version":LEDGER_SERVICE_VERSION,"schema_version":schema_version,"audit_contract_version":REGISTRY_AUDIT_CONTRACT_VERSION}
     if registry["enabled"] and not registry["compatible"]:
         raise HTTPException(503,{**result,"ok":False,"registry":registry})
+    if registry["enabled"]:
+        peer=_registry_peer_readiness()
+        if not peer["compatible"]: raise HTTPException(503,{**result,"ok":False,"registry_peer":peer})
+        result["registry_peer"]=peer
     return result
 @app.post("/v1/roots/reserve",status_code=201)
 async def reserve_root(request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
@@ -350,10 +382,13 @@ def _native_context_manifest():
     except (OSError,ValueError): return None
 
 def _native_governance_authority():
-    """Load external resolver evidence; a mounted manifest cannot adopt itself."""
-    path=os.environ.get("TOWNSQUARE_GOVERNANCE_AUTHORITY")
+    """Load canonical proof data; NativeLedger verifies its detached signature."""
+    path=os.environ.get("TOWNSQUARE_AUTHORITY_PROOF_FILE")
     if not path: return None
     try:
         import json
-        with open(path,"r",encoding="utf-8") as handle: return json.load(handle)
+        with open(path,"rb") as handle:
+            raw=handle.read(256*1024+1)
+        if not raw or len(raw)>256*1024: return None
+        return json.loads(raw.decode("utf-8"))
     except (OSError,ValueError): return None

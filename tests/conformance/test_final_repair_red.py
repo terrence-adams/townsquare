@@ -23,9 +23,12 @@ class FinalRepairContracts(unittest.TestCase):
         overlay = self.text("compose.nas.yml")
         self.assertIn("  ledger-migrate:\n", overlay)
         self.assertNotIn("  migrate:\n", overlay)
-        merged = self.text("compose.yml") + overlay
-        self.assertEqual(1, merged.count("  ledger-migrate:\n"))
-        self.assertEqual(1, merged.count("  registry-migrate:\n"))
+        base = self.text("compose.yml")
+        self.assertIn("  ledger-migrate:\n", base)
+        self.assertIn("  registry-migrate:\n", base)
+        self.assertNotIn("  migrate:\n", base)
+        self.assertIn("ledger-migrate: {condition: service_completed_successfully}", base)
+        self.assertIn("registry-migrate: {condition: service_completed_successfully}", base)
 
     def test_readiness_is_active_peer_tuple_exchange_not_environment_self_attestation(self):
         ledger = self.text("registrar/app/main.py")
