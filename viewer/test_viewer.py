@@ -69,7 +69,10 @@ class Canned:
         if path == "/v1/native/discovery":
             return {
                 "open_work": [{"thread_id": "native-1", "state": "OPEN", "kind": "WORK"}],
-                "history": [{"thread_id": "native-1", "state": "OPEN", "kind": "WORK"}],
+                "history": [
+                    {"thread_id": "native-1", "state": "OPEN", "kind": "WORK", "sensitivity": "INTERNAL"},
+                    {"thread_id": "restricted-1", "state": "OPEN", "kind": "WORK", "sensitivity": "RESTRICTED"},
+                ],
                 "boards": {"open": ["native-1"]},
                 "projects": {"townsquare": [{"parent": None, "level": 0, "repo": "mvp", "criteria_refs": []}]},
                 "registry": {"status": "DEGRADED", "agents": None, "findings": [{"code": "registry_unavailable", "detail": "test"}]},
@@ -80,6 +83,18 @@ class Canned:
                 "event_id": "event-1", "thread_ordinal": 0, "kind": "WORK", "state": "OPEN",
                 "metadata_json": '{"board":"open"}', "content": "# untrusted\\n<script>alert(1)</script>",
                 "commit_sha256": "a" * 64, "body_sha256": "b" * 64,
+            }]}
+        if path == "/v1/native/notices":
+            return {"intents": [{
+                "notice_id": "notice-1", "event_id": "event-1", "ledger_seq": 1,
+                "eligible": 1, "destination": "reader", "adapter_profile": "poll",
+                "created_at": "2026-10-06T00:00:00Z",
+            }]}
+        if path == "/v1/native/notices/notice-1/attempts":
+            return {"attempts": [{
+                "attempt_id": "attempt-1", "notice_id": "notice-1", "attempt_number": 1,
+                "adapter": "poll", "attempted_at": "2026-10-06T00:01:00Z",
+                "outcome": "delivered", "error_detail": None, "transport_receipt": "receipt-1",
             }]}
         if path == "/v1/posts":
             rows = POSTS
@@ -167,6 +182,7 @@ class ViewerPages(unittest.TestCase):
         self.assertFalse(app.exception, [str(e) for e in app.exception])
         self.assertFalse(app.error, [e.value for e in app.error])
 
+    @unittest.skip("legacy UI is excluded from the native-ledger MVP profile")
     def test_overview(self):
         app = run_page("overview.py")
         self.assert_clean(app)
@@ -175,11 +191,13 @@ class ViewerPages(unittest.TestCase):
         self.assertEqual(labels["Threads"], "6")
         self.assertEqual(labels["Schema version"], "9")
 
+    @unittest.skip("legacy UI is excluded from the native-ledger MVP profile")
     def test_posts(self):
         app = run_page("posts.py")
         self.assert_clean(app)
         self.assertEqual(len(app.dataframe[0].value), len(POSTS))
 
+    @unittest.skip("legacy UI is excluded from the native-ledger MVP profile")
     def test_posts_filter_is_server_side(self):
         app = run_page("posts.py")
         app.selectbox(key="posts_registration_state").select("reserved").run()
@@ -194,6 +212,7 @@ class ViewerPages(unittest.TestCase):
         self.assertEqual(len(shown), 6)
         self.assertEqual(set(shown["registration_state"]), {"reserved"})
 
+    @unittest.skip("legacy UI is excluded from the native-ledger MVP profile")
     def test_threads(self):
         app = run_page("threads.py")
         app.text_input(key="thread_id").set_value("TS-20260901-000").run()
@@ -206,7 +225,16 @@ class ViewerPages(unittest.TestCase):
         self.assert_clean(app)
         self.assertTrue(any("does not prove comprehension" in item.value for item in app.info))
         self.assertTrue(any("logically archived" in item.value for item in app.warning))
+        self.assertTrue(any("restricted thread" in item.value for item in app.warning))
+        self.assertNotIn("/v1/native/threads/restricted-1", [path for path, _ in self.canned.calls])
 
+    def test_native_notice_attempt_evidence_is_rendered(self):
+        app = run_page("native_ledger.py")
+        app.selectbox(key="native_notice_id").select("notice-1").run()
+        self.assert_clean(app)
+        self.assertTrue(any("Derived from attempt evidence: delivered" in item.value for item in app.info))
+
+    @unittest.skip("legacy UI is excluded from the native-ledger MVP profile")
     def test_reconciliation_tabs(self):
         app = run_page("reconciliation.py")
         self.assert_clean(app)
@@ -215,12 +243,14 @@ class ViewerPages(unittest.TestCase):
         queried = [q.get("status") for p, q in self.canned.calls if p == "/v1/reconciliation"]
         self.assertEqual(queried, ["missing-publication"])
 
+    @unittest.skip("legacy UI is excluded from the native-ledger MVP profile")
     def test_aliases_flags_ambiguity(self):
         app = run_page("aliases.py")
         app.text_input(key="alias").set_value("x").run()
         self.assert_clean(app)
         self.assertTrue(any("Ambiguous" in w.value for w in app.warning))
 
+    @unittest.skip("legacy UI is excluded from the native-ledger MVP profile")
     def test_assignments(self):
         app = run_page("assignments.py")
         app.text_input(key="agent_id").set_value("ip-man").run()
@@ -319,6 +349,23 @@ class Readonly(unittest.TestCase):
         source = (HERE / "app_pages" / "native_ledger.py").read_text(encoding="utf-8")
         self.assertIn('views.inert_text(event.get("content")', source)
         self.assertNotIn("unsafe_allow_html", source)
+
+    def test_native_profile_has_no_legacy_navigation(self):
+        source = (HERE / "streamlit_app.py").read_text(encoding="utf-8")
+        self.assertIn("native-ledger-mvp", (HERE / "registrar_client.py").read_text(encoding="utf-8"))
+        self.assertNotIn('app_pages/posts.py', source)
+        self.assertNotIn('app_pages/threads.py', source)
+
+    def test_notice_outcome_is_derived_from_attempts(self):
+        self.assertEqual("No attempt evidence recorded", registrar_client.derived_notice_evidence([]))
+        self.assertEqual(
+            "Derived from latest attempt evidence: failed",
+            registrar_client.derived_notice_evidence([{"outcome": "failed"}]),
+        )
+        self.assertEqual(
+            "Derived from attempt evidence: delivered",
+            registrar_client.derived_notice_evidence([{"outcome": "delivered"}]),
+        )
 
 
 if __name__ == "__main__":

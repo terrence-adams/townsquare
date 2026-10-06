@@ -32,6 +32,8 @@ from urllib3.util import Retry
 # network. Never 127.0.0.1: the viewer is a sibling container, not a host
 # process, and the Registrar's own published port is loopback-only by design.
 BASE_URL = os.environ.get("REGISTRAR_BASE_URL", "http://registrar:8790").rstrip("/")
+VIEWER_PROFILE = os.environ.get("TOWNSQUARE_VIEWER_PROFILE", "native-ledger-mvp")
+NATIVE_MVP_PROFILE = "native-ledger-mvp"
 
 # (connect, read). The Registrar is one Uvicorn worker over local SQLite; a
 # read that has not answered in 15s means something is wrong, not slow.
@@ -228,6 +230,23 @@ def _get(path: str, params: dict[str, Any] | None = None) -> Any:
         raise RegistrarError("Registrar returned a non-JSON body.") from None
 
 
+def _native_get(path: str, params: dict[str, Any] | None = None) -> Any:
+    """Read only the native MVP contract with the native Viewer credential.
+
+    Legacy Registrar and Drive-import routes intentionally do not run in this
+    profile.  Keeping this boundary in the client prevents a new native page
+    from accidentally borrowing a legacy endpoint just because it is nearby.
+    """
+    if VIEWER_PROFILE != NATIVE_MVP_PROFILE:
+        raise RegistrarError(
+            "This image supports only the native-ledger-mvp Viewer profile; "
+            "legacy historical browsing is outside this release."
+        )
+    if not path.startswith("/v1/native/"):
+        raise RegistrarError("Native MVP Viewer attempted a non-native read path.")
+    return _get(path, params)
+
+
 # ---------------------------------------------------------------- read calls
 # Caching note: the Registrar is the source of truth and the corpus is static
 # between imports, so a short TTL is plenty and keeps the sidebar health check
@@ -337,16 +356,44 @@ def reconciliation_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
 @st.cache_data(ttl="30s", max_entries=8, show_spinner=False)
 def native_discovery() -> dict[str, Any]:
     """`GET /v1/native/discovery` — derived, read-only native-ledger view."""
-    return _get("/v1/native/discovery")
+    return _native_get("/v1/native/discovery")
 
 
 @st.cache_data(ttl="30s", max_entries=32, show_spinner=False)
 def native_thread(thread_id: str, *, include_archived: bool = True) -> dict[str, Any]:
     """Read a native event chain, including logically archived history."""
-    return _get(
+    return _native_get(
         "/v1/native/threads/" + quote(thread_id, safe=""),
         {"include_archived": str(bool(include_archived)).lower()},
     )
+
+
+@st.cache_data(ttl="30s", max_entries=8, show_spinner=False)
+def native_notice_intents(event_id: str | None = None) -> list[dict[str, Any]]:
+    """Stable authorized notice-intent read model; native ledger only."""
+    return list(_native_get("/v1/native/notices", {"event_id": event_id}).get("intents", []))
+
+
+@st.cache_data(ttl="30s", max_entries=64, show_spinner=False)
+def native_notice_attempts(notice_id: str) -> list[dict[str, Any]]:
+    """Stable authorized append-only attempt evidence; native ledger only."""
+    return list(
+        _native_get("/v1/native/notices/" + quote(notice_id, safe="") + "/attempts").get("attempts", [])
+    )
+
+
+def derived_notice_evidence(attempts: list[dict[str, Any]]) -> str:
+    """Human label derived solely from append-only attempt evidence.
+
+    An intent without attempts is not a delivery claim.  This deliberately
+    avoids a mutable status field or a stronger assertion than the records.
+    """
+    if not attempts:
+        return "No attempt evidence recorded"
+    delivered = [row for row in attempts if row.get("outcome") == "delivered"]
+    if delivered:
+        return "Derived from attempt evidence: delivered"
+    return f"Derived from latest attempt evidence: {attempts[-1].get('outcome', 'unknown')}"
 
 
 # ---------------------------------------------------------------- corpus sweep

@@ -1,11 +1,13 @@
 # Town Registrar viewer
 
-A standalone Streamlit app that reads the Town Registrar over its HTTP API and
-shows the ledger it holds. Separate service, separate image, separate
-credential — it is not part of the Registrar and it is not part of Cerebro.
+A standalone Streamlit app that reads the native TownSquare ledger over its
+native HTTP API. This release is explicitly the `native-ledger-mvp` profile:
+it does not call legacy Registrar, imported-history, or Drive paths with its
+native Viewer credential. Separate historical browsing, if ever needed, is a
+separate non-MVP deployment and credential decision.
 
-**Read-only, structurally.** Every call is a GET; the token it carries has only
-`post:read`. If this app ever tried to write, the Registrar would refuse it.
+**Read-only, structurally.** Every call is a GET; the token carries only
+`post:read` and `notice:read`. If this app ever tried to write, the Registrar would refuse it.
 That is the same posture the Crier takes toward the ledger, and it is why the
 viewer can be published on the LAN while the Registrar itself stays on NAS
 loopback.
@@ -14,24 +16,17 @@ loopback.
 
 | Page | Endpoint(s) | What it answers |
 |---|---|---|
-| Overview | `/health/ready`, `/health/live`, `/v1/posts`, `/v1/reconciliation` | Is the Registrar ready, at what schema version, and how big is the corpus |
-| Posts | `/v1/posts` | Browsable table, filtered server-side by board, state, registration state, thread, assignee, role. Select a row for the full record |
-| Native ledger | `/v1/native/discovery`, `/v1/native/threads/{thread_id}` | Authoritative threads, open work, boards, projects, provenance, archives, and registry dependency state |
-| Threads | `/v1/roots/{thread_id}`, `/v1/posts?root=` | One root record plus every post hanging off it |
-| Reconciliation | `/v1/reconciliation?status=` | `missing-publication`, `legacy-collision`, `unresolved-responsibility`, `artifacts` — one tab each, with what a non-zero count actually means |
-| Aliases | `/v1/aliases/{alias}` | Resolve a name; flags ambiguity instead of guessing |
-| Assignments | `/v1/assignments/{agent_id}`, `/v1/posts?assigned_to=` | What one agent is on the hook for, from both directions |
-
-Every table has a CSV download. Filters and lookups sync to the URL, so a
-particular view is a shareable link.
+| Native ledger | `/v1/native/discovery`, `/v1/native/threads/{thread_id}` | Authoritative threads, open work, boards, projects, provenance, archive visibility, and registry dependency state |
+| Native notices | `/v1/native/notices`, `/v1/native/notices/{notice_id}/attempts` | Immutable intent IDs/timestamps and append-only attempt evidence; outcome is derived only from attempts |
 
 Native content is rendered as inert plain text; Markdown, HTML, links, and
 scripts in authored bodies are not executed or interpreted. Context receipts
 prove retrieval, currentness, and acknowledgement only — never comprehension.
-Notice intents and delivery attempts are immutable in the ledger, but the MVP
-native read model does not expose their row-level detail; the Viewer says that
-plainly instead of claiming a delivery result. Legacy Drive links are retained
-as references, not as proof that Drive content is available or authoritative.
+Notice intents and delivery attempts are immutable in the ledger and exposed
+by authorized native read endpoints. An intent alone is never presented as
+delivery: the Viewer labels a result only as a derivation from recorded attempt
+evidence. This Viewer deliberately lacks `content:restricted:read`; restricted
+threads are redacted before their content endpoint is requested.
 
 ## The 200-row ceiling
 
@@ -61,6 +56,7 @@ Nothing is hardcoded and no credential lives in source.
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `TOWNSQUARE_VIEWER_PROFILE` | `native-ledger-mvp` | Required release profile; any other value fails closed rather than enabling legacy browsing |
 | `REGISTRAR_BASE_URL` | `http://registrar:8790` | Registrar base URL. In the deployed stack this is the Compose service name on the shared network — never `127.0.0.1`, which inside a container is the container, not the NAS |
 | `REGISTRAR_API_TOKEN_FILE` | — | Path to a file holding the bearer credential. Preferred; matches the Registrar's own Docker-secret pattern |
 | `REGISTRAR_API_TOKEN` | — | The credential directly. Development convenience only — env vars are visible in `docker inspect` |

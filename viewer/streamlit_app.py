@@ -11,7 +11,7 @@ connection and calls no write endpoint; see registrar_client.py.
 """
 import streamlit as st
 
-from registrar_client import BASE_URL, health
+from registrar_client import BASE_URL, NATIVE_MVP_PROFILE, VIEWER_PROFILE, health
 
 st.set_page_config(
     page_title="Town Registrar viewer",
@@ -22,24 +22,10 @@ st.set_page_config(
 page = st.navigation(
     [
         st.Page(
-            "app_pages/overview.py",
-            title="Overview",
-            icon=":material/dashboard:",
+            "app_pages/native_ledger.py",
+            title="Native ledger",
+            icon=":material/verified:",
             default=True,
-        ),
-        st.Page("app_pages/posts.py", title="Posts", icon=":material/table_rows:"),
-        st.Page("app_pages/native_ledger.py", title="Native ledger", icon=":material/verified:"),
-        st.Page("app_pages/threads.py", title="Threads", icon=":material/forum:"),
-        st.Page(
-            "app_pages/reconciliation.py",
-            title="Reconciliation",
-            icon=":material/rule:",
-        ),
-        st.Page("app_pages/aliases.py", title="Aliases", icon=":material/link:"),
-        st.Page(
-            "app_pages/assignments.py",
-            title="Assignments",
-            icon=":material/assignment_ind:",
         ),
     ],
     position="top",
@@ -48,7 +34,10 @@ page = st.navigation(
 # Connection state is app-level, not page-level: it is the same answer on every
 # page and it is the first thing worth knowing when a panel looks wrong.
 with st.sidebar:
-    st.subheader("Registrar")
+    st.subheader("Native ledger MVP")
+    if VIEWER_PROFILE != NATIVE_MVP_PROFILE:
+        st.error("Unsupported Viewer profile. This release is native-ledger-only.")
+        st.stop()
     status = health()
     if status["ok"]:
         st.badge("Ready", icon=":material/check_circle:", color="green")
@@ -64,9 +53,9 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "Read-only view. This app calls only the Registrar's GET endpoints "
-        "with a `post:read` credential — it has no write path and no direct "
-        "database access."
+        "Read-only native MVP. This app calls only native-ledger GET endpoints "
+        "with `post:read` and `notice:read`; it has no Drive authority, legacy "
+        "historical browser, write path, wake control, or direct database access."
     )
 
 st.title(page.title, icon=page.icon)
