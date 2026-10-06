@@ -90,9 +90,12 @@ services:
     image: ${TOWNSQUARE_REGISTRY_IMAGE:?set immutable registry image reference}
     <<: *hardened
     user: "10003:10003"
+    depends_on:
+      registry-migrate: {condition: service_completed_successfully}
     environment:
       REGISTRY_DB: /var/lib/registry/registry.db
       REGISTRY_TOKEN_FILE: /run/secrets/registry_api_token
+      REGISTRY_AUDIT_CONTRACT_VERSION: "1"
       # Independent HTTP outbox delivery; never a shared DB transaction/FK.
       LEDGER_AUDIT_URL: http://ledger:8790/v1/registry/audit
     volumes:
@@ -108,6 +111,23 @@ services:
       timeout: 3s
       retries: 3
       start_period: 15s
+
+  # Independent database, independent exclusive migrator. This is intentionally
+  # not the Ledger `migrate` service and never shares a transaction with it.
+  registry-migrate:
+    image: ${TOWNSQUARE_REGISTRY_IMAGE:?set immutable registry image reference}
+    <<: *hardened
+    restart: "no"
+    user: "10003:10003"
+    command: ["python", "/app/migrate.py"]
+    environment:
+      REGISTRY_DB: /var/lib/registry/registry.db
+    volumes:
+      - type: bind
+        source: ${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}
+        target: /var/lib/registry
+    tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
+    networks: [app]
 
   backup:
     image: ${TOWNSQUARE_BACKUP_IMAGE:?set immutable backup image reference}

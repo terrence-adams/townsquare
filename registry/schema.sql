@@ -1,0 +1,6 @@
+CREATE TABLE registry_migrations(version INTEGER PRIMARY KEY, applied_utc TEXT NOT NULL);
+CREATE TABLE agents(agent_id TEXT PRIMARY KEY, body_json TEXT NOT NULL, revision INTEGER NOT NULL, active INTEGER NOT NULL, updated_utc TEXT NOT NULL);
+CREATE TABLE requests(principal TEXT NOT NULL, idem_key TEXT NOT NULL, request_hash TEXT NOT NULL, response_json TEXT NOT NULL, PRIMARY KEY(principal,idem_key));
+CREATE TABLE journal(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, agent_id TEXT NOT NULL, action TEXT NOT NULL, body_json TEXT NOT NULL, committed_utc TEXT NOT NULL);
+CREATE TABLE audit_outbox(event_id TEXT PRIMARY KEY REFERENCES journal(event_id), attempts INTEGER NOT NULL DEFAULT 0, delivered_utc TEXT, last_error TEXT);
+INSERT INTO registry_migrations VALUES(1,strftime('%Y-%m-%dT%H:%M:%SZ','now'));

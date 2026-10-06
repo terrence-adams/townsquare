@@ -13,18 +13,15 @@ TOKEN_FILE=os.environ.get("REGISTRY_TOKEN_FILE","/run/secrets/registry_api_token
 LEDGER_AUDIT_URL=os.environ.get("LEDGER_AUDIT_URL","")
 def connect():
  d=sqlite3.connect(DB,timeout=5,isolation_level=None); d.row_factory=sqlite3.Row; d.execute("PRAGMA foreign_keys=ON"); d.execute("PRAGMA journal_mode=WAL"); d.execute("PRAGMA synchronous=FULL"); d.execute("PRAGMA busy_timeout=5000"); return d
-def migrate():
- DB.parent.mkdir(parents=True,exist_ok=True); d=connect()
+SCHEMA_VERSION=1; AUDIT_CONTRACT_VERSION='1'
+def compatible():
+ if os.environ.get('REGISTRY_AUDIT_CONTRACT_VERSION','1') != AUDIT_CONTRACT_VERSION:return False
  try:
-  d.executescript("""CREATE TABLE IF NOT EXISTS registry_migrations(version INTEGER PRIMARY KEY, applied_utc TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS agents(agent_id TEXT PRIMARY KEY, body_json TEXT NOT NULL, revision INTEGER NOT NULL, active INTEGER NOT NULL, updated_utc TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS requests(principal TEXT NOT NULL, idem_key TEXT NOT NULL, request_hash TEXT NOT NULL, response_json TEXT NOT NULL, PRIMARY KEY(principal,idem_key));
-CREATE TABLE IF NOT EXISTS journal(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, agent_id TEXT NOT NULL, action TEXT NOT NULL, body_json TEXT NOT NULL, committed_utc TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS audit_outbox(event_id TEXT PRIMARY KEY REFERENCES journal(event_id), attempts INTEGER NOT NULL DEFAULT 0, delivered_utc TEXT, last_error TEXT);""")
-  d.execute("INSERT OR IGNORE INTO registry_migrations VALUES(1,strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
- finally:d.close()
+  d=connect(); row=d.execute('SELECT max(version) FROM registry_migrations').fetchone(); d.close(); return row and row[0]==SCHEMA_VERSION
+ except Exception:return False
 def token(): return Path(TOKEN_FILE).read_text(encoding="utf-8").strip()
 def deliver_once():
+ if not compatible(): return # retain outbox rows; mismatch is never a drop condition
  if not LEDGER_AUDIT_URL:return
  import urllib.request
  d=connect()
@@ -46,7 +43,9 @@ class Handler(BaseHTTPRequestHandler):
   if self.path=="/health/live":return self.reply(200,{"ok":True})
   if self.path=="/health/ready":
    try:
-    d=connect(); version=d.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]; pending=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL").fetchone()[0];d.close();return self.reply(200,{"ok":True,"schema_version":version,"pending_audit":pending})
+    d=connect(); version=d.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]; pending=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL").fetchone()[0];d.close();
+    if not compatible(): return self.reply(503,{"ok":False,"schema_version":version,"audit_contract_version":AUDIT_CONTRACT_VERSION,"detail":"incompatible schema/audit contract"})
+    return self.reply(200,{"ok":True,"schema_version":version,"audit_contract_version":AUDIT_CONTRACT_VERSION,"pending_audit":pending})
    except Exception as e:return self.reply(503,{"ok":False,"error":str(e)})
   self.reply(404,{"detail":"not found"})
  def do_POST(self):
@@ -69,5 +68,7 @@ class Handler(BaseHTTPRequestHandler):
    d.execute("INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES(?,?,?,?,?)",(event,agent,action,canonical,now));d.execute("INSERT INTO audit_outbox(event_id) VALUES(?)",(event,)); out={"event_id":event,"agent_id":agent,"revision":rev,"action":action};d.execute("INSERT INTO requests VALUES(?,?,?,?)",(principal,key,h,json.dumps(out,sort_keys=True)));d.commit();self.reply(201,out)
   except Exception as e:d.rollback();self.reply(503,{"detail":str(e)})
   finally:d.close()
-def main():migrate();ThreadingHTTPServer(("0.0.0.0",8789),Handler).serve_forever()
+def main():
+ if not compatible(): raise SystemExit('Registry schema/audit contract incompatible; run registry-migrate')
+ ThreadingHTTPServer(("0.0.0.0",8789),Handler).serve_forever()
 if __name__=="__main__":main()
