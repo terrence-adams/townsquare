@@ -1,0 +1,1 @@
+{"schema":1,"status":"STATIC_PACKAGE_ASSERTION_ONLY","required":["read_only","cap_drop ALL","no-new-privileges","non-root","resource limits","internal app network","no Docker socket","no host network"],"runtime_verification":"pending approved NAS rehearsal"}

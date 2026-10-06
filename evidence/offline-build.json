@@ -1,0 +1,1 @@
+{"schema":1,"status":"TEMPLATE_NOT_EVIDENCE","required":["digest-pinned base image","offline wheelhouse","hash lock","SBOM","vulnerability scan","reproducibility comparison"],"note":"No image was built or pulled in this local preparation."}

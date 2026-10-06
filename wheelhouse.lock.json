@@ -1,0 +1,1 @@
+{"schema":1,"status":"release-input-template","purpose":"bind every offline wheel filename and sha256 before image build","registrar_requirements":"registrar/requirements.txt","viewer_requirements":"viewer/requirements.txt","wheels":[],"release_rule":"A release is rejected when this list is empty, a wheel hash mismatches, or pip attempts network access."}

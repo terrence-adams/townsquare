@@ -1,4 +1,4 @@
-ARG PYTHON_IMAGE=python:3.12-slim
+ARG PYTHON_IMAGE
 FROM ${PYTHON_IMAGE}
 
 # HOME=/tmp because the rootfs is read-only in Compose and Streamlit still
@@ -22,7 +22,7 @@ RUN python -m venv /opt/venv \
 
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
-RUN pip install --requirement /app/requirements.txt
+RUN pip install --no-index --find-links=/wheelhouse --requirement /app/requirements.txt
 COPY --chown=10002:10002 .streamlit /app/.streamlit
 COPY --chown=10002:10002 app_pages /app/app_pages
 COPY --chown=10002:10002 registrar_client.py views.py streamlit_app.py /app/

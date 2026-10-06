@@ -1,0 +1,1 @@
+{"schema":1,"status":"TEMPLATE_NOT_EVIDENCE","required":["host secret files owner-only","non-root containers","encrypted age ciphertext","minisign manifest","external signed checkpoint reference","independent ledger and registry restore drill"]}

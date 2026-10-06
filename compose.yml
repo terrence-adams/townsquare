@@ -1,0 +1,130 @@
+name: townsquare
+
+# Release input only.  `deploy/release.env` supplies immutable image digests;
+# Dockerfiles remain in-tree solely for the reproducible/offline build workflow.
+# No service publishes a LAN address.  Remote operators use an authenticated
+# SSH tunnel to one of the loopback bindings.
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  mem_limit: 512m
+  cpus: 1.0
+  restart: unless-stopped
+  logging:
+    driver: local
+    options: {max-size: 10m, max-file: "5"}
+
+services:
+  migrate:
+    image: ${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}
+    <<: *hardened
+    restart: "no"
+    user: "10001:10001"
+    command: ["python", "-c", "from registrar.app.db import connect,migrate; import os; d=connect(os.environ['REGISTRAR_DB']); migrate(d); d.close()"]
+    environment:
+      REGISTRAR_DB: /var/lib/townsquare/ledger.db
+      TOWNSQUARE_RECEIPT_HASH_KEY_FILE: /run/secrets/receipt_hash_key
+      TOWNSQUARE_CONTEXT_MANIFEST: /run/configs/context_manifest
+    volumes:
+      - type: bind
+        source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
+        target: /var/lib/townsquare
+    secrets: [receipt_hash_key]
+    configs: [context_manifest]
+    tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
+    networks: [app]
+
+  ledger:
+    image: ${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}
+    <<: *hardened
+    user: "10001:10001"
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    environment:
+      REGISTRAR_ENV: mvp
+      REGISTRAR_DB: /var/lib/townsquare/ledger.db
+      REGISTRAR_TOKEN_PEPPER_FILE: /run/secrets/token_pepper
+      REGISTRAR_CURSOR_KEY_FILE: /run/secrets/cursor_signing_key
+      TOWNSQUARE_RECEIPT_HASH_KEY_FILE: /run/secrets/receipt_hash_key
+      TOWNSQUARE_CONTEXT_MANIFEST: /run/configs/context_manifest
+    volumes:
+      - type: bind
+        source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
+        target: /var/lib/townsquare
+    secrets: [token_pepper, cursor_signing_key, receipt_hash_key]
+    configs: [context_manifest]
+    tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
+    ports: ["127.0.0.1:${TOWNSQUARE_LEDGER_PORT:-8790}:8790"]
+    networks: [app, ingress]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/health/ready',timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
+  viewer:
+    image: ${TOWNSQUARE_VIEWER_IMAGE:?set immutable viewer image reference}
+    <<: *hardened
+    user: "10002:10002"
+    depends_on:
+      ledger: {condition: service_healthy}
+    environment:
+      REGISTRAR_BASE_URL: http://ledger:8790
+      REGISTRAR_API_TOKEN_FILE: /run/secrets/viewer_api_token
+      HOME: /tmp
+    secrets: [viewer_api_token]
+    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,mode=1777]
+    ports: ["127.0.0.1:${TOWNSQUARE_VIEWER_PORT:-8502}:8502"]
+    networks: [app, ingress]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8502/_stcore/health',timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 45s
+
+  backup:
+    image: ${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}
+    <<: *hardened
+    profiles: [operations]
+    restart: "no"
+    user: "10001:10001"
+    command: ["python", "/opt/townsquare/backup/create-backup.py"]
+    environment:
+      TOWNSQUARE_LEDGER_DB: /var/lib/townsquare/ledger.db
+      TOWNSQUARE_REGISTRY_DB: /var/lib/registry/registry.db
+      TOWNSQUARE_BACKUP_DIR: /var/backups/townsquare
+      TOWNSQUARE_BACKUP_RECIPIENT_FILE: /run/secrets/backup_recipient
+      TOWNSQUARE_BACKUP_SIGNING_KEY_FILE: /run/secrets/backup_signing_key
+    volumes:
+      - type: bind
+        source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
+        target: /var/lib/townsquare
+        read_only: true
+      - type: bind
+        source: ${TOWNSQUARE_REGISTRY_DATA_DIR:?set separate registry data directory}
+        target: /var/lib/registry
+        read_only: true
+      - type: bind
+        source: ${TOWNSQUARE_BACKUP_DIR:?set encrypted backup destination}
+        target: /var/backups/townsquare
+    secrets: [backup_recipient, backup_signing_key]
+    tmpfs: [/tmp:rw,noexec,nosuid,size=128m,mode=1777]
+    networks: [app]
+
+networks:
+  app: {internal: true}
+  ingress: {internal: false}
+
+secrets:
+  token_pepper: {file: ${TOWNSQUARE_TOKEN_PEPPER_FILE:?set secret path}}
+  cursor_signing_key: {file: ${TOWNSQUARE_CURSOR_SIGNING_KEY_FILE:?set secret path}}
+  receipt_hash_key: {file: ${TOWNSQUARE_RECEIPT_HASH_KEY_FILE:?set secret path}}
+  viewer_api_token: {file: ${TOWNSQUARE_VIEWER_API_TOKEN_FILE:?set secret path}}
+  backup_recipient: {file: ${TOWNSQUARE_BACKUP_RECIPIENT_FILE:?set secret path}}
+  backup_signing_key: {file: ${TOWNSQUARE_BACKUP_SIGNING_KEY_FILE:?set secret path}}
+configs:
+  context_manifest: {file: ${TOWNSQUARE_CONTEXT_MANIFEST:?set immutable manifest file}}

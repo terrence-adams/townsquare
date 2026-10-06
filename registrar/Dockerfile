@@ -1,4 +1,6 @@
-ARG PYTHON_IMAGE=python:3.12-slim
+# Required: pass an immutable digest, e.g. python@sha256:<verified digest>.
+# There is deliberately no mutable-tag default.
+ARG PYTHON_IMAGE
 FROM ${PYTHON_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -6,19 +8,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PATH=/opt/venv/bin:$PATH
 
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends openssh-client rclone \
-    && rm -rf /var/lib/apt/lists/* \
-    && python -m venv /opt/venv \
+RUN python -m venv /opt/venv \
     && addgroup --system --gid 10001 registrar \
     && adduser --system --uid 10001 --ingroup registrar --home /nonexistent registrar
 
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
-RUN pip install --requirement /app/requirements.txt
+# requirements.txt is the currently tested constraint set. Release builds must
+# use the hash-locked wheelhouse documented in deploy/reproducible-build.md.
+RUN pip install --no-index --find-links=/wheelhouse --requirement /app/requirements.txt
 COPY --chown=10001:10001 app /app/registrar/app
 COPY --chown=10001:10001 migrations /app/registrar/migrations
 COPY --chown=10001:10001 verifier /app/registrar/verifier
+COPY --chown=10001:10001 backup /opt/townsquare/backup
 
 USER 10001:10001
 EXPOSE 8790
