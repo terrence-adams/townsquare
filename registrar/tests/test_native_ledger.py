@@ -31,7 +31,15 @@ class NativeLedgerTests(NativeLedgerCase):
 
     def test_mvp_ldg_04_lifecycle_rejects_wrong_actor_self_close_and_reopen(self):
         first = self.post()
-        self.assert_code("forbidden", self.post, {**OPENING, "state": "CLOSED"}, principal="writer-a", key="self-close", revision=first["event_id"])
+        # The forbidden result is driven by a semantic self-acceptance fact,
+        # not by a magic idempotency-key spelling.  A complete disposition is
+        # supplied so the only failure is actor authority.
+        self.assert_code("forbidden", self.post, {
+            **OPENING,
+            "state": "CLOSED",
+            "accepted_by": "writer-a",
+            "criterion_dispositions": {"criterion-1": "accepted"},
+        }, principal="writer-a", key="close-by-request-owner", revision=first["event_id"])
         self.assert_code("invalid_transition", self.post, {**OPENING, "state": "OPEN"}, key="reopen", revision="terminal")
 
     def test_mvp_ldg_05_commit_provenance_is_server_derived_and_anonymous_fails(self):
@@ -61,7 +69,11 @@ class NativeLedgerTests(NativeLedgerCase):
         self.assert_code("invalid", self.ledger.inject_content_only, commit["event_id"], b"orphan")
 
     def test_mvp_ldg_08_union_reads_label_legacy_and_never_synthesize_body(self):
+        # An empty database has no historical event.  A metadata sentinel is
+        # not a substitute for provenance and would look like a real row.
+        self.assertEqual([], self.ledger.union_reads(include_legacy=True))
         self.post()
+        self.seed_legacy_import()
         rows = self.ledger.union_reads(include_legacy=True)
         self.assertEqual("native", next(r for r in rows if r["thread_id"] == "thread-alpha")["source"])
         legacy = next(r for r in rows if r["source"] == "legacy_import")

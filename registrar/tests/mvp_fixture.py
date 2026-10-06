@@ -75,7 +75,26 @@ class NativeLedgerCase(unittest.TestCase):
     def post(self, payload=None, *, principal="writer-a", key="key-1", revision="new", receipt=None):
         return self.ledger.post_event(principal, key, receipt or self.receipt(principal, "post", (payload or OPENING)["thread_id"], revision), revision, payload or dict(OPENING))
 
+    def seed_legacy_import(self):
+        """Create an actual historical projection via its supported importer.
+
+        A sentinel pretending to be a historical post would make the union
+        projection dishonest.  This fixture uses the same staged/promotion
+        path as the legacy-import regression tests.
+        """
+        from registrar.app.service import Registrar
+        from registrar.importer.legacy import plan
+
+        manifest = plan([{
+            "name": "TS-20260917-legacy-009.001-WORKING__by-legacy.txt",
+            "drive_file_id": "mvp-legacy-drive-a",
+        }])
+        registrar = Registrar(self.db)
+        staged = registrar.stage_import("importer", manifest)
+        registrar.promote_import("promoter", staged["run_id"], staged["manifest_digest"])
+
     def assert_code(self, code, fn, *args, **kwargs):
         with self.assertRaises(Exception) as caught:
             fn(*args, **kwargs)
         self.assertEqual(code, getattr(caught.exception, "code", None), str(caught.exception))
+        return caught.exception
