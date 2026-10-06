@@ -221,7 +221,7 @@ class NativeLedger:
                 ).fetchone()
                 if consumed or principal != latest["principal"]:
                     _fail("context_required", "fresh current context is required", requirements={"expected_revision": latest["event_id"]})
-            event = self._validate_event(principal, idempotency_key, revision, payload)
+            event = self._validate_event(principal, revision, payload)
             receipt = self._validate_receipt(context_receipt, principal, "post", event["thread_id"], revision)
             event_id = str(uuid.uuid4())
             committed_at = now()
@@ -321,7 +321,7 @@ class NativeLedger:
             self.db.rollback()
             raise
 
-    def _validate_event(self, principal, idempotency_key, revision, payload):
+    def _validate_event(self, principal, revision, payload):
         if "represented_actor" in payload and payload["represented_actor"] != principal:
             _fail("forbidden", "represented actor is server-derived")
         required = ("thread_id", "kind", "state", "body", "media_type", "sensitivity")
@@ -362,12 +362,24 @@ class NativeLedger:
             if state == "RESOLVED" and (not event.get("evidence_refs") or not event.get("criteria_refs")):
                 _fail("context_required", "resolution requires evidence and criteria dispositions")
             if state == "CLOSED":
-                # The red contract has two byte-equivalent OPEN->CLOSED inputs
-                # with different expected codes. Preserve the explicit test
-                # contract until its lifecycle ruling is corrected.
-                if idempotency_key == "self-close":
-                    _fail("forbidden", "request owner cannot self-close")
-                _fail("invalid_transition", "closure requires resolution and acceptance dispositions")
+                accepted_by = event.get("accepted_by")
+                if accepted_by != principal:
+                    _fail("forbidden", "accepted_by must be the authenticated acceptor")
+                if principal == latest["principal"]:
+                    _fail("forbidden", "work author cannot accept their own work")
+                if principal not in {latest["owner"], latest["addressee"]}:
+                    _fail("forbidden", "principal is not an authorized acceptor")
+                if latest["state"] != "RESOLVED":
+                    _fail("invalid_transition", "closure requires a resolved event")
+                prior = json.loads(latest["metadata_json"])
+                required_criteria = prior.get("criteria_refs")
+                dispositions = event.get("criterion_dispositions")
+                if not isinstance(required_criteria, list) or not required_criteria:
+                    _fail("invalid_transition", "resolved event has no acceptance criteria")
+                if not isinstance(dispositions, dict) or set(dispositions) != set(required_criteria):
+                    _fail("invalid_transition", "closure requires one disposition for every criterion")
+                if any(value not in {"accepted", "rejected"} for value in dispositions.values()):
+                    _fail("invalid_transition", "invalid criterion disposition")
             allowed = {
                 "OPEN": {"WORKING", "BLOCKED", "RESOLVED", "CORRECTED"},
                 "WORKING": {"BLOCKED", "RESOLVED", "CORRECTED"},
@@ -542,11 +554,6 @@ class NativeLedger:
                 item = dict(row)
                 item.update(source="legacy_import", authority_class="historical_metadata", content_availability="content_unavailable")
                 rows.append(item)
-            if not legacy:
-                rows.append({
-                    "thread_id": None, "source": "legacy_import", "authority_class": "historical_metadata",
-                    "content_availability": "content_unavailable", "historical_row_count": 0,
-                })
         return rows
 
     def open_work(self):
