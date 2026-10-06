@@ -10,7 +10,10 @@ from pathlib import Path
 
 DB=Path(os.environ.get("REGISTRY_DB","/var/lib/registry/registry.db"))
 TOKEN_FILE=os.environ.get("REGISTRY_TOKEN_FILE","/run/secrets/registry_api_token")
-LEDGER_AUDIT_URL=os.environ.get("LEDGER_AUDIT_URL","")
+LEDGER_AUDIT_TOKEN_FILE=os.environ.get("REGISTRY_LEDGER_AUDIT_TOKEN_FILE","/run/secrets/ledger_registry_audit_token")
+# Deliberately fixed Compose-internal origin/path; neither comes from a payload.
+LEDGER_AUDIT_URL="http://ledger:8790/v1/native/registry-audit-events"
+LEDGER_AUDIT_TIMEOUT_SECONDS=3
 def connect():
  d=sqlite3.connect(DB,timeout=5,isolation_level=None); d.row_factory=sqlite3.Row; d.execute("PRAGMA foreign_keys=ON"); d.execute("PRAGMA journal_mode=WAL"); d.execute("PRAGMA synchronous=FULL"); d.execute("PRAGMA busy_timeout=5000"); return d
 SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=1; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
@@ -25,20 +28,27 @@ def compatible():
   d=connect(); row=d.execute('SELECT max(version) FROM registry_migrations').fetchone(); d.close(); return row and row[0]==SCHEMA_VERSION
  except Exception:return False
 def token(): return Path(TOKEN_FILE).read_text(encoding="utf-8").strip()
+def ledger_audit_token():
+ value=Path(LEDGER_AUDIT_TOKEN_FILE).read_text(encoding="utf-8").strip()
+ if not value: raise RuntimeError('registry audit credential is empty')
+ return value
 def deliver_once():
  if not compatible(): return # retain outbox rows; mismatch is never a drop condition
- if not LEDGER_AUDIT_URL:return
  import urllib.request
  d=connect()
  try:
   for r in d.execute("SELECT j.* FROM journal j JOIN audit_outbox o ON o.event_id=j.event_id WHERE o.delivered_utc IS NULL ORDER BY j.seq LIMIT 20"):
-   data=json.dumps({"registry_event":dict(r)}).encode()
+   # Ledger accepts only this fixed three-field envelope. The Registry actor is
+   # server-bound by Ledger's scoped credential, not by the original caller.
+   data=json.dumps({"board":"BOARD-AUDIT-RECORD","actor":"registry","event_uuid":r['event_id']},sort_keys=True,separators=(',',':')).encode()
    try:
-    req=urllib.request.Request(LEDGER_AUDIT_URL,data=data,headers={"Content-Type":"application/json","Idempotency-Key":"registry-"+r['event_id']},method="POST")
-    with urllib.request.urlopen(req,timeout=3) as response:
+    req=urllib.request.Request(LEDGER_AUDIT_URL,data=data,headers={"Content-Type":"application/json","Authorization":"Bearer "+ledger_audit_token(),"Idempotency-Key":"registry-"+r['event_id']},method="POST")
+    with urllib.request.urlopen(req,timeout=LEDGER_AUDIT_TIMEOUT_SECONDS) as response:
      if response.status//100!=2:raise RuntimeError(str(response.status))
     d.execute("UPDATE audit_outbox SET attempts=attempts+1,delivered_utc=strftime('%Y-%m-%dT%H:%M:%SZ','now'),last_error=NULL WHERE event_id=?",(r['event_id'],))
-   except Exception as e:d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=? WHERE event_id=?",(str(e)[:500],r['event_id']))
+   except Exception as e:
+    # Never retain exception text: HTTP libraries can include request details.
+    d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=? WHERE event_id=?",(type(e).__name__[:80],r['event_id']))
  finally:d.close()
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
@@ -48,10 +58,11 @@ class Handler(BaseHTTPRequestHandler):
   if self.path=="/health/live":return self.reply(200,{"ok":True})
   if self.path=="/health/ready":
    try:
-    d=connect(); version=d.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]; pending=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL").fetchone()[0];d.close();
+    d=connect(); version=d.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]; pending=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL").fetchone()[0]; failed=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL AND last_error IS NOT NULL").fetchone()[0];d.close();
     tuple={"registry_service":SERVICE_ID,"registry_schema":SCHEMA_VERSION,"ledger_service":"townsquare-ledger-v0","ledger_schema":14,"audit_contract":AUDIT_CONTRACT_VERSION}
     if not compatible(): return self.reply(503,{"ok":False,"schema_version":version,"compatibility":tuple,"detail":"incompatible schema/audit contract"})
-    return self.reply(200,{"ok":True,"schema_version":version,"compatibility":tuple,"pending_audit":pending})
+    if failed:return self.reply(503,{"ok":False,"schema_version":version,"compatibility":tuple,"pending_audit":pending,"delivery_failures":failed,"detail":"registry audit delivery degraded"})
+    return self.reply(200,{"ok":True,"schema_version":version,"compatibility":tuple,"pending_audit":pending,"delivery_failures":0})
    except Exception as e:return self.reply(503,{"ok":False,"error":str(e)})
   self.reply(404,{"detail":"not found"})
  def do_POST(self):
@@ -71,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
     d.rollback();return self.reply(200,json.loads(old['response_json']))
    current=d.execute("SELECT revision FROM agents WHERE agent_id=?",(agent,)).fetchone(); rev=(current['revision'] if current else 0)+1; event=str(uuid.uuid4());now=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
    d.execute("INSERT INTO agents VALUES(?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET body_json=excluded.body_json,revision=excluded.revision,active=excluded.active,updated_utc=excluded.updated_utc",(agent,canonical,rev,int(action=="register"),now))
-   d.execute("INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES(?,?,?,?,?)",(event,agent,action,canonical,now));d.execute("INSERT INTO audit_outbox(event_id) VALUES(?)",(event,)); out={"event_id":event,"agent_id":agent,"revision":rev,"action":action};d.execute("INSERT INTO requests VALUES(?,?,?,?)",(principal,key,h,json.dumps(out,sort_keys=True)));d.commit();self.reply(201,out)
+   d.execute("INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES(?,?,?,?,?)",(event,agent,action,canonical,now));d.execute("INSERT INTO audit_outbox(event_id) VALUES(?)",(event,)); out={"event_id":event,"agent_id":agent,"revision":rev,"action":action};d.execute("INSERT INTO requests VALUES(?,?,?,?)",(principal,key,h,json.dumps(out,sort_keys=True)));d.commit();threading.Thread(target=deliver_once,daemon=True).start();self.reply(201,out)
   except Exception as e:d.rollback();self.reply(503,{"detail":str(e)})
   finally:d.close()
 def main():

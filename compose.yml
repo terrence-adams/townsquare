@@ -98,19 +98,18 @@ services:
     environment:
       REGISTRY_DB: /var/lib/registry/registry.db
       REGISTRY_TOKEN_FILE: /run/secrets/registry_api_token
-      REGISTRY_AUDIT_CONTRACT_VERSION: "1"
+      REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
       REGISTRY_SERVICE_ID: townsquare-registry-v0
       REGISTRY_SCHEMA_HEAD: "1"
       REGISTRY_LEDGER_SERVICE_ID: townsquare-ledger-v0
       REGISTRY_LEDGER_SCHEMA_HEAD: "14"
       REGISTRY_LEDGER_AUDIT_CONTRACT: registry-ledger-audit-v1
-      # Independent HTTP outbox delivery; never a shared DB transaction/FK.
-      LEDGER_AUDIT_URL: http://ledger:8790/v1/registry/audit
+      REGISTRY_LEDGER_AUDIT_TOKEN_FILE: /run/secrets/ledger_registry_audit_token
     volumes:
       - type: bind
         source: ${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}
         target: /var/lib/registry
-    secrets: [registry_api_token]
+    secrets: [registry_api_token, ledger_registry_audit_token]
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
     networks: [app]
     healthcheck:
@@ -175,6 +174,7 @@ secrets:
   receipt_hash_key: {file: ${TOWNSQUARE_RECEIPT_HASH_KEY_FILE:?set secret path}}
   viewer_api_token: {file: ${TOWNSQUARE_VIEWER_API_TOKEN_FILE:?set secret path}}
   registry_api_token: {file: ${TOWNSQUARE_REGISTRY_API_TOKEN_FILE:?set secret path}}
+  ledger_registry_audit_token: {file: ${TOWNSQUARE_REGISTRY_LEDGER_AUDIT_TOKEN_FILE:?set scoped secret path}}
   backup_recipient: {file: ${TOWNSQUARE_BACKUP_RECIPIENT_FILE:?set secret path}}
 configs:
   context_manifest: {file: ${TOWNSQUARE_CONTEXT_MANIFEST:?set immutable manifest file}}
