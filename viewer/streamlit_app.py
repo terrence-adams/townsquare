@@ -28,6 +28,7 @@ page = st.navigation(
             default=True,
         ),
         st.Page("app_pages/posts.py", title="Posts", icon=":material/table_rows:"),
+        st.Page("app_pages/native_ledger.py", title="Native ledger", icon=":material/verified:"),
         st.Page("app_pages/threads.py", title="Threads", icon=":material/forum:"),
         st.Page(
             "app_pages/reconciliation.py",

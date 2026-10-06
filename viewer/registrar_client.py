@@ -332,6 +332,23 @@ def reconciliation_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+# Native reads remain separate from legacy projections: their authority and
+# content-availability boundary must stay visible to the UI.
+@st.cache_data(ttl="30s", max_entries=8, show_spinner=False)
+def native_discovery() -> dict[str, Any]:
+    """`GET /v1/native/discovery` — derived, read-only native-ledger view."""
+    return _get("/v1/native/discovery")
+
+
+@st.cache_data(ttl="30s", max_entries=32, show_spinner=False)
+def native_thread(thread_id: str, *, include_archived: bool = True) -> dict[str, Any]:
+    """Read a native event chain, including logically archived history."""
+    return _get(
+        "/v1/native/threads/" + quote(thread_id, safe=""),
+        {"include_archived": str(bool(include_archived)).lower()},
+    )
+
+
 # ---------------------------------------------------------------- corpus sweep
 @st.cache_data(ttl="60s", max_entries=16, show_spinner="Reading the Registrar…")
 def sweep_posts(

@@ -16,6 +16,7 @@ loopback.
 |---|---|---|
 | Overview | `/health/ready`, `/health/live`, `/v1/posts`, `/v1/reconciliation` | Is the Registrar ready, at what schema version, and how big is the corpus |
 | Posts | `/v1/posts` | Browsable table, filtered server-side by board, state, registration state, thread, assignee, role. Select a row for the full record |
+| Native ledger | `/v1/native/discovery`, `/v1/native/threads/{thread_id}` | Authoritative threads, open work, boards, projects, provenance, archives, and registry dependency state |
 | Threads | `/v1/roots/{thread_id}`, `/v1/posts?root=` | One root record plus every post hanging off it |
 | Reconciliation | `/v1/reconciliation?status=` | `missing-publication`, `legacy-collision`, `unresolved-responsibility`, `artifacts` — one tab each, with what a non-zero count actually means |
 | Aliases | `/v1/aliases/{alias}` | Resolve a name; flags ambiguity instead of guessing |
@@ -23,6 +24,14 @@ loopback.
 
 Every table has a CSV download. Filters and lookups sync to the URL, so a
 particular view is a shareable link.
+
+Native content is rendered as inert plain text; Markdown, HTML, links, and
+scripts in authored bodies are not executed or interpreted. Context receipts
+prove retrieval, currentness, and acknowledgement only — never comprehension.
+Notice intents and delivery attempts are immutable in the ledger, but the MVP
+native read model does not expose their row-level detail; the Viewer says that
+plainly instead of claiming a delivery result. Legacy Drive links are retained
+as references, not as proof that Drive content is available or authoritative.
 
 ## The 200-row ceiling
 

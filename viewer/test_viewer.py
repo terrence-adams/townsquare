@@ -66,6 +66,21 @@ class Canned:
             return {"ok": True, "schema_version": 9}
         if path == "/health/live":
             return {"ok": True}
+        if path == "/v1/native/discovery":
+            return {
+                "open_work": [{"thread_id": "native-1", "state": "OPEN", "kind": "WORK"}],
+                "history": [{"thread_id": "native-1", "state": "OPEN", "kind": "WORK"}],
+                "boards": {"open": ["native-1"]},
+                "projects": {"townsquare": [{"parent": None, "level": 0, "repo": "mvp", "criteria_refs": []}]},
+                "registry": {"status": "DEGRADED", "agents": None, "findings": [{"code": "registry_unavailable", "detail": "test"}]},
+                "findings": [{"code": "registry_unavailable", "detail": "test"}],
+            }
+        if path.startswith("/v1/native/threads/"):
+            return {"thread_id": "native-1", "archived": True, "events": [{
+                "event_id": "event-1", "thread_ordinal": 0, "kind": "WORK", "state": "OPEN",
+                "metadata_json": '{"board":"open"}', "content": "# untrusted\\n<script>alert(1)</script>",
+                "commit_sha256": "a" * 64, "body_sha256": "b" * 64,
+            }]}
         if path == "/v1/posts":
             rows = POSTS
             for key, col in (
@@ -185,6 +200,13 @@ class ViewerPages(unittest.TestCase):
         self.assert_clean(app)
         self.assertEqual(len(app.dataframe[0].value), 4)
 
+    def test_native_ledger_renders_content_inertly(self):
+        app = run_page("native_ledger.py")
+        app.selectbox(key="native_thread_id").select("native-1").run()
+        self.assert_clean(app)
+        self.assertTrue(any("does not prove comprehension" in item.value for item in app.info))
+        self.assertTrue(any("logically archived" in item.value for item in app.warning))
+
     def test_reconciliation_tabs(self):
         app = run_page("reconciliation.py")
         self.assert_clean(app)
@@ -292,6 +314,11 @@ class Readonly(unittest.TestCase):
                         node.value,
                         f"{path.name}:{node.lineno} builds a path naming {token!r}",
                     )
+
+    def test_authored_content_has_an_inert_renderer(self):
+        source = (HERE / "app_pages" / "native_ledger.py").read_text(encoding="utf-8")
+        self.assertIn('views.inert_text(event.get("content")', source)
+        self.assertNotIn("unsafe_allow_html", source)
 
 
 if __name__ == "__main__":

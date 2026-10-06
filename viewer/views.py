@@ -126,3 +126,9 @@ def download(rows: list[Mapping[str, Any]], filename: str, key: str) -> None:
         icon=":material/download:",
         key=key,
     )
+
+
+def inert_text(value: Any, title: str = "Content") -> None:
+    """Show authored text without interpreting Markdown, HTML, or scripts."""
+    st.caption(title)
+    st.text("" if value is None else str(value))

@@ -90,9 +90,15 @@ with detail_slot:
     if selected:
         with st.container(border=True):
             st.subheader(f"{selected.get('thread_id')} · post {selected.get('post_no')}")
+            if selected.get("source") == "legacy_import":
+                st.warning(
+                    "Legacy import — historical metadata only. A Drive reference is not proof "
+                    "that content is available, current, or authoritative.",
+                    icon=":material/history:",
+                )
             if selected.get("drive_url"):
                 st.link_button(
-                    "Open in Drive",
+                    "Open referenced Drive record",
                     selected["drive_url"],
                     icon=":material/open_in_new:",
                 )
