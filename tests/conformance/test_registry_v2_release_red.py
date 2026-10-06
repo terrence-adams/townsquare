@@ -91,6 +91,35 @@ class RegistryV2ReleaseContracts(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_schema_and_v2_migration_allow_ack_but_reject_post_delivery_lease(self):
+        from registry.app import acknowledge_delivery
+        with tempfile.TemporaryDirectory() as tmp:
+            trigger_sql=[]
+            for origin in ("fresh","migrated"):
+                path=Path(tmp)/f"registry-{origin}.db"
+                db=sqlite3.connect(path); db.row_factory=sqlite3.Row
+                try:
+                    if origin=="fresh":
+                        event_id="event-1"
+                        db.executescript(self.text("registry/schema.sql"))
+                        db.execute("INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES('event-1','agent-1','register','{}','2026-10-06T00:00:00Z')")
+                        db.execute("INSERT INTO audit_outbox(event_id) VALUES('event-1')")
+                    else:
+                        event_id="pending-v1"
+                        self._seed_registry_v1(db); db.commit()
+                        with self.registry_migrator(path) as migrator:migrator.migrate(db)
+                    db.execute("UPDATE audit_outbox SET lease_owner='worker-1',lease_until='2026-10-06T00:01:00Z' WHERE event_id=?",(event_id,))
+                    self.assertTrue(acknowledge_delivery(db,event_id,"worker-1","2026-10-06T00:02:00Z"))
+                    self.assertFalse(acknowledge_delivery(db,event_id,"worker-1","2026-10-06T00:02:01Z"))
+                    self.assertEqual((1,None,None),tuple(db.execute("SELECT attempts,lease_owner,lease_until FROM audit_outbox WHERE event_id=?",(event_id,)).fetchone()))
+                    db.commit()
+                    with self.assertRaisesRegex(sqlite3.IntegrityError,"delivered outbox cannot be leased"):
+                        db.execute("UPDATE audit_outbox SET lease_owner='late-worker' WHERE event_id=?",(event_id,))
+                    db.rollback()
+                    trigger_sql.append(" ".join(db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='audit_outbox_lease_guard'").fetchone()[0].split()))
+                finally:db.close()
+            self.assertEqual(trigger_sql[0],trigger_sql[1],"fresh schema and v2 migrator must install the same lease guard")
+
     def test_registry_migration_owner_is_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "registry-v1-lock.db"

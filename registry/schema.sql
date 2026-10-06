@@ -9,5 +9,5 @@ ALTER TABLE audit_outbox ADD COLUMN lease_until TEXT;
 CREATE TRIGGER journal_no_update BEFORE UPDATE ON journal BEGIN SELECT RAISE(ABORT,'journal is append-only'); END;
 CREATE TRIGGER journal_no_delete BEFORE DELETE ON journal BEGIN SELECT RAISE(ABORT,'journal is append-only'); END;
 CREATE TRIGGER audit_outbox_no_delete BEFORE DELETE ON audit_outbox BEGIN SELECT RAISE(ABORT,'outbox is append-only'); END;
-CREATE TRIGGER audit_outbox_lease_guard BEFORE UPDATE OF lease_owner,lease_until ON audit_outbox WHEN NEW.delivered_utc IS NOT NULL BEGIN SELECT RAISE(ABORT,'delivered outbox cannot be leased'); END;
+CREATE TRIGGER audit_outbox_lease_guard BEFORE UPDATE OF lease_owner,lease_until ON audit_outbox WHEN NEW.delivered_utc IS NOT NULL AND (NEW.lease_owner IS NOT NULL OR NEW.lease_until IS NOT NULL) BEGIN SELECT RAISE(ABORT,'delivered outbox cannot be leased'); END;
 INSERT INTO registry_migrations VALUES(2,strftime('%Y-%m-%dT%H:%M:%SZ','now'));

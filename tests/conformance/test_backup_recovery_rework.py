@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT=Path(__file__).resolve().parents[2]
@@ -23,6 +25,7 @@ class BackupRecoveryReworkTests(unittest.TestCase):
         cls.replay=load("backup_replay",Path("backup/recovery_replay_drill.py"))
 
     def registry(self,path,*,version,lease=False):
+        if version not in (1,2): raise ValueError("unsupported fixture Registry version")
         db=sqlite3.connect(path)
         db.executescript("""
             PRAGMA foreign_keys=ON;
@@ -32,10 +35,12 @@ class BackupRecoveryReworkTests(unittest.TestCase):
             INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES('pending-1','agent-1','register','{}','2026-10-06T00:00:00Z');
             INSERT INTO audit_outbox(event_id) VALUES('pending-1');
         """)
-        db.execute("INSERT INTO registry_migrations VALUES(?,?)",(version,"2026-10-06T00:00:00Z"))
+        db.execute("INSERT INTO registry_migrations VALUES(1,?)",("2026-10-06T00:00:00Z",)); db.commit()
+        if version==2:
+            with patch.dict(os.environ,{"REGISTRY_DB":str(path)},clear=False):
+                migrator=load("backup_registry_migrate",Path("registry/migrate.py"))
+            migrator.migrate(db)
         if lease:
-            db.execute("ALTER TABLE audit_outbox ADD COLUMN lease_owner TEXT")
-            db.execute("ALTER TABLE audit_outbox ADD COLUMN lease_until TEXT")
             db.execute("UPDATE audit_outbox SET lease_owner='worker-1',lease_until='2026-10-06T00:01:00Z'")
         db.commit(); db.close()
 
@@ -95,7 +100,12 @@ class BackupRecoveryReworkTests(unittest.TestCase):
                 self.assertIsNone(outbox["last_error"]); self.assertIsNone(outbox["lease_owner"]); self.assertIsNone(outbox["lease_until"])
                 boundary=self.replay.FixedDrillDelivery(ledger,registry,token.read_bytes())
                 with self.assertRaises(PermissionError):boundary.deliver_once("pending-1",b"wrong-drill-credential")
+                self.assertFalse(boundary.deliver_once("pending-1",token.read_bytes()))
                 self.assertEqual(1,ledger.execute("SELECT count(*) FROM registry_audit_events WHERE event_uuid='pending-1'").fetchone()[0])
+                self.assertEqual(1,registry.execute("SELECT attempts FROM audit_outbox WHERE event_id='pending-1'").fetchone()[0])
+                with self.assertRaisesRegex(sqlite3.IntegrityError,"delivered outbox cannot be leased"):
+                    registry.execute("UPDATE audit_outbox SET lease_owner='late-worker' WHERE event_id='pending-1'")
+                registry.rollback()
             finally:ledger.close(); registry.close()
 
     def test_crash_window_reconciles_precommitted_ledger_event_and_acks_pending_outbox(self):
