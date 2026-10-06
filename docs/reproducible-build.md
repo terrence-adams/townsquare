@@ -21,3 +21,17 @@ wheelhouse and resolver output for review.
 
 Offline phase: verify/copy that reviewed wheelhouse, run
 `python tools/generate-wheelhouse-lock.py --wheelhouse wheelhouse --resolved requirements/resolved.txt`, build with Docker network disabled and `--build-arg PYTHON_IMAGE=<digest>`, export image inspection JSON, then run `tools/generate-sbom.py`. Finally run `tools/generate-release-artifacts.py` with current SHA and image digests. Each generator fails closed on placeholders or empty inputs.
+
+The approved wheel target is Linux `x86_64`, CPython 3.12, accepting
+`manylinux2014` and `manylinux_2_28` wheels. Do not reuse the wheelhouse for a
+different ABI/platform without a separately resolved lock and review.
+
+After approval and with a locally cached digest-pinned base image, the next
+offline build command is:
+
+```text
+docker build --network=none --file registrar/Dockerfile --build-arg PYTHON_IMAGE=<python@sha256:...> --tag townsquare-ledger:<local-release-id> .
+```
+
+Use `viewer/Dockerfile` for the Viewer. Build the backup image only after exact
+APT versions are set in `release.env`.

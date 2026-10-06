@@ -5,6 +5,7 @@ state.json
 __pycache__/
 allowed_signers
 keys/
+wheelhouse/
 
 # WS3 disclosure boundary (gsp's NEW-3, 2026-09-22): row-level corpus
 # output must stay outside this repo BY LOCATION (C:\Workspace\townsquare-

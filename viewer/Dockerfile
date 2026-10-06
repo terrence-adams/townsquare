@@ -21,11 +21,12 @@ RUN python -m venv /opt/venv \
     && adduser --system --uid 10002 --ingroup viewer --home /nonexistent viewer
 
 WORKDIR /app
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-index --find-links=/wheelhouse --requirement /app/requirements.txt
-COPY --chown=10002:10002 .streamlit /app/.streamlit
-COPY --chown=10002:10002 app_pages /app/app_pages
-COPY --chown=10002:10002 registrar_client.py views.py streamlit_app.py /app/
+COPY wheelhouse /wheelhouse
+COPY requirements/resolved.txt /wheelhouse/resolved.txt
+RUN pip install --no-index --find-links=/wheelhouse --require-hashes -r /wheelhouse/resolved.txt
+COPY --chown=10002:10002 viewer/.streamlit /app/.streamlit
+COPY --chown=10002:10002 viewer/app_pages /app/app_pages
+COPY --chown=10002:10002 viewer/registrar_client.py viewer/views.py viewer/streamlit_app.py /app/
 
 USER 10002:10002
 EXPOSE 8502

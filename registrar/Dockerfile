@@ -13,14 +13,16 @@ RUN python -m venv /opt/venv \
     && adduser --system --uid 10001 --ingroup registrar --home /nonexistent registrar
 
 WORKDIR /app
-COPY requirements.txt /app/requirements.txt
-# requirements.txt is the currently tested constraint set. Release builds must
-# use the hash-locked wheelhouse documented in deploy/reproducible-build.md.
-RUN pip install --no-index --find-links=/wheelhouse --requirement /app/requirements.txt
-COPY --chown=10001:10001 app /app/registrar/app
-COPY --chown=10001:10001 migrations /app/registrar/migrations
-COPY --chown=10001:10001 verifier /app/registrar/verifier
-COPY --chown=10001:10001 backup /opt/townsquare/backup
+# Build context is repository root so the reviewed, untracked release wheelhouse
+# is available. `resolved.txt` carries transitive hashes; requirements.txt is not
+# a release build input.
+COPY wheelhouse /wheelhouse
+COPY requirements/resolved.txt /wheelhouse/resolved.txt
+RUN pip install --no-index --find-links=/wheelhouse --require-hashes -r /wheelhouse/resolved.txt
+COPY --chown=10001:10001 registrar/app /app/registrar/app
+COPY --chown=10001:10001 registrar/migrations /app/registrar/migrations
+COPY --chown=10001:10001 registrar/verifier /app/registrar/verifier
+COPY --chown=10001:10001 registrar/backup /opt/townsquare/backup
 
 USER 10001:10001
 EXPOSE 8790

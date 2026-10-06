@@ -1,0 +1,13 @@
+# Keep the reviewed untracked wheelhouse in a release build context.
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+config.env
+*.sig
+keys/
+state.json
+report*.json
+inventory.json
+lsjson-*.json
+docs/townsquare-mvp-v0-design-20261006.md
