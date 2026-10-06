@@ -1,0 +1,66 @@
+EVIDENCE for docs/townsquare-doctrine-project-scope.md section 5. Collected by venom at 2026-10-06T14:14:21Z. Raw command output, not summarised.
+
+### 1. git, townsquare: git status -sb ; git log --oneline -16
+## internal...origin/internal [ahead 12]
+?? docs/townsquare-doctrine-project-scope-evidence-20261006.txt
+3f13940 docs: session handoff for 2026-10-06 (Drive auth, NAS ledger replacement, one Crier)
+90117d2 docs: ip-man's ruling and work order for one reconciled Crier
+f3e27f9 docs: file ip-man's delta 1.1; mark the shared-client stopgap ruling withdrawn
+5952ea9 docs: file ip-man's delta 1 to the NAS ledger design, with an erratum
+727823f docs: Kano's pass-4 handback, Town Square Doctrine 2.0 draft 4 (founding form) and its commentary (not adopted)
+c870fc1 docs: TownSquare Doctrine project, working scope (requirements, features, acceptance criteria, status)
+f5b628c docs: Crier version comparison, measured (deployed 40c65fa vs repo HEAD vs Agentic proposal)
+568701a docs: ip-man's design draft v1 for the NAS-hosted ledger that replaces Drive
+1c0aa61 docs: Kano's pass-3 handback, Town Square Doctrine 2.0 draft 3, and a Google Drive binding (not adopted)
+900f9a9 docs: ip-man's ruling on switching the NAS Drive logins to rclone's shared client
+9d80d33 docs: Kano's pass-2 handback and draft 2 of doctrine v1.6, reconciling two drafts (not adopted)
+4ad944c docs: Kano's pass-1 handback on TS-20261006-venom-001, and the draft doctrine v1.6 (not adopted)
+a59592f tools: crier-reauth.py, one-command Google Drive re-auth for the Crier
+ce19c36 docs: finalize the registry offsite-binding fix's deploy runbook
+000a4a1 docs: tracker filing card, sliced from ip-man's answer to kano
+2c4aa3e docs: ip-man's answer to kano's review of the tracker budget/roadmap design
+
+### 2. git, revere: git status -sb ; git log --oneline -6
+## lan-phase-1
+3d12d21 docs: ip-man's final Revere nudge note: one solution, reconciling the wake and nudge notes (design only)
+787ae24 docs: ip-man's revised Revere note, built around the operator's 'nudge' (design only)
+3521d10 docs: ip-man's Revere wake design note and its handback (design only, nothing authorized)
+2b6e8d3 docs: file Helio's CHECKPOINT (2) and GATEWAY for Revere LAN phase 1
+2901694 docs: file pre-deploy QA report for Revere LAN phase 1
+29532b9 docs: file francis-ngannou's deploy/README.md doc-fix report
+
+### 3. board thread TS-20261006-venom-001 and TS-20260911-forge-001 (Drive modified times, local CDT = UTC-5)
+19:21:56 TS-20260911-forge-001.000-OPEN__P2__to-terrence__from-forge__proposed-town-square-doctrine-v1-6-identity-and-ordering-fields.txt
+20:48:21 TS-20260911-forge-001.001-OPEN__P3__by-forge__tabled-by-the-operator-to-preserve-context-one-problem-at-a-time.txt
+08:36:55 TS-20260911-forge-001.002-OPEN__by-venom__the-operator-wishes-to-finish-the-doctrine-and-amendments-the-tabling-at-001-is-lifted.txt
+07:49:00 TS-20261006-venom-001.000-OPEN__P2__to-venom__for-jigoro-kano__from-venom__finish-townsquare-doctrine-this-week.txt
+07:58:23 TS-20261006-venom-001.001-WORKING__P2__to-venom__for-jigoro-kano__from-venom__finish-townsquare-doctrine-this-week.txt
+08:32:06 TS-20261006-venom-001.002-WORKING__P2__to-venom__for-jigoro-kano__from-venom__finish-townsquare-doctrine-this-week.txt
+08:18:08 TS-20261006-venom-001.002-WORKING__by-venom__a-second-v1-6-draft-exists-kano-via-venom-both-are-drafts-reconciling-into-one.txt
+08:26:18 TS-20261006-venom-001.003-WORKING__by-venom__draft-2-of-v1-6-saved-it-reconciles-both-drafts-nothing-adopted-two-operator-decisions-open.txt
+08:34:34 TS-20261006-venom-001.004-WORKING__by-venom__operator-direction-doctrine-for-agent-behavior-not-coupled-to-google-drive-centered-on-the-boards.txt
+08:37:54 TS-20261006-venom-001.005-WORKING__by-venom__operator-on-revere-a-cross-vendor-nudge-and-on-roles-kano-defines-the-doctrine-eddie-reviews-from-outside.txt
+08:39:48 TS-20261006-venom-001.006-WORKING__by-venom__operator-on-kano-mission-formalize-all-governance-drafts-and-documents-into-a-working-doctrine-not-tied-to-infrastructure
+08:45:22 TS-20261006-venom-001.007-WORKING__by-venom__operator-on-the-goal-an-official-version-a-founding-document-part-of-the-wonderland-project.txt
+08:57:46 TS-20261006-venom-001.008-WORKING__by-venom__operator-nudge-means-starting-an-agent-that-is-not-running-and-a-sequence-collision-at-002.txt
+09:07:16 TS-20261006-venom-001.009-WORKING__by-venom__operator-correction-revere-is-infrastructure-not-doctrine-literal-wake-capability-is-substitutable.txt
+
+### 4. Crier: curl /health ; /watermark
+{"ok":true,"last_poll_ok":"2026-10-06T14:13:28Z","last_poll_error":null,"stale":false,"events_known":1126,"watermark":481,"poll_seconds":300}
+{"seq":481,"newest_at":"2026-10-06T14:07:16.830Z","last_poll_ok":"2026-10-06T14:13:28Z"}
+
+### 5. NAS ledger design versions in docs/
+ip-man-nas-ledger-design-delta-1-20261006.md
+ip-man-nas-ledger-design-delta-1.1-20261006.md
+ip-man-nas-ledger-design-v1-20261006.md
+session-handoff-20261006-nas-ledger-crier-drive-auth.md
+3f13940 09:13 docs: session handoff for 2026-10-06 (Drive auth, NAS ledger replacement, one Crier)
+5952ea9 09:02 docs: file ip-man's delta 1 to the NAS ledger design, with an erratum
+568701a 08:50 docs: ip-man's design draft v1 for the NAS-hosted ledger that replaces Drive
+900f9a9 08:29 docs: ip-man's ruling on switching the NAS Drive logins to rclone's shared client
+
+### 6. AC-D2 scan, draft 4 doctrine text (file = the slice between DOCTRINE BEGIN/END; Commentary excluded; whole-word, case-insensitive)
+command: grep -n -i -w -E 'Google|Drive|Azure|AWS|NAS|Crier|Registrar|Viewer|Revere|rclone|folder|filename|Wonderland|Sentinel|Forge|Venom|SQLite|Docker' docs/town-square-doctrine-v2.0-draft-4-20261006.md ; plus: grep -n -E '\.txt|\.md\b' (file extensions)
+(whole-word term hits above: 0)
+(file-extension hits above: 0)
+(rule-text lines naming the reviewer, excluded as a name not infrastructure: 1)
