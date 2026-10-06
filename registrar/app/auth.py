@@ -1,4 +1,5 @@
 import secrets
+from datetime import datetime,timedelta,timezone
 from .service import Forbidden,now
 try:
     from argon2 import PasswordHasher
@@ -30,6 +31,53 @@ def authenticate_identity(db,credential,scope):
     token_id=credential.split(".",1)[0]
     scopes=set(db.execute("SELECT scopes FROM tokens WHERE token_id=?",(token_id,)).fetchone()[0].split())
     return principal,scopes
+
+# Release-pinned native capability policy. Native endpoints intentionally do
+# not inherit mutable legacy token scopes; changing this matrix is a release
+# decision, while each credential pins the policy version it was issued for.
+NATIVE_CAPABILITY_POLICIES={
+    "townsquare-mvp-v1":{
+        "writer-a":{"post:write","post:read"},
+        "writer-b":{"post:write","post:read"},
+        "viewer":{"post:read"},
+        "crier":{"post:read"},
+        "projector":{"post:read"},
+        "operator":{"post:read","content:restricted:read","operator:stop","operator:archive"},
+        "operator-resume":{"operator:resume"},
+        "registry-admin":{"registry:mutate"},
+        "registry-audit":{"registry:audit:append"},
+    }
+}
+
+def create_native_credential(db,principal,*,policy_version="townsquare-mvp-v1",ttl_seconds=3600):
+    """Offline-only native credential issuer; no HTTP route calls this."""
+    if PasswordHasher is None: raise RuntimeError("argon2-cffi is required")
+    policy=NATIVE_CAPABILITY_POLICIES.get(policy_version)
+    if policy is None or principal not in policy: raise Forbidden("principal is not in the pinned capability policy")
+    if not isinstance(ttl_seconds,int) or ttl_seconds<1: raise Forbidden("credential lifetime must be positive")
+    credential_id=secrets.token_urlsafe(12); secret=secrets.token_urlsafe(32); issued=now()
+    expires=(datetime.now(timezone.utc)+timedelta(seconds=ttl_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.execute("INSERT INTO auth_credentials VALUES (?,?,?,?,?,?)",(credential_id,principal,PasswordHasher().hash(secret),policy_version,issued,expires))
+    return credential_id+"."+secret
+
+def revoke_native_credential(db,credential_id,reason,revoked_by):
+    """Append revocation evidence; the immutable credential row is untouched."""
+    if not db.execute("SELECT 1 FROM auth_credentials WHERE credential_id=?",(credential_id,)).fetchone(): raise Forbidden("unknown native credential")
+    db.execute("INSERT INTO credential_revocations VALUES (?,?,?,?,?)",(secrets.token_urlsafe(12),credential_id,str(reason),revoked_by,now()))
+
+def authenticate_native_identity(db,credential,capability):
+    if PasswordHasher is None: raise RuntimeError("argon2-cffi is required")
+    try: credential_id,secret=credential.split(".",1)
+    except (AttributeError,ValueError) as exc: raise Forbidden("invalid credential") from exc
+    row=db.execute("SELECT * FROM auth_credentials WHERE credential_id=?",(credential_id,)).fetchone()
+    instant=now()
+    revoked=db.execute("SELECT 1 FROM credential_revocations WHERE credential_id=? LIMIT 1",(credential_id,)).fetchone() if row else None
+    if not row or revoked or row["expires_at"]<=instant: raise Forbidden("invalid credential")
+    try: PasswordHasher().verify(row["token_hash"],secret)
+    except Exception as exc: raise Forbidden("invalid credential") from exc
+    capabilities=NATIVE_CAPABILITY_POLICIES.get(row["authorization_policy_version"],{}).get(row["principal"],set())
+    if capability not in capabilities: raise Forbidden("missing capability")
+    return row["principal"],set(capabilities)
 
 def main():
     """Offline bootstrap; run only from the protected Registrar container console."""

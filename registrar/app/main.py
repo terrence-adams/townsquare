@@ -1,9 +1,10 @@
 import os,sqlite3
 from fastapi import Depends,FastAPI,Header,HTTPException,Query,Request
 from fastapi.responses import JSONResponse
-from .auth import authenticate_identity
+from .auth import authenticate_identity,authenticate_native_identity
 from .db import migrate,session
 from .service import Conflict,Forbidden,Invalid,Registrar,Unavailable
+from .native_ledger import NativeLedger,NativeLedgerError
 from .attestation import verify as verify_attestation
 from .runtime import ensure_runtime_mode,verification_enabled
 
@@ -121,6 +122,11 @@ def identity(db,authorization,scope):
     try: return authenticate_identity(db,authorization[7:],scope)
     except Forbidden as exc: raise HTTPException(403,str(exc)) from exc
 
+def native_identity(db,authorization,capability):
+    if not authorization or not authorization.startswith("Bearer "): raise HTTPException(401,"Bearer token required")
+    try: return authenticate_native_identity(db,authorization[7:],capability)
+    except Forbidden as exc: raise HTTPException(403,str(exc)) from exc
+
 def invoke(fn):
     # Domain exceptions only: deliberate raises from service.py, mapped at the
     # call site that raised them. sqlite3.OperationalError is NOT handled here
@@ -133,6 +139,15 @@ def invoke(fn):
     except Forbidden as exc: raise HTTPException(403,str(exc)) from exc
     except Invalid as exc: raise HTTPException(400,str(exc)) from exc
     except Unavailable as exc: raise HTTPException(503,str(exc)) from exc
+
+def invoke_native(fn):
+    """Map the native-ledger machine codes without changing legacy errors."""
+    try: return fn()
+    except NativeLedgerError as exc:
+        status={"forbidden":403,"context_required":428,"conflict":409,"invalid":400,"invalid_transition":409,"stopped":423,"unavailable":503}.get(exc.code,400)
+        detail={"code":exc.code,"message":str(exc)}
+        if exc.requirements is not None: detail["requirements"]=exc.requirements
+        raise HTTPException(status,detail) from exc
 
 CURSOR_KEY_MIN_BYTES=32
 def _load_cursor_key_material(path):
@@ -278,3 +293,54 @@ def reconciliation(status:str,authorization:str|None=Header(None),db:sqlite3.Con
         return {"status":status,"artifacts":[dict(r) for r in db.execute("SELECT * FROM artifacts ORDER BY filename,drive_file_id")]}
     else: rows=[]
     return {"status":status,"posts":[dict(r) for r in rows]}
+
+# Native authority routes are additive.  Legacy reserve/publish/read APIs
+# above retain their original contracts for historical clients.
+@app.get("/v1/context-bundles/{thread_id}")
+def native_context_bundle(thread_id:str,action:str="post",revision:str="new",authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"post:write")
+    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).create_context_bundle(who,action,thread_id,revision))
+
+@app.post("/v1/context-receipts",status_code=201)
+async def native_context_receipt(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"post:write"); body=await request.json()
+    return {"receipt":invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).acknowledge_context(body.get("bundle_id"),who,body.get("acknowledged_hashes")))}
+
+@app.post("/v1/events",status_code=201)
+async def native_event(request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),if_match:str|None=Header(None,alias="If-Match"),context_receipt:str|None=Header(None,alias="X-Context-Receipt"),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"post:write"); body=await request.json()
+    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).post_event(who,idempotency_key,context_receipt,if_match or "new",body))
+
+@app.get("/v1/native/threads/{thread_id}")
+def native_thread(thread_id:str,include_archived:bool=False,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"post:read")
+    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).get_thread(thread_id,principal=who,include_archived=include_archived))
+
+@app.get("/v1/native/discovery")
+def native_discovery(authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    native_identity(db,authorization,"post:read")
+    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).discovery_projection())
+
+@app.post("/v1/operator/stop")
+async def native_stop(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"operator:stop"); body=await request.json()
+    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).set_operator_stop(who,True,body.get("reason")))
+
+@app.post("/v1/operator/resume")
+async def native_resume(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"operator:resume"); body=await request.json()
+    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).set_operator_resume(who,body.get("reason")))
+
+@app.post("/v1/native/threads/{thread_id}/archive")
+async def native_archive(thread_id:str,request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"operator:archive"); body=await request.json()
+    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).archive_thread(who,thread_id,body.get("reason")))
+
+def _native_context_manifest():
+    """Load one hash-pinned manifest; absence is intentionally fail-closed."""
+    path=os.environ.get("TOWNSQUARE_CONTEXT_MANIFEST")
+    if not path: return None
+    try:
+        import json
+        with open(path,"r",encoding="utf-8") as handle: return json.load(handle)
+    except (OSError,ValueError): return None
