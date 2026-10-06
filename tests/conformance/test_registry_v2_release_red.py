@@ -1,0 +1,155 @@
+"""Final Registry-v2 and recovery contracts.
+
+These tests deliberately exercise release seams, not a particular framework.
+They name the public boundaries needed to reproduce an upgrade or recovery
+failure in a disposable deployment.
+"""
+from __future__ import annotations
+
+import importlib
+import os
+import sqlite3
+import tempfile
+import unittest
+from contextlib import contextmanager
+from pathlib import Path
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class RegistryV2ReleaseContracts(unittest.TestCase):
+    def text(self, relative: str) -> str:
+        return (ROOT / relative).read_text(encoding="utf-8")
+
+    def _seed_registry_v1(self, db):
+        """Minimal populated v1: one pending durable event before the v2 lease upgrade."""
+        db.executescript("""
+            CREATE TABLE registry_migrations(version INTEGER PRIMARY KEY, applied_utc TEXT NOT NULL);
+            INSERT INTO registry_migrations VALUES(1, '2026-10-06T00:00:00Z');
+            CREATE TABLE journal(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, agent_id TEXT NOT NULL, action TEXT NOT NULL, body_json TEXT NOT NULL, committed_utc TEXT NOT NULL);
+            CREATE TABLE audit_outbox(event_id TEXT PRIMARY KEY REFERENCES journal(event_id), attempts INTEGER NOT NULL DEFAULT 0, delivered_utc TEXT, last_error TEXT);
+            INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES('pending-v1','agent-1','register','{}','2026-10-06T00:00:00Z');
+            INSERT INTO audit_outbox(event_id) VALUES('pending-v1');
+        """)
+
+    @contextmanager
+    def registry_migrator(self, db_path):
+        """Load the CLI's callable migration boundary against a disposable DB."""
+        with patch.dict(os.environ, {"REGISTRY_DB": str(db_path)}, clear=False):
+            module = importlib.reload(importlib.import_module("registry.migrate"))
+            yield module
+
+    def test_populated_registry_v1_upgrades_to_v2_and_rerun_preserves_pending_work(self):
+        """A normal v1 DB upgrades once; re-running changes neither head nor outbox UUID."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "registry-v1.db"
+            db = sqlite3.connect(path)
+            try:
+                self._seed_registry_v1(db)
+                with self.registry_migrator(path) as migrator:
+                    migrate = getattr(migrator, "migrate", None)
+                    self.assertTrue(callable(migrate), "registry migrator must expose migrate(db) for a populated-v1 upgrade rehearsal")
+                    if not callable(migrate):
+                        return
+                    migrate(db)
+                    self.assertEqual([(1,), (2,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+                    self.assertEqual(["pending-v1"], [r[0] for r in db.execute("SELECT event_id FROM audit_outbox")])
+                    columns = {r[1] for r in db.execute("PRAGMA table_info(audit_outbox)")}
+                    self.assertTrue({"lease_owner", "lease_until"} <= columns)
+                    triggers = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
+                    self.assertTrue(any("lease" in name for name in triggers), "v2 leases require DB-enforced transition guards")
+                    migrate(db)
+                    self.assertEqual([(1,), (2,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+            finally:
+                db.close()
+
+    def test_registry_v2_failure_rolls_back_head_and_rows_then_clean_retry_succeeds(self):
+        """Denying v2's version write is a concrete injected mid-upgrade failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "registry-v1-failure.db"
+            db = sqlite3.connect(path)
+            try:
+                self._seed_registry_v1(db)
+                with self.registry_migrator(path) as migrator:
+                    migrate = getattr(migrator, "migrate", None)
+                    self.assertTrue(callable(migrate), "registry migrator must expose migrate(db) for injected rollback/retry rehearsal")
+                    if not callable(migrate):
+                        return
+                    def deny_v2_version_write(action, table, *_):
+                        return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_INSERT and table == "registry_migrations" else sqlite3.SQLITE_OK
+                    db.set_authorizer(deny_v2_version_write)
+                    with self.assertRaises(sqlite3.DatabaseError):
+                        migrate(db)
+                    db.set_authorizer(None)
+                    self.assertEqual([(1,)], list(db.execute("SELECT version FROM registry_migrations")))
+                    self.assertEqual(["pending-v1"], [r[0] for r in db.execute("SELECT event_id FROM audit_outbox")])
+                    self.assertNotIn("lease_owner", {r[1] for r in db.execute("PRAGMA table_info(audit_outbox)")})
+                    migrate(db)
+                    self.assertEqual([(1,), (2,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+            finally:
+                db.close()
+
+    def test_registry_migration_owner_is_exclusive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "registry-v1-lock.db"
+            db = sqlite3.connect(path)
+            try:
+                self._seed_registry_v1(db)
+            finally:
+                db.close()
+            lock = path.with_suffix(".migration.lock")
+            lock.write_text("held", encoding="utf-8")
+            try:
+                with self.registry_migrator(path) as migrator:
+                    with self.assertRaisesRegex(SystemExit, "exclusive registry migration lock"):
+                        migrator.main()
+            finally:
+                lock.unlink(missing_ok=True)
+
+    def test_ledger_readiness_has_a_directional_registry_peer_credential(self):
+        source = self.text("registrar/app/main.py")
+        compose = self.text("compose.yml")
+        self.assertIn("REGISTRY_PEER_READINESS_TOKEN_FILE", source,
+                      "Ledger readiness must require a Registry-to-Ledger credential, not just query Registry")
+        self.assertIn("registry peer readiness authorization required", source)
+        self.assertIn("/health/ready", source)
+        self.assertIn("registry_ledger_readiness_token", compose)
+        self.assertIn("ledger_registry_readiness_token", compose,
+                      "directions must use distinct secret material")
+        self.assertIn("ledger_registry_readiness_token", self.text("registry/app.py"))
+
+    def test_peer_readiness_credential_is_not_a_general_ledger_bearer_token(self):
+        source = self.text("registrar/app/main.py")
+        audit = self.text("registry/app.py")
+        self.assertIn("REGISTRY_PEER_READINESS_TOKEN_FILE", source)
+        self.assertIn("registry:audit:append", source,
+                      "fixed Registry audit ingestion must keep a separately scoped credential")
+        self.assertNotIn("post:write", source[source.index("def ready("):source.index("@app.post(\"/v1/roots/reserve\"")],
+                         "peer readiness must not flow through normal write authorization")
+        self.assertIn("LEDGER_AUDIT_TOKEN_FILE", audit)
+
+    def test_restore_manifest_compares_every_domain_parity_field_before_replay(self):
+        restore = self.text("backup/restore-drill.py")
+        fields = ("row_counts", "schema_head", "ledger_watermark", "registry_journal_watermark", "lease_state")
+        missing = [field for field in fields if field not in restore]
+        self.assertEqual([], missing, f"restore must reject every tampered manifest parity field; missing checks: {missing}")
+        self.assertIn("non_atomic_domains", restore,
+                      "the independent domain restore must be explicitly labeled non-atomic")
+        self.assertIn("manifest parity", restore.lower(),
+                      "restore must compare captured metadata, not only SQLite integrity")
+
+    def test_restore_replays_pending_event_through_fixed_authenticated_endpoint_once(self):
+        restore = self.text("backup/restore-drill.py")
+        registry = self.text("registry/app.py")
+        self.assertIn("LEDGER_AUDIT_URL", registry)
+        self.assertIn("ledger_audit_token", registry)
+        self.assertIn("deliver_once", restore,
+                      "restore must invoke the Registry delivery boundary for pending stable UUIDs")
+        self.assertIn("exactly_once", restore.lower(),
+                      "recovery evidence must assert second replay leaves one Ledger inbox row")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -27,7 +27,7 @@ CANONICAL_COMPATIBILITY_TUPLE = {
     "ledger_service": "townsquare-ledger-v0",
     "ledger_schema": "14",
     "registry_service": "townsquare-registry-v0",
-    "registry_schema": "1",
+    "registry_schema": "2",
     "audit_contract": "registry-ledger-audit-v1",
 }
 EXPECTED_LEGACY_COUNTS = {
@@ -253,7 +253,7 @@ class Schema009To014RehearsalTests(unittest.TestCase):
         self.assertIn('TOWNSQUARE_LEDGER_SCHEMA_HEAD: "14"', compose)
         self.assertIn("TOWNSQUARE_REGISTRY_AUDIT_CONTRACT: registry-ledger-audit-v1", compose)
         self.assertIn("REGISTRY_SERVICE_ID: townsquare-registry-v0", compose)
-        self.assertIn('REGISTRY_SCHEMA_HEAD: "1"', compose)
+        self.assertIn('REGISTRY_SCHEMA_HEAD: "2"', compose)
         self.assertIn("REGISTRY_LEDGER_SERVICE_ID: townsquare-ledger-v0", compose)
         self.assertIn('REGISTRY_LEDGER_SCHEMA_HEAD: "14"', compose)
         self.assertIn("REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1", compose)
@@ -332,7 +332,7 @@ class LedgerRegistryCompatibilityGateTests(NativeLedgerCase):
             self.assertEqual("compatible-audit-event", self.ledger.append_registry_audit("registry-audit", payload)["event_uuid"])
         before = self.db.execute("SELECT count(*) FROM registry_audit_events").fetchone()[0]
         bad_payload = {**payload, "event_uuid": "blocked-audit-event"}
-        with patch.dict(os.environ, {**canonical, "REGISTRY_SCHEMA_HEAD": "wrong-1"}, clear=False):
+        with patch.dict(os.environ, {**canonical, "REGISTRY_SCHEMA_HEAD": "wrong-2"}, clear=False):
             self.assert_code("unavailable", self.ledger.append_registry_audit, "registry-audit", bad_payload)
         self.assertEqual(before, self.db.execute("SELECT count(*) FROM registry_audit_events").fetchone()[0])
         self.assertIsNone(self.db.execute("SELECT 1 FROM registry_audit_events WHERE event_uuid=?", (bad_payload["event_uuid"],)).fetchone())
