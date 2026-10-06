@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import gc
 import hashlib
-import hmac
 import os
 import secrets
 import tempfile
@@ -60,11 +59,12 @@ TEST_AUTHORITY_CAPABILITIES = {
 }
 
 
-def authority_proof(manifest, key, key_id, **changes):
-    """Create resolver evidence external to the mounted context manifest."""
+def authority_proof(manifest, public_key, **changes):
+    """Create detached-signature resolver evidence without signer material."""
     proof = {
         "schema": "townsquare-authority-proof-v1",
-        "resolver_key_id": key_id,
+        "resolver_key_id": "test-authority-public-key-v1",
+        "public_key_sha256": hashlib.sha256(public_key).hexdigest(),
         "adoption_event_id": "test-adoption-event-1",
         "manifest_id": manifest["id"],
         "manifest_sha256": manifest["sha256"],
@@ -86,8 +86,6 @@ def authority_proof(manifest, key, key_id, **changes):
         },
     }
     proof.update(changes)
-    material = {name: value for name, value in proof.items() if name != "signature"}
-    proof["signature"] = hmac.new(key, canonical(material).encode("utf-8"), hashlib.sha256).hexdigest()
     return proof
 
 
@@ -98,14 +96,12 @@ class NativeLedgerCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / "ledger.db")
         self.receipt_key_path = Path(self.tmp.name) / "receipt-hash.key"
-        self.authority_key_path = Path(self.tmp.name) / "authority-resolver.key"
         # Leave margin for production's whitespace trimming when a random
         # byte happens to be a leading/trailing ASCII whitespace character.
         self.receipt_key = secrets.token_bytes(64)
-        self.authority_key = secrets.token_bytes(64)
         self.receipt_key_path.write_bytes(self.receipt_key)
-        self.authority_key_path.write_bytes(self.authority_key)
-        for path in (self.receipt_key_path, self.authority_key_path):
+        self.authority_public_key = b"test-minisign-public-key-v1: no private signer material"
+        for path in (self.receipt_key_path,):
             try:
                 os.chmod(path, 0o600)
             except OSError:
@@ -113,8 +109,6 @@ class NativeLedgerCase(unittest.TestCase):
         self._environment = patch.dict(os.environ, {
             "TOWNSQUARE_RECEIPT_HASH_KEY_FILE": str(self.receipt_key_path),
             "TOWNSQUARE_RECEIPT_HASH_KEY_ID": "test-receipt-key-v1",
-            "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_FILE": str(self.authority_key_path),
-            "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_ID": "test-authority-key-v1",
         })
         self._environment.start()
         self.db = connect(self.db_path)
@@ -132,6 +126,9 @@ class NativeLedgerCase(unittest.TestCase):
             self.db,
             context_manifest=MANIFEST,
             governance_authority=self.authority_proof(MANIFEST),
+            authority_verifier=self.authority_verifier,
+            authority_public_key=self.authority_public_key,
+            authority_signature=self.authority_signature(self.authority_proof(MANIFEST)),
         )
 
     def tearDown(self):
@@ -143,7 +140,23 @@ class NativeLedgerCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def authority_proof(self, manifest=MANIFEST, **changes):
-        return authority_proof(manifest, self.authority_key, "test-authority-key-v1", **changes)
+        return authority_proof(manifest, self.authority_public_key, **changes)
+
+    @staticmethod
+    def canonical_authority_payload(proof):
+        return canonical(proof).encode("utf-8")
+
+    def authority_signature(self, proof):
+        return b"test-minisign-detached:" + hashlib.sha256(self.canonical_authority_payload(proof)).hexdigest().encode("ascii")
+
+    def authority_verifier(self, canonical_payload_bytes, detached_signature_bytes, public_key_bytes):
+        return (
+            public_key_bytes == self.authority_public_key
+            and detached_signature_bytes == b"test-minisign-detached:" + hashlib.sha256(canonical_payload_bytes).hexdigest().encode("ascii")
+        )
+
+    def install_authority_proof(self, proof):
+        return self.ledger.set_authority_proof(proof, detached_signature=self.authority_signature(proof))
 
     def bundle(self, principal="writer-a", action="request:open", thread_id="thread-alpha", revision="new"):
         return self.ledger.create_context_bundle(principal, action, thread_id, revision)

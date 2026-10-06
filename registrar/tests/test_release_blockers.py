@@ -87,7 +87,7 @@ class ReleaseBlockerNativeContracts(NativeLedgerCase):
         # intentionally not granted that capability; auth must fail before a
         # receipt mismatch can mask the cross-principal policy violation.
         restricted_scope["actions"].append("request:correct")
-        self.ledger.set_authority_proof(self.authority_proof(GOVERNED_MANIFEST, scope=restricted_scope))
+        self.install_authority_proof(self.authority_proof(GOVERNED_MANIFEST, scope=restricted_scope))
         first = self.post(key="correction-open")
         correction = {
             **OPENING,

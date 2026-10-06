@@ -3,11 +3,31 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from pathlib import Path
 
 from registrar.tests.mvp_fixture import NativeLedgerCase, OPENING
 
 
 class NativeLedgerTests(NativeLedgerCase):
+    def test_authority_fixture_uses_detached_canonical_signature_and_rejects_tamper(self):
+        proof = self.authority_proof()
+        payload = self.canonical_authority_payload(proof)
+        signature = self.authority_signature(proof)
+        self.assertNotIn("signature", proof)
+        self.assertTrue(self.authority_verifier(payload, signature, self.authority_public_key))
+        altered = {**proof, "authority_watermark": proof["authority_watermark"] + 1}
+        self.assertFalse(self.authority_verifier(self.canonical_authority_payload(altered), signature, self.authority_public_key))
+        self.assert_code(
+            "context_required", self.ledger.set_authority_proof, proof,
+            detached_signature=b"not-a-detached-minisign-signature",
+        )
+
+    def test_authority_verifier_seam_is_direct_only_not_main_or_environment_enabled(self):
+        main_source = (Path(__file__).parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertNotIn("authority_verifier=", main_source)
+        self.assertNotIn("TOWNSQUARE_AUTHORITY_VERIFIER", main_source)
+        self.assertNotIn("authority_verifier", self.authority_proof())
+
     def test_mvp_ldg_01_native_opening_is_durable_and_receipted(self):
         commit = self.post()
         self.db.close()
@@ -27,7 +47,7 @@ class NativeLedgerTests(NativeLedgerCase):
         correction_scope = self.authority_proof()["scope"]
         correction_scope["capabilities"]["writer-a"].append("request:correct")
         correction_scope["actions"].append("request:correct")
-        self.ledger.set_authority_proof(self.authority_proof(scope=correction_scope))
+        self.install_authority_proof(self.authority_proof(scope=correction_scope))
         # A correction is purpose/reference metadata on a later immutable
         # event.  It does not invent CORRECTED as a seventh lifecycle state.
         correction = self.post({

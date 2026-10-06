@@ -23,7 +23,7 @@ class GovernedNativeWriteTests(NativeLedgerCase):
 
     def install_controlled_lifecycle(self):
         self.ledger.set_context_manifest(governed_manifest())
-        self.ledger.set_authority_proof(self.authority_proof(governed_manifest()))
+        self.install_authority_proof(self.authority_proof(governed_manifest()))
 
     def governed_receipt(self, principal, payload, revision):
         return self.receipt(
@@ -90,7 +90,7 @@ class GovernedNativeWriteTests(NativeLedgerCase):
         for index, change in enumerate(rejected):
             with self.subTest(change=change):
                 self.ledger.set_context_manifest(governed_manifest(**change))
-                self.ledger.set_authority_proof(self.authority_proof(governed_manifest(**change), **change))
+                self.install_authority_proof(self.authority_proof(governed_manifest(**change), **change))
                 payload = {**OPENING, "thread_id": f"authority-{index}"}
                 receipt = self.receipt(thread_id=payload["thread_id"])
                 self.assert_code("context_required", self.ledger.post_event, "writer-a", f"authority-{index}", receipt, "new", payload)
