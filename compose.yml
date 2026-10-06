@@ -86,19 +86,41 @@ services:
       retries: 3
       start_period: 45s
 
+  registry:
+    image: ${TOWNSQUARE_REGISTRY_IMAGE:?set immutable registry image reference}
+    <<: *hardened
+    user: "10003:10003"
+    environment:
+      REGISTRY_DB: /var/lib/registry/registry.db
+      REGISTRY_TOKEN_FILE: /run/secrets/registry_api_token
+      # Independent HTTP outbox delivery; never a shared DB transaction/FK.
+      LEDGER_AUDIT_URL: http://ledger:8790/v1/registry/audit
+    volumes:
+      - type: bind
+        source: ${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}
+        target: /var/lib/registry
+    secrets: [registry_api_token]
+    tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
+    networks: [app]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8789/health/ready',timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
   backup:
-    image: ${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}
+    image: ${TOWNSQUARE_BACKUP_IMAGE:?set immutable backup image reference}
     <<: *hardened
     profiles: [operations]
     restart: "no"
-    user: "10001:10001"
+    user: "10004:10004"
     command: ["python", "/opt/townsquare/backup/create-backup.py"]
     environment:
       TOWNSQUARE_LEDGER_DB: /var/lib/townsquare/ledger.db
       TOWNSQUARE_REGISTRY_DB: /var/lib/registry/registry.db
       TOWNSQUARE_BACKUP_DIR: /var/backups/townsquare
       TOWNSQUARE_BACKUP_RECIPIENT_FILE: /run/secrets/backup_recipient
-      TOWNSQUARE_BACKUP_SIGNING_KEY_FILE: /run/secrets/backup_signing_key
     volumes:
       - type: bind
         source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
@@ -111,7 +133,7 @@ services:
       - type: bind
         source: ${TOWNSQUARE_BACKUP_DIR:?set encrypted backup destination}
         target: /var/backups/townsquare
-    secrets: [backup_recipient, backup_signing_key]
+    secrets: [backup_recipient]
     tmpfs: [/tmp:rw,noexec,nosuid,size=128m,mode=1777]
     networks: [app]
 
@@ -124,7 +146,7 @@ secrets:
   cursor_signing_key: {file: ${TOWNSQUARE_CURSOR_SIGNING_KEY_FILE:?set secret path}}
   receipt_hash_key: {file: ${TOWNSQUARE_RECEIPT_HASH_KEY_FILE:?set secret path}}
   viewer_api_token: {file: ${TOWNSQUARE_VIEWER_API_TOKEN_FILE:?set secret path}}
+  registry_api_token: {file: ${TOWNSQUARE_REGISTRY_API_TOKEN_FILE:?set secret path}}
   backup_recipient: {file: ${TOWNSQUARE_BACKUP_RECIPIENT_FILE:?set secret path}}
-  backup_signing_key: {file: ${TOWNSQUARE_BACKUP_SIGNING_KEY_FILE:?set secret path}}
 configs:
   context_manifest: {file: ${TOWNSQUARE_CONTEXT_MANIFEST:?set immutable manifest file}}

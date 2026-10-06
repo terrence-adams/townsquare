@@ -12,16 +12,20 @@ def main():
  if len(sys.argv)!=3: raise SystemExit("usage: restore-drill.py BACKUP_DIR EMPTY_DRILL_DIR")
  source=Path(sys.argv[1]).resolve(); drill=Path(sys.argv[2]).resolve()
  if not source.is_dir() or (not drill.is_dir()) or any(drill.iterdir()): raise SystemExit("backup must exist and drill directory must exist and be empty")
- key=os.environ.get("TOWNSQUARE_BACKUP_RECIPIENT_FILE"); public=os.environ.get("TOWNSQUARE_BACKUP_SIGNING_PUBLIC_KEY_FILE")
- if not key or not public: raise SystemExit("recipient and manifest public key files are required")
- run(["minisign","-Vm",str(source/'manifest.json'),"-p",public,"-x",str(source/'manifest.json.minisig')])
- for item in json.loads((source/'manifest.json').read_text())["domains"]:
+ key=os.environ.get("TOWNSQUARE_BACKUP_IDENTITY_FILE"); public=os.environ.get("TOWNSQUARE_BACKUP_SIGNING_PUBLIC_KEY_FILE")
+ checkpoint=source/'checkpoint.request.json'; signature=source/'checkpoint.request.minisig'
+ if not key or not public or not checkpoint.is_file() or not signature.is_file(): raise SystemExit("identity, public key, and externally signed checkpoint are required")
+ run(["minisign","-Vm",str(checkpoint),"-p",public,"-x",str(signature)])
+ manifest=json.loads((source/'manifest.json').read_text())
+ if json.loads(checkpoint.read_text()).get('manifest_sha256') != sha(source/'manifest.json'): raise SystemExit('external checkpoint does not bind this manifest')
+ for item in manifest["domains"]:
   cipher=source/item['ciphertext']
   if sha(cipher)!=item['ciphertext_sha256']: raise SystemExit(f"ciphertext hash mismatch: {cipher.name}")
   output=drill/f"{item['domain']}.db"; run(["age","--decrypt","--identity",key,"--output",str(output),str(cipher)])
+  if sha(output)!=item['plaintext_sha256']: raise SystemExit(f"plaintext hash mismatch: {item['domain']}")
   db=sqlite3.connect(output)
   try:
-   if db.execute("PRAGMA integrity_check").fetchone()[0]!="ok": raise SystemExit(f"integrity failure: {item['domain']}")
+   if db.execute("PRAGMA integrity_check").fetchone()[0]!="ok" or db.execute("PRAGMA foreign_key_check").fetchall(): raise SystemExit(f"integrity failure: {item['domain']}")
   finally: db.close()
  print("restore drill verified; no live data was changed")
 if __name__=='__main__': main()

@@ -21,11 +21,11 @@ def snap(src,dst):
  finally: b.close(); a.close()
 def main():
  root=need('TOWNSQUARE_BACKUP_DIR').resolve(); root.mkdir(parents=True,exist_ok=True); out=root/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'); out.mkdir(mode=0o700)
- recipient=need('TOWNSQUARE_BACKUP_RECIPIENT_FILE'); signing=need('TOWNSQUARE_BACKUP_SIGNING_KEY_FILE'); domains={'ledger':need('TOWNSQUARE_LEDGER_DB'),'registry':need('TOWNSQUARE_REGISTRY_DB')}; rows=[]
+ recipient=need('TOWNSQUARE_BACKUP_RECIPIENT_FILE'); domains={'ledger':need('TOWNSQUARE_LEDGER_DB'),'registry':need('TOWNSQUARE_REGISTRY_DB')}; rows=[]
  with tempfile.TemporaryDirectory(prefix='townsquare-backup-') as t:
   t=Path(t)
   for name,src in domains.items():
    plain=t/f'{name}.db'; crypt=out/f'{name}.db.age'; snap(src,plain); run(['age','--encrypt','--recipient-file',str(recipient),'--output',str(crypt),str(plain)]); rows.append({'domain':name,'ciphertext':crypt.name,'ciphertext_sha256':sha(crypt),'source_name':src.name})
-  manifest={'schema':1,'created_utc':out.name,'domains':rows,'external_checkpoint':'PENDING_OPERATOR_PUBLICATION'}; mp=out/'manifest.json'; mp.write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n'); run(['minisign','-S','-s',str(signing),'-m',str(mp),'-x',str(out/'manifest.json.minisig')])
+  manifest={'schema':2,'created_utc':out.name,'domains':rows,'external_checkpoint':'REQUIRED_EXTERNAL_SIGNATURE'}; mp=out/'manifest.json'; mp.write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n'); (out/'checkpoint.request.json').write_text(json.dumps({'manifest_sha256':sha(mp)},sort_keys=True)+'\n')
  print(json.dumps({'backup':str(out),'checkpoint_sha256':sha(out/'manifest.json')},sort_keys=True))
 if __name__=='__main__': main()
