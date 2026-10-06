@@ -10,23 +10,9 @@ from __future__ import annotations
 from registrar.tests.mvp_fixture import MANIFEST, NativeLedgerCase, OPENING
 
 
-ADOPTED_AUTHORITY = {
-    "authority_ref": "governance-record-1",
-    "digest": "d" * 64,
-    "status": "ADOPTED",
-    "effective": True,
-    "verified": True,
-    "capabilities": {
-        "writer-a": {"request:open", "request:work", "request:resolve"},
-        "writer-b": {"request:work", "request:block", "request:resolve", "request:cancel"},
-        "operator": {"request:cancel", "request:archive"},
-    },
-}
-
-
 def governed_manifest(**changes):
-    """Return a shape-valid manifest with an external adopted authority."""
-    return {**MANIFEST, "governance_authority": {**ADOPTED_AUTHORITY, **changes}}
+    """Mounted context stays non-authoritative even when it carries flags."""
+    return {**MANIFEST, "governance_authority": {"status": "CANDIDATE", **changes}}
 
 
 class GovernedNativeWriteTests(NativeLedgerCase):
@@ -37,11 +23,12 @@ class GovernedNativeWriteTests(NativeLedgerCase):
 
     def install_controlled_lifecycle(self):
         self.ledger.set_context_manifest(governed_manifest())
+        self.ledger.set_authority_proof(self.authority_proof(governed_manifest()))
 
     def governed_receipt(self, principal, payload, revision):
         return self.receipt(
             principal,
-            self.REQUEST_ACTIONS.get(str(payload.get("state", "")).upper(), "request:invalid"),
+            self.request_action(payload),
             payload["thread_id"],
             revision,
         )
@@ -94,15 +81,16 @@ class GovernedNativeWriteTests(NativeLedgerCase):
 
     def test_gov_rb_03_only_resolved_adopted_effective_verified_authority_enables_writes(self):
         rejected = (
-            {"status": "CANDIDATE"},
-            {"status": "ADOPTED", "effective": False},
-            {"status": "WITHDRAWN"},
-            {"status": "SUPERSEDED"},
-            {"status": "ADOPTED", "verified": False},
+            {"decision": "CANDIDATE"},
+            {"revoked": True},
+            {"status_history_complete": False},
+            {"authority_watermark": 0},
+            {"effective_from": "2999-01-01T00:00:00Z"},
         )
         for index, change in enumerate(rejected):
             with self.subTest(change=change):
                 self.ledger.set_context_manifest(governed_manifest(**change))
+                self.ledger.set_authority_proof(self.authority_proof(governed_manifest(**change), **change))
                 payload = {**OPENING, "thread_id": f"authority-{index}"}
                 receipt = self.receipt(thread_id=payload["thread_id"])
                 self.assert_code("context_required", self.ledger.post_event, "writer-a", f"authority-{index}", receipt, "new", payload)

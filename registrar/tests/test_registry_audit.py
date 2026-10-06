@@ -1,27 +1,28 @@
-"""Registry-to-ledger audit adapter contracts."""
-from __future__ import annotations
+"""Ledger-side Registry boundary contracts.
 
-import hashlib
+Roster mutation, Registry history, and Registry delivery outbox belong to the
+separate Registry service.  These tests deliberately reject the removed
+same-database convenience API; separate-service integration owns the positive
+audit-ingest/retry/reconciliation behavior.
+"""
+from __future__ import annotations
 
 from registrar.tests.mvp_fixture import NativeLedgerCase
 
 
 class RegistryAuditTests(NativeLedgerCase):
-    def test_mvp_reg_01_registry_retirement_preserves_history(self):
-        self.ledger.registry_mutate("registry-admin", "register", {"agent_id": "a"})
-        self.ledger.registry_mutate("registry-admin", "retire", {"agent_id": "a"})
-        self.assertEqual("retired", self.ledger.registry_query("a")["status"])
-        self.assertTrue(self.ledger.registry_history("a"))
+    def test_mvp_reg_01_embedded_registry_mutation_is_inert(self):
+        self.assert_code(
+            "forbidden", self.ledger.registry_mutate,
+            "registry-admin", "register", {"agent_id": "a"},
+        )
 
-    def test_mvp_reg_02_mutation_and_hashed_uuid_outbox_are_atomic_and_idempotent(self):
-        result = self.ledger.registry_mutate("registry-admin", "register", {"agent_id": "a"})
-        outbox = self.ledger.registry_outbox(result["event_uuid"])
-        self.assertEqual(result["event_uuid"], outbox["event_uuid"])
-        self.assertEqual(hashlib.sha256(outbox["canonical_payload"].encode()).hexdigest(), outbox["payload_sha256"])
-        self.assertEqual(result, self.ledger.registry_mutate("registry-admin", "register", {"agent_id": "a"}, event_uuid=result["event_uuid"]))
-
-    def test_mvp_reg_03_crash_after_registry_commit_reconciles_one_ledger_audit_without_cross_rollback(self):
-        result = self.ledger.registry_mutate("registry-admin", "register", {"agent_id": "a"}, deliver=False)
-        self.assertEqual([], self.ledger.registry_audit_events(result["event_uuid"]))
-        self.ledger.reconcile_registry_outbox()
-        self.assertEqual(1, len(self.ledger.registry_audit_events(result["event_uuid"])))
+    def test_mvp_reg_02_embedded_registry_queries_and_reconciliation_are_inert(self):
+        for method, arguments in (
+            (self.ledger.registry_query, ("a",)),
+            (self.ledger.registry_history, ("a",)),
+            (self.ledger.registry_outbox, ("event",)),
+        ):
+            with self.subTest(method=method.__name__):
+                self.assert_code("forbidden", method, *arguments)
+        self.assert_code("forbidden", self.ledger.reconcile_registry_outbox)

@@ -7,8 +7,8 @@ Registrar.posts() directly and never spins up the real FastAPI app. That is
 exactly how F1 (a bug in main.py, not service.py) got past the first
 review round. These tests close that gap.
 
-registrar.app.main performs its startup work -- runtime-mode check, DB
-connect/migrate, and (as of this fix pass) the cursor-signing-key startup
+registrar.app.main performs its startup work -- runtime-mode check, schema
+verification (after the canonical migrator), and the cursor-signing-key startup
 probe added for F1 -- as *module-level* side effects at import time, the
 same convention ensure_runtime_mode already used before this change.
 Exercising different key-provisioning scenarios therefore means

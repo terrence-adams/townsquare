@@ -9,11 +9,18 @@ rather than an import/dependency failure.
 from __future__ import annotations
 
 import gc
+import hashlib
+import hmac
+import os
+import secrets
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from registrar.app.db import connect, migrate
+from registrar.app.service import canonical
 
 
 MANIFEST = {
@@ -22,25 +29,6 @@ MANIFEST = {
     "governance": [{"ref": "DOCTRINE.md", "sha256": "b" * 64}],
     "required_items": [{"ref": "work-order", "sha256": "c" * 64}],
     "pinned": True,
-    # This is resolution evidence supplied to the test service, not an
-    # authority claim made by the mounted manifest itself.  Individual tests
-    # replace status/effective/verification facts to prove fail-closed gates.
-    "governance_authority": {
-        "authority_ref": "governance-record-1",
-        "digest": "d" * 64,
-        "status": "ADOPTED",
-        "effective": True,
-        "verified": True,
-        "capabilities": {
-            # Request lifecycle authority is deliberately granular.  These
-            # direct-service fixtures must not keep a legacy ``work:*``
-            # compatibility grant that could mask a governed-write bypass.
-            "writer-a": {"request:open", "request:work", "request:resolve", "request:accept"},
-            "writer-b": {"request:work", "request:resolve", "request:accept"},
-            "reviewer": {"request:accept"},
-            "operator": {"request:cancel", "request:archive"},
-        },
-    },
 }
 
 OPENING = {
@@ -57,27 +45,50 @@ OPENING = {
     "governed_refs": ["DOCTRINE.md"],
 }
 
-GOVERNED_MANIFEST = {
-    **MANIFEST,
-    "governance_authority": {
-        "authority_ref": "governance-record-1",
-        "digest": "d" * 64,
-        "status": "ADOPTED",
-        "effective": True,
-        "verified": True,
-        "capabilities": {
-            "writer-a": {"request:open", "request:work", "request:resolve"},
-            "writer-b": {"request:work", "request:block", "request:resolve", "request:cancel"},
-            "reviewer": {"request:accept"},
-            "operator": {"request:cancel", "request:archive"},
-        },
-    },
-}
+GOVERNED_MANIFEST = dict(MANIFEST)
 
 REQUEST_ACTIONS = {
     "OPEN": "request:open", "WORKING": "request:work", "BLOCKED": "request:block",
     "RESOLVED": "request:resolve", "CLOSED": "request:accept", "CANCELLED": "request:cancel",
 }
+
+TEST_AUTHORITY_CAPABILITIES = {
+    "writer-a": ["request:open", "request:work", "request:resolve", "request:accept"],
+    "writer-b": ["request:work", "request:block", "request:resolve", "request:cancel"],
+    "reviewer": ["request:accept"],
+    "operator": ["request:cancel", "request:archive"],
+}
+
+
+def authority_proof(manifest, key, key_id, **changes):
+    """Create resolver evidence external to the mounted context manifest."""
+    proof = {
+        "schema": "townsquare-authority-proof-v1",
+        "resolver_key_id": key_id,
+        "adoption_event_id": "test-adoption-event-1",
+        "manifest_id": manifest["id"],
+        "manifest_sha256": manifest["sha256"],
+        "manifest_content_sha256": hashlib.sha256(canonical(
+            {name: value for name, value in manifest.items() if name != "sha256"}
+        ).encode("utf-8")).hexdigest(),
+        "decision": "ADOPT",
+        "revoked": False,
+        "status_history_complete": True,
+        "authority_sequence": 1,
+        "authority_watermark": 1,
+        "revocation_checked_through": 1,
+        "effective_from": "2020-01-01T00:00:00Z",
+        "effective_until": None,
+        "scope": {
+            "capabilities": deepcopy(TEST_AUTHORITY_CAPABILITIES),
+            "actions": sorted({action for actions in TEST_AUTHORITY_CAPABILITIES.values() for action in actions}),
+            "targets": ["*"],
+        },
+    }
+    proof.update(changes)
+    material = {name: value for name, value in proof.items() if name != "signature"}
+    proof["signature"] = hmac.new(key, canonical(material).encode("utf-8"), hashlib.sha256).hexdigest()
+    return proof
 
 
 class NativeLedgerCase(unittest.TestCase):
@@ -86,6 +97,26 @@ class NativeLedgerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.tmp.name) / "ledger.db")
+        self.receipt_key_path = Path(self.tmp.name) / "receipt-hash.key"
+        self.authority_key_path = Path(self.tmp.name) / "authority-resolver.key"
+        # Leave margin for production's whitespace trimming when a random
+        # byte happens to be a leading/trailing ASCII whitespace character.
+        self.receipt_key = secrets.token_bytes(64)
+        self.authority_key = secrets.token_bytes(64)
+        self.receipt_key_path.write_bytes(self.receipt_key)
+        self.authority_key_path.write_bytes(self.authority_key)
+        for path in (self.receipt_key_path, self.authority_key_path):
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        self._environment = patch.dict(os.environ, {
+            "TOWNSQUARE_RECEIPT_HASH_KEY_FILE": str(self.receipt_key_path),
+            "TOWNSQUARE_RECEIPT_HASH_KEY_ID": "test-receipt-key-v1",
+            "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_FILE": str(self.authority_key_path),
+            "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_ID": "test-authority-key-v1",
+        })
+        self._environment.start()
         self.db = connect(self.db_path)
         migrate(self.db)
         try:
@@ -97,14 +128,22 @@ class NativeLedgerCase(unittest.TestCase):
             gc.collect()
             self.tmp.cleanup()
             self.fail("MVP service missing: implement registrar.app.native_ledger.NativeLedger")
-        self.ledger = NativeLedger(self.db, context_manifest=MANIFEST)
+        self.ledger = NativeLedger(
+            self.db,
+            context_manifest=MANIFEST,
+            governance_authority=self.authority_proof(MANIFEST),
+        )
 
     def tearDown(self):
         self.db.close()
+        self._environment.stop()
         # Windows will retain SQLite WAL handles until cyclic frames are
         # collected after a failed setUp; release them before deleting temp DB.
         gc.collect()
         self.tmp.cleanup()
+
+    def authority_proof(self, manifest=MANIFEST, **changes):
+        return authority_proof(manifest, self.authority_key, "test-authority-key-v1", **changes)
 
     def bundle(self, principal="writer-a", action="request:open", thread_id="thread-alpha", revision="new"):
         return self.ledger.create_context_bundle(principal, action, thread_id, revision)
@@ -126,6 +165,8 @@ class NativeLedgerCase(unittest.TestCase):
         lifecycle event.  It therefore uses the capability for that carried
         state; it is not a seventh state or a coarse post permission.
         """
+        if str(payload.get("purpose", "")).upper() == "CORRECTION":
+            return "request:correct"
         return REQUEST_ACTIONS.get(str(payload.get("state", "")).upper(), "request:invalid")
 
     def post(self, payload=None, *, principal="writer-a", key="key-1", revision="new", receipt=None):

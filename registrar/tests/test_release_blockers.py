@@ -82,6 +82,12 @@ class ReleaseBlockerNativeContracts(NativeLedgerCase):
 
     def test_rb_life_04_correction_needs_its_own_capability_and_target_authority(self):
         self.ledger.set_context_manifest(GOVERNED_MANIFEST)
+        restricted_scope = self.authority_proof(GOVERNED_MANIFEST)["scope"]
+        # The authority recognizes correction as an action, but this actor is
+        # intentionally not granted that capability; auth must fail before a
+        # receipt mismatch can mask the cross-principal policy violation.
+        restricted_scope["actions"].append("request:correct")
+        self.ledger.set_authority_proof(self.authority_proof(GOVERNED_MANIFEST, scope=restricted_scope))
         first = self.post(key="correction-open")
         correction = {
             **OPENING,
@@ -92,7 +98,7 @@ class ReleaseBlockerNativeContracts(NativeLedgerCase):
         # The fixture deliberately grants writer-a request:open but not a
         # correction capability.  A correction must not return early after a
         # normal state-action check and bypass separate target authority.
-        receipt = self.receipt("writer-a", "request:open", "thread-alpha", first["event_id"])
+        receipt = self.receipt("writer-a", "request:correct", "thread-alpha", first["event_id"])
         self.assert_code(
             "forbidden", self.ledger.post_event,
             "writer-a", "correction-without-capability", receipt, first["event_id"], correction,
@@ -118,8 +124,22 @@ class ReleaseBlockerNativeContracts(NativeLedgerCase):
         # A manifest can name a candidate, but its own JSON flags must never
         # self-authorize writes without separately pinned authenticated
         # adoption bytes, signature, scope/window, revocation, and watermark.
-        receipt = self.receipt()
+        raw_manifest = {
+            **MANIFEST,
+            "governance_authority": {"decision": "ADOPT", "effective": True, "verified": True},
+        }
+        # This independently constructed facade has the same secure receipt
+        # key but receives no resolver proof.  Mounted JSON is only data.
+        bare = type(self.ledger)(
+            self.db, context_manifest=raw_manifest, governance_authority=None,
+        )
+        bundle = bare.create_context_bundle("writer-a", "request:open", "thread-alpha", "new")
+        for item in bundle["required_items"]:
+            bare.retrieve_context_item(bundle["bundle_id"], item["sha256"], principal="writer-a")
+        receipt = bare.acknowledge_context(
+            bundle["bundle_id"], "writer-a", [item["sha256"] for item in bundle["required_items"]],
+        )
         self.assert_code(
-            "context_required", self.ledger.post_event,
+            "context_required", bare.post_event,
             "writer-a", "mounted-authority-is-not-proof", receipt, "new", OPENING,
         )

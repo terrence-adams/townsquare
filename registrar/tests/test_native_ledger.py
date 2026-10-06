@@ -22,6 +22,12 @@ class NativeLedgerTests(NativeLedgerCase):
         first = self.post()
         self.assert_code("forbidden", self.ledger.update_content, first["event_id"], "changed")
         self.assert_code("forbidden", self.ledger.delete_event, first["event_id"])
+        # Corrections are independently authorized: they do not inherit the
+        # ordinary OPEN/WORKING action grant carried by the base fixture.
+        correction_scope = self.authority_proof()["scope"]
+        correction_scope["capabilities"]["writer-a"].append("request:correct")
+        correction_scope["actions"].append("request:correct")
+        self.ledger.set_authority_proof(self.authority_proof(scope=correction_scope))
         # A correction is purpose/reference metadata on a later immutable
         # event.  It does not invent CORRECTED as a seventh lifecycle state.
         correction = self.post({

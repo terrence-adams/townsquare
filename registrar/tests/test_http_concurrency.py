@@ -29,7 +29,7 @@ What this file builds (per the design doc's "New regression test category
 needed" section, items 1-5). Items 3, 4a, and the status-code assertions
 under lock/busy contention were originally HELD pending open rulings; all
 three rulings landed (Addendum B: B1 narrow exception-handler scope, B2
-`_migrate_at_boot()` replacing `_boot`, B3 status-code spec; jackie-chan's
+`_verify_schema_at_boot()` replacing import-time migration, B3 status-code spec; jackie-chan's
 review of `60ee5aa` confirmed the delivered code matches), so they are built
 here now, on top of `d9eb5a0`:
 
@@ -58,7 +58,7 @@ here now, on top of `d9eb5a0`:
       structural tripwire, now a strong assertion rather than one with a
       footnote: `registrar.app.main` has no module attribute that is a
       `sqlite3.Connection`, and the module does not import `connect` at all
-      (Addendum B2's `_migrate_at_boot()` made both unconditionally true,
+      (the canonical migrator plus `_verify_schema_at_boot()` make both unconditionally true,
       confirmed structurally in `60ee5aa` and re-verified by jackie-chan).
   4b. `WriteRouteCoroutineTripwireTests` -- every write route stays a
       coroutine function, converting Risk #1 (writers must never land on the
@@ -449,7 +449,7 @@ class NoModuleLevelConnectionTripwireTests(FreshAppCase):
     """Structural tripwire, design doc item 4 ("assert two concurrent
     requests never share a sqlite3.Connection identity / no module-level
     connection is reachable from handlers"), written now that Addendum B2's
-    `_migrate_at_boot()` replaced the old `del _boot` plan -- per B2's own
+    `_verify_schema_at_boot()` replaced import-time migration -- per B2's own
     consequence, this can be a strong structural assertion rather than one
     carrying an unexplained special case: `main.py` no longer has a
     module-level connection of any kind (open or closed), and it does not
@@ -467,13 +467,14 @@ class NoModuleLevelConnectionTripwireTests(FreshAppCase):
 
     def test_no_module_attribute_is_a_sqlite3_connection(self):
         offenders = [name for name, value in vars(self.main_module).items() if isinstance(value, sqlite3.Connection)]
-        self.assertEqual([], offenders, f"registrar.app.main has a module-level sqlite3.Connection attribute {offenders} -- this is exactly the shared/leaked-connection topology the fix removes; every connection must be opened and closed per-request (get_db) or per-boot (_migrate_at_boot), never bound at module scope where a handler could reach it")
+        self.assertEqual([], offenders, f"registrar.app.main has a module-level sqlite3.Connection attribute {offenders} -- this is exactly the shared/leaked-connection topology the fix removes; every connection must be opened and closed per-request (get_db), never bound at module scope where a handler could reach it")
 
     def test_main_module_does_not_import_connect(self):
         self.assertFalse(hasattr(self.main_module, "connect"), "registrar.app.main has a `connect` attribute -- main.py must only ever open a connection through db.py's `session()`, which always closes in a `finally`; importing `connect` directly reopens the possibility of an unclosed or module-scoped connection (Addendum B2)")
 
-    def test_no_boot_attribute_survives_import(self):
-        self.assertFalse(hasattr(self.main_module, "_boot"), "a module-level `_boot` name survived import -- Addendum B2 replaced the closed-but-still-bound `_boot` connection with a function-scoped `_migrate_at_boot()` specifically so no module attribute of this shape exists at all, closed or otherwise")
+    def test_boot_verifies_schema_without_running_ddl(self):
+        self.assertTrue(hasattr(self.main_module, "_verify_schema_at_boot"))
+        self.assertNotIn("migrate(", inspect.getsource(self.main_module))
 
 
 class RegistrarCallsWrappedInInvokeTripwireTests(unittest.TestCase):

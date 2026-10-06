@@ -15,18 +15,19 @@ as an implicit namespace package, and running from inside tests/ gives a
 spurious ModuleNotFoundError (noted in OPERATIONS.md).
 """
 from __future__ import annotations
-import os,sys,tempfile,unittest
+import json,os,sys,tempfile,unittest
 from pathlib import Path
 
-_ENV_KEYS=("REGISTRAR_ENV","REGISTRAR_DB","REGISTRAR_CURSOR_KEY_FILE","REGISTRAR_CURSOR_KEY_ID")
+_ENV_KEYS=(
+    "REGISTRAR_ENV", "REGISTRAR_DB", "REGISTRAR_CURSOR_KEY_FILE", "REGISTRAR_CURSOR_KEY_ID",
+    "TOWNSQUARE_RECEIPT_HASH_KEY_FILE", "TOWNSQUARE_RECEIPT_HASH_KEY_ID",
+    "TOWNSQUARE_CONTEXT_MANIFEST", "TOWNSQUARE_GOVERNANCE_AUTHORITY",
+    "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_FILE", "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_ID",
+)
 
 
 class FreshAppCase(unittest.TestCase):
-    """Base class: boot a fresh registrar.app.main under a controlled,
-    isolated environment and tear it back down afterward. Each test gets
-    its own temp SQLite DB -- main.py migrates at import time, and the
-    schema/rows that produces are process-global state that would otherwise
-    leak between scenarios."""
+    """Boot a fresh app against a schema prepared by the one canonical migrator."""
 
     def _key_file(self,data=b"unit-test-http-cursor-signing-key-0123456789"):
         """A standalone temp key file (independent of _boot/self.tmp, so it
@@ -37,7 +38,7 @@ class FreshAppCase(unittest.TestCase):
         self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
         return path
 
-    def _boot(self,cursor_key_file=None,cursor_key_id=None):
+    def _boot(self,cursor_key_file=None,cursor_key_id=None,*,context_manifest=None,authority_proof=None):
         self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
         saved={k:os.environ.get(k) for k in _ENV_KEYS}
         def restore():
@@ -47,19 +48,40 @@ class FreshAppCase(unittest.TestCase):
         self.addCleanup(restore)
         os.environ["REGISTRAR_ENV"]="development"
         os.environ["REGISTRAR_DB"]=str(Path(self.tmp.name)/"registrar.db")
+        receipt_key=self._key_file(b"unit-test-http-receipt-hash-key-0123456789-abcdef")
+        os.environ["TOWNSQUARE_RECEIPT_HASH_KEY_FILE"]=receipt_key
+        os.environ["TOWNSQUARE_RECEIPT_HASH_KEY_ID"]="http-test-receipt-key-v1"
         if cursor_key_file is None: os.environ.pop("REGISTRAR_CURSOR_KEY_FILE",None)
         else: os.environ["REGISTRAR_CURSOR_KEY_FILE"]=cursor_key_file
         if cursor_key_id is None: os.environ.pop("REGISTRAR_CURSOR_KEY_ID",None)
         else: os.environ["REGISTRAR_CURSOR_KEY_ID"]=cursor_key_id
+        if context_manifest is None:
+            os.environ.pop("TOWNSQUARE_CONTEXT_MANIFEST",None)
+        else:
+            manifest_path=Path(self.tmp.name)/"context-manifest.json"
+            manifest_path.write_text(json.dumps(context_manifest),encoding="utf-8")
+            os.environ["TOWNSQUARE_CONTEXT_MANIFEST"]=str(manifest_path)
+        if authority_proof is None:
+            os.environ.pop("TOWNSQUARE_GOVERNANCE_AUTHORITY",None)
+        else:
+            proof_path=Path(self.tmp.name)/"authority-proof.json"
+            proof_path.write_text(json.dumps(authority_proof),encoding="utf-8")
+            os.environ["TOWNSQUARE_GOVERNANCE_AUTHORITY"]=str(proof_path)
+        # The application is a schema verifier only.  Run the canonical
+        # migrator here before importing main so HTTP tests never rely on
+        # import-time DDL or race a real deployment migrator.
+        from registrar.app.db import connect,migrate
+        bootstrap=connect(os.environ["REGISTRAR_DB"])
+        try: migrate(bootstrap)
+        finally: bootstrap.close()
         sys.modules.pop("registrar.app.main",None)
         self.addCleanup(sys.modules.pop,"registrar.app.main",None)
-        # NOTE: main.py no longer keeps a connection past import -- it
-        # migrates on a boot connection it closes on the same line, and every
-        # request-serving connection is opened and closed by the per-request
-        # `get_db` dependency (docs/town-registrar-connection-concurrency.md).
+        # NOTE: main.py performs no DDL at import.  It only verifies the
+        # schema prepared above, and every request-serving connection is
+        # opened and closed by the per-request `get_db` dependency.
         # So there is nothing for this harness to close afterward, and a
         # startup probe raising below (e.g. ensure_cursor_signing_key_at_startup,
-        # which runs after the migration) no longer orphans an open
+        # which runs after schema verification) no longer orphans an open
         # sqlite3.Connection in the exception's traceback. The `gc.collect()`
         # calls in the startup-probe tests are kept anyway: they are harmless,
         # and the Windows open-file-lock knowledge they encode -- Windows,

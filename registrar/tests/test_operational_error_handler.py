@@ -5,7 +5,7 @@ ip-man found in Addendum C3 of
 docs/town-registrar-connection-concurrency.md: no committed test asserted
 the handler exists or behaves correctly against the real app. The existing
 structural tripwires in `test_http_concurrency.py` cover async write
-routes, module-level connections, the `connect` import, `_migrate_at_boot`,
+routes, module-level connections, the `connect` import, `_verify_schema_at_boot`,
 and the `invoke()`-wrapping AST check -- nothing there touches the handler
 itself. Deleting the `@app.exception_handler(...)` decorator today passes
 the entire suite.

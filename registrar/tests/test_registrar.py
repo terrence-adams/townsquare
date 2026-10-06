@@ -370,12 +370,18 @@ class RegistrarTests(unittest.TestCase):
         try:
             import sys,gc
             dbpath=str(Path(tmp3.name)/"auth.db")
+            prepared=connect(dbpath)
+            try:
+                migrate(prepared)
+                schema_before=[row[0] for row in prepared.execute("SELECT version FROM schema_migrations ORDER BY version")]
+            finally: prepared.close()
             old_argv=sys.argv
             sys.argv=["auth","--db",dbpath,"--principal","importer-bot","--scope","admin:import-stage"]
             try: auth.main()
             finally: sys.argv=old_argv
             gc.collect()  # release main()'s own internal db connection (Windows file lock) before cleanup
             db3=connect(dbpath)
+            self.assertEqual(schema_before, [row[0] for row in db3.execute("SELECT version FROM schema_migrations ORDER BY version")])
             scopes=set(db3.execute("SELECT scopes FROM tokens WHERE principal_id='importer-bot'").fetchone()[0].split())
             self.assertEqual({"admin:import-stage"},scopes)
             self.assertNotIn("post:write",scopes)
@@ -395,12 +401,18 @@ class RegistrarTests(unittest.TestCase):
         try:
             import sys,gc
             dbpath=str(Path(tmp4.name)/"auth2.db")
+            prepared=connect(dbpath)
+            try:
+                migrate(prepared)
+                schema_before=[row[0] for row in prepared.execute("SELECT version FROM schema_migrations ORDER BY version")]
+            finally: prepared.close()
             old_argv=sys.argv
             sys.argv=["auth","--db",dbpath,"--principal","legacy-bot"]
             try: auth.main()
             finally: sys.argv=old_argv
             gc.collect()
             db4=connect(dbpath)
+            self.assertEqual(schema_before, [row[0] for row in db4.execute("SELECT version FROM schema_migrations ORDER BY version")])
             scopes=set(db4.execute("SELECT scopes FROM tokens WHERE principal_id='legacy-bot'").fetchone()[0].split())
             self.assertEqual({"post:write"},scopes)
             db4.close(); gc.collect()
