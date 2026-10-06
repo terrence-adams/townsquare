@@ -54,6 +54,28 @@ OPENING = {
     "governed_refs": ["DOCTRINE.md"],
 }
 
+GOVERNED_MANIFEST = {
+    **MANIFEST,
+    "governance_authority": {
+        "authority_ref": "governance-record-1",
+        "digest": "d" * 64,
+        "status": "ADOPTED",
+        "effective": True,
+        "verified": True,
+        "capabilities": {
+            "writer-a": {"request:open", "request:work", "request:resolve"},
+            "writer-b": {"request:work", "request:block", "request:resolve", "request:cancel"},
+            "reviewer": {"request:accept"},
+            "operator": {"request:cancel", "request:archive"},
+        },
+    },
+}
+
+REQUEST_ACTIONS = {
+    "OPEN": "request:open", "WORKING": "request:work", "BLOCKED": "request:block",
+    "RESOLVED": "request:resolve", "CLOSED": "request:accept", "CANCELLED": "request:cancel",
+}
+
 
 class NativeLedgerCase(unittest.TestCase):
     """An isolated database and a direct handle to the required MVP facade."""
@@ -95,6 +117,13 @@ class NativeLedgerCase(unittest.TestCase):
 
     def post(self, payload=None, *, principal="writer-a", key="key-1", revision="new", receipt=None):
         return self.ledger.post_event(principal, key, receipt or self.receipt(principal, "post", (payload or OPENING)["thread_id"], revision), revision, payload or dict(OPENING))
+
+    def governed_receipt(self, principal, payload, revision):
+        action = "request:correct" if str(payload.get("purpose", "")).upper() == "CORRECTION" else REQUEST_ACTIONS.get(str(payload.get("state", "")).upper(), "request:invalid")
+        return self.receipt(principal, action, payload["thread_id"], revision)
+
+    def governed_post(self, payload, *, principal="writer-a", key="governed", revision="new", receipt=None):
+        return self.ledger.post_event(principal, key, receipt or self.governed_receipt(principal, payload, revision), revision, payload)
 
     def seed_legacy_import(self):
         """Create an actual historical projection via its supported importer.

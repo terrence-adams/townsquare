@@ -1,30 +1,33 @@
 """Lifecycle, archive, and stop durability acceptance tests."""
 from __future__ import annotations
 
-from registrar.tests.mvp_fixture import NativeLedgerCase, OPENING
+from registrar.tests.mvp_fixture import GOVERNED_MANIFEST, NativeLedgerCase, OPENING
 
 
 class LifecycleTests(NativeLedgerCase):
+    def governed_step(self, label, payload, **kwargs):
+        try:
+            return self.governed_post(payload, **kwargs)
+        except Exception as exc:
+            self.fail(f"{label} must satisfy the controlled six-state lifecycle; got {getattr(exc, 'code', type(exc).__name__)}: {exc}")
+
     def test_mvp_arc_01_archive_is_logical_and_explicitly_readable(self):
-        opening = self.post()
-        claimed = self.post(
-            {**OPENING, "state": "CLAIMED"},
-            principal="writer-b", key="archive-claim", revision=opening["event_id"],
+        self.ledger.set_context_manifest(GOVERNED_MANIFEST)
+        opening = self.governed_step("OPEN", dict(OPENING), key="archive-open")
+        working = self.governed_step("WORKING",
+            {**OPENING, "state": "WORKING"},
+            principal="writer-b", key="archive-work", revision=opening["event_id"],
         )
-        started = self.post(
-            {**OPENING, "state": "IN_PROGRESS"},
-            principal="writer-b", key="archive-start", revision=claimed["event_id"],
-        )
-        resolved = self.post(
+        resolved = self.governed_step("RESOLVED",
             {**OPENING, "state": "RESOLVED", "evidence_refs": ["archive-evidence"]},
-            principal="writer-b", key="archive-resolve", revision=started["event_id"],
+            principal="writer-b", key="archive-resolve", revision=working["event_id"],
         )
-        closed = self.post(
+        closed = self.governed_step("CLOSED",
             {**OPENING, "state": "CLOSED", "accepted_by": "reviewer", "criterion_dispositions": {"criterion-1": "accepted"}},
             principal="reviewer", key="archive-accept", revision=resolved["event_id"],
         )
         archive_receipt = self.receipt(
-            principal="operator", action="archive", thread_id="thread-alpha", revision=closed["event_id"],
+            principal="operator", action="request:archive", thread_id="thread-alpha", revision=closed["event_id"],
         )
         archive = self.ledger.archive_thread(
             "operator", "thread-alpha", "completed",
