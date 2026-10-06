@@ -2,8 +2,12 @@ CREATE TABLE registry_migrations(version INTEGER PRIMARY KEY, applied_utc TEXT N
 CREATE TABLE agents(agent_id TEXT PRIMARY KEY, body_json TEXT NOT NULL, revision INTEGER NOT NULL, active INTEGER NOT NULL, updated_utc TEXT NOT NULL);
 CREATE TABLE requests(principal TEXT NOT NULL, idem_key TEXT NOT NULL, request_hash TEXT NOT NULL, response_json TEXT NOT NULL, PRIMARY KEY(principal,idem_key));
 CREATE TABLE journal(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, agent_id TEXT NOT NULL, action TEXT NOT NULL, body_json TEXT NOT NULL, committed_utc TEXT NOT NULL);
-CREATE TABLE audit_outbox(event_id TEXT PRIMARY KEY REFERENCES journal(event_id), attempts INTEGER NOT NULL DEFAULT 0, delivered_utc TEXT, last_error TEXT, lease_owner TEXT, lease_until TEXT);
+CREATE TABLE audit_outbox(event_id TEXT PRIMARY KEY REFERENCES journal(event_id), attempts INTEGER NOT NULL DEFAULT 0, delivered_utc TEXT, last_error TEXT);
+INSERT INTO registry_migrations VALUES(1,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+ALTER TABLE audit_outbox ADD COLUMN lease_owner TEXT;
+ALTER TABLE audit_outbox ADD COLUMN lease_until TEXT;
 CREATE TRIGGER journal_no_update BEFORE UPDATE ON journal BEGIN SELECT RAISE(ABORT,'journal is append-only'); END;
 CREATE TRIGGER journal_no_delete BEFORE DELETE ON journal BEGIN SELECT RAISE(ABORT,'journal is append-only'); END;
 CREATE TRIGGER audit_outbox_no_delete BEFORE DELETE ON audit_outbox BEGIN SELECT RAISE(ABORT,'outbox is append-only'); END;
-INSERT INTO registry_migrations VALUES(1,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+CREATE TRIGGER audit_outbox_lease_guard BEFORE UPDATE OF lease_owner,lease_until ON audit_outbox WHEN NEW.delivered_utc IS NOT NULL BEGIN SELECT RAISE(ABORT,'delivered outbox cannot be leased'); END;
+INSERT INTO registry_migrations VALUES(2,strftime('%Y-%m-%dT%H:%M:%SZ','now'));

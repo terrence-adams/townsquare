@@ -15,10 +15,10 @@ LEDGER_AUDIT_TOKEN_FILE=os.environ.get("REGISTRY_LEDGER_AUDIT_TOKEN_FILE","/run/
 LEDGER_AUDIT_URL="http://ledger:8790/v1/native/registry-audit-events"
 LEDGER_AUDIT_TIMEOUT_SECONDS=3
 LEDGER_READINESS_URL="http://ledger:8790/health/ready"
-LEDGER_READINESS_TOKEN_FILE=os.environ.get("REGISTRY_LEDGER_READINESS_TOKEN_FILE","/run/secrets/ledger_registry_readiness_token")
+LEDGER_READINESS_TOKEN_FILE=os.environ.get("LEDGER_READINESS_TOKEN_FILE","/run/secrets/registry_ledger_readiness_token")
 def connect():
  d=sqlite3.connect(DB,timeout=5,isolation_level=None); d.row_factory=sqlite3.Row; d.execute("PRAGMA foreign_keys=ON"); d.execute("PRAGMA journal_mode=WAL"); d.execute("PRAGMA synchronous=FULL"); d.execute("PRAGMA busy_timeout=5000"); return d
-SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=1; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
+SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
 def compatible():
  if os.environ.get('REGISTRY_SERVICE_ID',SERVICE_ID)!=SERVICE_ID:return False
  if os.environ.get('REGISTRY_SCHEMA_HEAD',str(SCHEMA_VERSION))!=str(SCHEMA_VERSION):return False
@@ -35,7 +35,7 @@ def ledger_audit_token():
  if not value: raise RuntimeError('registry audit credential is empty')
  return value
 def ledger_readiness_token():
- value=Path(os.environ.get('REGISTRY_LEDGER_READINESS_TOKEN_FILE','/run/secrets/registry_ledger_readiness_token')).read_text(encoding='utf-8').strip()
+ value=Path(os.environ.get('REGISTRY_PEER_READINESS_TOKEN_FILE','/run/secrets/ledger_registry_readiness_token')).read_text(encoding='utf-8').strip()
  if not value: raise RuntimeError('registry readiness credential is empty')
  return value
 def peer_ready():
