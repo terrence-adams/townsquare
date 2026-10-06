@@ -1,0 +1,57 @@
+"""MVP-CMP/GOV tests: documented context is a server-enforced precondition."""
+from __future__ import annotations
+
+from registrar.tests.mvp_fixture import NativeLedgerCase, OPENING
+
+
+class ContextGateTests(NativeLedgerCase):
+    def test_mvp_cmp_01_missing_or_unpinned_manifest_blocks_writes(self):
+        self.ledger.set_context_manifest(None)
+        self.assert_code("context_required", self.ledger.post_event, "writer-a", "none", "receipt", "new", OPENING)
+        self.ledger.set_context_manifest({"id": "mutable", "pinned": False})
+        self.assert_code("context_required", self.ledger.post_event, "writer-a", "unpinned", "receipt", "new", OPENING)
+
+    def test_mvp_cmp_02_stale_revision_returns_machine_readable_requirements(self):
+        first = self.post()
+        receipt = self.receipt(revision="new")
+        self.assert_code("conflict", self.ledger.post_event, "writer-a", "stale", receipt, "new", {**OPENING, "state": "WORKING"})
+
+    def test_mvp_cmp_03_receipt_binds_every_context_item_principal_and_expiry(self):
+        bundle = self.bundle()
+        self.assert_code("context_required", self.ledger.acknowledge_context, bundle["bundle_id"], "writer-a", [])
+        receipt = self.receipt()
+        self.assertEqual("writer-a", self.ledger.receipt_record(receipt)["principal"])
+        self.assertIn("expires_at", self.ledger.receipt_record(receipt))
+
+    def test_mvp_cmp_04_resolution_and_closure_require_evidence_and_dispositions(self):
+        first = self.post()
+        self.assert_code("context_required", self.post, {**OPENING, "state": "RESOLVED", "evidence_refs": [], "criteria_refs": []}, key="no-evidence", revision=first["event_id"])
+        self.assert_code("invalid_transition", self.post, {**OPENING, "state": "CLOSED"}, key="no-disposition", revision=first["event_id"])
+
+    def test_mvp_cmp_05_context_audit_is_reconstructable(self):
+        receipt = self.receipt(); self.post(receipt=receipt)
+        kinds = {row["kind"] for row in self.ledger.context_audit()}
+        self.assertTrue({"bundle_issued", "item_retrieved", "receipt_issued", "receipt_consumed"} <= kinds)
+
+    def test_mvp_cmp_06_operator_stop_is_immediate_and_agents_cannot_set_it(self):
+        self.assert_code("forbidden", self.ledger.set_operator_stop, "writer-a", True, "no")
+        stopped = self.ledger.set_operator_stop("operator", True, "hold")
+        self.assertTrue(stopped["active"])
+        self.assert_code("stopped", self.post)
+
+    def test_mvp_cmp_07_api_surfaces_attestation_limit(self):
+        bundle = self.bundle()
+        self.assertIn("does_not_prove_comprehension", bundle["limitations"])
+
+    def test_mvp_cmp_08_receipt_consumption_is_one_time_and_rolls_back_with_write(self):
+        receipt = self.receipt()
+        self.ledger.inject_failure("before_commit")
+        self.assert_code("unavailable", self.post, receipt=receipt)
+        self.assertIsNone(self.ledger.receipt_consumption(receipt))
+        self.ledger.clear_failure(); self.post(receipt=receipt)
+        self.assertIsNotNone(self.ledger.receipt_consumption(receipt))
+
+    def test_mvp_gov_01_manifest_references_governance_without_defining_statement(self):
+        bundle = self.bundle()
+        self.assertIn("governance", bundle)
+        self.assertNotIn("Statement", self.ledger.required_kinds())
