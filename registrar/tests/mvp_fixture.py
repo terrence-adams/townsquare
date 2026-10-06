@@ -22,6 +22,21 @@ MANIFEST = {
     "governance": [{"ref": "DOCTRINE.md", "sha256": "b" * 64}],
     "required_items": [{"ref": "work-order", "sha256": "c" * 64}],
     "pinned": True,
+    # This is resolution evidence supplied to the test service, not an
+    # authority claim made by the mounted manifest itself.  Individual tests
+    # replace status/effective/verification facts to prove fail-closed gates.
+    "governance_authority": {
+        "authority_ref": "governance-record-1",
+        "digest": "d" * 64,
+        "status": "ADOPTED",
+        "effective": True,
+        "verified": True,
+        "capabilities": {
+            "writer-a": {"work:open", "work:start", "work:resolve", "work:accept", "work:correct"},
+            "writer-b": {"work:claim", "work:start", "work:resolve", "work:accept", "work:correct"},
+            "operator": {"work:cancel", "work:archive"},
+        },
+    },
 }
 
 OPENING = {
