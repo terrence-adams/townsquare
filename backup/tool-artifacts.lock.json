@@ -1,1 +1,26 @@
-{"schema":1,"status":"MISSING_EXTERNAL_ARTIFACTS","platform":"linux-x86_64","artifacts":[{"name":"age","filename":"age","version":"UNRESOLVED","sha256":"UNRESOLVED"},{"name":"minisign","filename":"minisign","version":"UNRESOLVED","sha256":"UNRESOLVED"}],"release_rule":"Stage public artifacts in wheelhouse/tooling only after independent hash/version review; this lock then becomes RESOLVED."}
+{
+  "schema": 1,
+  "status": "RESOLVED",
+  "platform": "linux-x86_64",
+  "artifacts": [
+    {
+      "name": "age",
+      "filename": "age",
+      "version": "1.3.2",
+      "sha256": "eb7dd1b518f0a307c99cd97782623c5321da049154b04acd2d98d21aa7bc9b2c",
+      "source": "https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz",
+      "source_archive_sha256": "cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10",
+      "verification": "Archive SHA-256 matched the value published on the official GitHub release."
+    },
+    {
+      "name": "minisign",
+      "filename": "minisign",
+      "version": "0.12",
+      "sha256": "2c74dffcc1c9a5ee55957c60971998ace2b89f22585631594ec2152c588af8db",
+      "source": "https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz",
+      "source_archive_sha256": "9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73",
+      "verification": "Detached release signature verified with the project public key RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3."
+    }
+  ],
+  "release_rule": "Only the exact reviewed public artifacts and hashes above may enter the offline build context."
+}
