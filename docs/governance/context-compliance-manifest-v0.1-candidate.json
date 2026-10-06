@@ -7,11 +7,11 @@
   "adoption_reference": null,
   "activation_allowed": false,
   "pinned": false,
-  "sha256": "50d55e1e586f54cda28dc0f2ee21eb0351ae99da02ff4e122d18707b85e787a4",
+  "sha256": "811ec17ccd64063db52a31d5486de6dad3ee530d4e2fb3cbb2011d60d5524290",
   "digest_definition": {
     "algorithm": "sha256",
     "encoding": "utf-8",
-    "material": "manifest_id + LF + version + LF + ordered governance/item sha256 values",
+    "material": "manifest_id + LF + version + LF + adoption_resolution_spec.sha256 + LF + ordered governance/item sha256 values",
     "note": "This is an identity/content-set digest, not a self-hash of this JSON file. An adopted release must separately record the byte hash of the final manifest artifact."
   },
   "authority_boundary": {
@@ -19,6 +19,13 @@
     "references_governance": true,
     "may_prove_comprehension": false,
     "may_activate_without_operator_adoption": false,
+    "adoption_resolution_spec": {
+      "ref": "docs/governance/adopted-authority-resolution-v0.1-candidate.md",
+      "document_id": "TS-ADOPTION-RESOLUTION-20261006-CANDIDATE",
+      "version": "0.1-candidate",
+      "authority_status": "CANDIDATE_NOT_ADOPTED",
+      "sha256": "c1de4fe8183d9452530c6151742be1fbe81bb3638b29c96c7b3c7f960ce606dd"
+    },
     "warning": "Do not mount or activate this candidate. A later adopted manifest must name the exact operator adoption record and be reviewed and tested as built."
   },
   "governance": [
