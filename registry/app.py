@@ -13,9 +13,14 @@ TOKEN_FILE=os.environ.get("REGISTRY_TOKEN_FILE","/run/secrets/registry_api_token
 LEDGER_AUDIT_URL=os.environ.get("LEDGER_AUDIT_URL","")
 def connect():
  d=sqlite3.connect(DB,timeout=5,isolation_level=None); d.row_factory=sqlite3.Row; d.execute("PRAGMA foreign_keys=ON"); d.execute("PRAGMA journal_mode=WAL"); d.execute("PRAGMA synchronous=FULL"); d.execute("PRAGMA busy_timeout=5000"); return d
-SCHEMA_VERSION=1; AUDIT_CONTRACT_VERSION='1'
+SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=1; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
 def compatible():
- if os.environ.get('REGISTRY_AUDIT_CONTRACT_VERSION','1') != AUDIT_CONTRACT_VERSION:return False
+ if os.environ.get('REGISTRY_SERVICE_ID',SERVICE_ID)!=SERVICE_ID:return False
+ if os.environ.get('REGISTRY_SCHEMA_HEAD',str(SCHEMA_VERSION))!=str(SCHEMA_VERSION):return False
+ if os.environ.get('REGISTRY_AUDIT_CONTRACT_VERSION',AUDIT_CONTRACT_VERSION) != AUDIT_CONTRACT_VERSION:return False
+ if os.environ.get('REGISTRY_LEDGER_SERVICE_ID','townsquare-ledger-v0')!='townsquare-ledger-v0':return False
+ if os.environ.get('REGISTRY_LEDGER_SCHEMA_HEAD','14')!='14':return False
+ if os.environ.get('REGISTRY_LEDGER_AUDIT_CONTRACT',AUDIT_CONTRACT_VERSION)!=AUDIT_CONTRACT_VERSION:return False
  try:
   d=connect(); row=d.execute('SELECT max(version) FROM registry_migrations').fetchone(); d.close(); return row and row[0]==SCHEMA_VERSION
  except Exception:return False
@@ -44,8 +49,9 @@ class Handler(BaseHTTPRequestHandler):
   if self.path=="/health/ready":
    try:
     d=connect(); version=d.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]; pending=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL").fetchone()[0];d.close();
-    if not compatible(): return self.reply(503,{"ok":False,"schema_version":version,"audit_contract_version":AUDIT_CONTRACT_VERSION,"detail":"incompatible schema/audit contract"})
-    return self.reply(200,{"ok":True,"schema_version":version,"audit_contract_version":AUDIT_CONTRACT_VERSION,"pending_audit":pending})
+    tuple={"registry_service":SERVICE_ID,"registry_schema":SCHEMA_VERSION,"ledger_service":"townsquare-ledger-v0","ledger_schema":14,"audit_contract":AUDIT_CONTRACT_VERSION}
+    if not compatible(): return self.reply(503,{"ok":False,"schema_version":version,"compatibility":tuple,"detail":"incompatible schema/audit contract"})
+    return self.reply(200,{"ok":True,"schema_version":version,"compatibility":tuple,"pending_audit":pending})
    except Exception as e:return self.reply(503,{"ok":False,"error":str(e)})
   self.reply(404,{"detail":"not found"})
  def do_POST(self):

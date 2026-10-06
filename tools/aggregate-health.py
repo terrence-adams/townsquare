@@ -16,5 +16,7 @@ def main():
  manifest=a.backup_manifest
  if not manifest.is_file() or not manifest.with_suffix(manifest.suffix+'.minisig').is_file(): raise SystemExit('signed backup manifest is required')
  subprocess.run(['minisign','-Vm',str(manifest),'-p',a.public_key,'-x',str(manifest)+'.minisig'],check=True)
- print(json.dumps({'ledger':get(a.ledger),'viewer':get(a.viewer),'backup_manifest':str(manifest),'ok':True},sort_keys=True))
+ ledger=get(a.ledger); viewer=get(a.viewer)
+ required={'ledger_service':'townsquare-ledger-v0','ledger_schema_head':14,'registry_service':'townsquare-registry-v0','registry_schema_head':1,'audit_contract':'registry-ledger-audit-v1'}
+ print(json.dumps({'ledger':ledger,'viewer':viewer,'compatibility_required':required,'backup_manifest':str(manifest),'ok':True},sort_keys=True))
 if __name__=='__main__': main()

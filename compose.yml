@@ -17,7 +17,7 @@ x-hardened: &hardened
     options: {max-size: 10m, max-file: "5"}
 
 services:
-  migrate:
+  ledger-migrate:
     image: ${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}
     <<: *hardened
     restart: "no"
@@ -41,7 +41,7 @@ services:
     <<: *hardened
     user: "10001:10001"
     depends_on:
-      migrate: {condition: service_completed_successfully}
+      ledger-migrate: {condition: service_completed_successfully}
     environment:
       REGISTRAR_ENV: mvp
       REGISTRAR_DB: /var/lib/townsquare/ledger.db
@@ -49,6 +49,9 @@ services:
       REGISTRAR_CURSOR_KEY_FILE: /run/secrets/cursor_signing_key
       TOWNSQUARE_RECEIPT_HASH_KEY_FILE: /run/secrets/receipt_hash_key
       TOWNSQUARE_CONTEXT_MANIFEST: /run/configs/context_manifest
+      TOWNSQUARE_SERVICE_ID: townsquare-ledger-v0
+      TOWNSQUARE_LEDGER_SCHEMA_HEAD: "14"
+      TOWNSQUARE_REGISTRY_AUDIT_CONTRACT: registry-ledger-audit-v1
     volumes:
       - type: bind
         source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
@@ -96,6 +99,11 @@ services:
       REGISTRY_DB: /var/lib/registry/registry.db
       REGISTRY_TOKEN_FILE: /run/secrets/registry_api_token
       REGISTRY_AUDIT_CONTRACT_VERSION: "1"
+      REGISTRY_SERVICE_ID: townsquare-registry-v0
+      REGISTRY_SCHEMA_HEAD: "1"
+      REGISTRY_LEDGER_SERVICE_ID: townsquare-ledger-v0
+      REGISTRY_LEDGER_SCHEMA_HEAD: "14"
+      REGISTRY_LEDGER_AUDIT_CONTRACT: registry-ledger-audit-v1
       # Independent HTTP outbox delivery; never a shared DB transaction/FK.
       LEDGER_AUDIT_URL: http://ledger:8790/v1/registry/audit
     volumes:
