@@ -54,6 +54,19 @@ def claim(db,owner):
  if not row:return None
  changed=db.execute("UPDATE audit_outbox SET lease_owner=?,lease_until=? WHERE event_id=? AND delivered_utc IS NULL AND (lease_until IS NULL OR lease_until<?)",(owner,until,row['event_id'],now)).rowcount
  return row['event_id'] if changed else None
+def acknowledge_delivery(db,event_id,owner,delivered_utc=None):
+ """Durably acknowledge one successful fixed delivery, exactly once."""
+ delivered_utc=delivered_utc or time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
+ changed=db.execute(
+  """UPDATE audit_outbox SET attempts=attempts+1,delivered_utc=?,last_error=NULL,
+       lease_owner=NULL,lease_until=NULL
+     WHERE event_id=? AND delivered_utc IS NULL AND lease_owner=?""",
+  (delivered_utc,event_id,owner),
+ ).rowcount
+ if changed:return True
+ row=db.execute("SELECT delivered_utc,lease_owner,lease_until FROM audit_outbox WHERE event_id=?",(event_id,)).fetchone()
+ if row and row['delivered_utc'] is not None and row['lease_owner'] is None and row['lease_until'] is None:return False
+ raise RuntimeError('registry audit acknowledgement lost its fixed outbox lease')
 def deliver_once():
  if not compatible() or not peer_ready(): return # retain queue on mismatch/failure
  import urllib.request
@@ -69,7 +82,7 @@ def deliver_once():
     req=urllib.request.Request(LEDGER_AUDIT_URL,data=data,headers={"Content-Type":"application/json","Authorization":"Bearer "+ledger_audit_token(),"Idempotency-Key":"registry-"+r['event_id']},method="POST")
     with urllib.request.urlopen(req,timeout=LEDGER_AUDIT_TIMEOUT_SECONDS) as response:
      if response.status//100!=2:raise RuntimeError(str(response.status))
-    d.execute("UPDATE audit_outbox SET attempts=attempts+1,delivered_utc=strftime('%Y-%m-%dT%H:%M:%SZ','now'),last_error=NULL,lease_owner=NULL,lease_until=NULL WHERE event_id=? AND lease_owner=?",(r['event_id'],owner))
+    acknowledge_delivery(d,r['event_id'],owner)
    except Exception as e:
     # Never retain exception text: HTTP libraries can include request details.
     d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=?,lease_owner=NULL,lease_until=NULL WHERE event_id=? AND lease_owner=?",(type(e).__name__[:80],r['event_id'],owner))

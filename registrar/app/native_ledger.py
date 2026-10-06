@@ -158,6 +158,90 @@ def ensure_receipt_key_at_startup():
     )
 
 
+def append_internal_event(db, thread_id, kind, state, body, principal, *, event_id=None):
+    """Append one internal event using the same envelope as the service facade."""
+    event_id = event_id or str(uuid.uuid4())
+    last = db.execute(
+        "SELECT * FROM ledger_events WHERE thread_id=? ORDER BY thread_ordinal DESC LIMIT 1",
+        (thread_id,),
+    ).fetchone()
+    ordinal = 0 if not last else last["thread_ordinal"] + 1
+    predecessor_id = None if not last else last["event_id"]
+    predecessor_hash = None if not last else last["commit_sha256"]
+    content = str(body)
+    encoded = content.encode("utf-8")
+    content_hash = _sha(encoded)
+    metadata = {"kind": kind, "state": state, "reason": content}
+    metadata_json = canonical(metadata)
+    metadata_hash = _sha(metadata_json.encode())
+    committed = now()
+    envelope = {
+        "event_id": event_id, "thread_id": thread_id, "thread_ordinal": ordinal,
+        "post_uid": None,
+        "predecessor_event_id": predecessor_id, "predecessor_commit_sha256": predecessor_hash,
+        "kind": kind, "state": state, "metadata_sha256": metadata_hash, "body_sha256": content_hash,
+        "body_byte_length": len(encoded), "principal": principal, "represented_actor": principal,
+        "claimed_origin": "internal", "authority_scope": "internal", "committed_at": committed,
+    }
+    commit_hash = _canonical_sha(envelope)
+    db.execute("INSERT INTO event_content VALUES (?,?,?,?,?)", (event_id, content, "text/plain", len(encoded), content_hash))
+    cursor = db.execute(
+        """INSERT INTO ledger_events(event_id,thread_id,thread_ordinal,post_uid,predecessor_event_id,predecessor_commit_sha256,
+           kind,state,owner,addressee,sensitivity,metadata_json,metadata_sha256,body_sha256,body_byte_length,
+           principal,represented_actor,claimed_origin,authority_scope,committed_at,commit_sha256)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (event_id, thread_id, ordinal, None, predecessor_id, predecessor_hash, kind, state, None, None, "INTERNAL", metadata_json, metadata_hash, content_hash, len(encoded), principal, principal, "internal", "internal", committed, commit_hash),
+    )
+    return cursor.lastrowid
+
+
+def ingest_registry_audit(db, principal, payload):
+    """Authenticate and atomically persist one fixed Registry audit envelope."""
+    if principal != "registry-audit" or not isinstance(payload, dict) or set(payload) != {"board", "actor", "event_uuid"} or payload.get("board") != "BOARD-AUDIT-RECORD" or payload.get("actor") != "registry" or not isinstance(payload.get("event_uuid"), str) or not payload["event_uuid"]:
+        _fail("forbidden", "fixed registry audit capability/schema required")
+    payload_json = canonical(payload)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        existing = db.execute(
+            "SELECT canonical_payload,authenticated_principal FROM registry_audit_events WHERE event_uuid=?",
+            (payload["event_uuid"],),
+        ).fetchone()
+        matching = db.execute(
+            """SELECT e.event_id FROM ledger_events e JOIN event_content c USING(event_id)
+               WHERE e.thread_id='__registry_audit__' AND e.kind='REGISTRY_AUDIT'
+                 AND e.state='RECORDED' AND e.principal='registry' AND c.content=?""",
+            (payload_json,),
+        ).fetchall()
+        if existing:
+            if existing["canonical_payload"] != payload_json or existing["authenticated_principal"] != principal:
+                _fail("conflict", "registry audit event UUID payload or principal mismatch")
+            if len(matching) != 1:
+                _fail("conflict", "registry audit inbox/internal event mismatch")
+            db.commit()
+            return {"event_uuid": payload["event_uuid"], "ledger_event_id": matching[0]["event_id"]}
+        if matching:
+            _fail("conflict", "registry audit internal event exists without matching inbox record")
+        ledger_event_id = str(uuid.uuid4())
+        append_internal_event(db, "__registry_audit__", "REGISTRY_AUDIT", "RECORDED", payload_json, "registry", event_id=ledger_event_id)
+        db.execute(
+            """INSERT INTO registry_audit_events(
+                 event_uuid,actor,board,canonical_payload,payload_sha256,created_at,authenticated_principal)
+               VALUES (?,?,?,?,?,?,?)""",
+            (payload["event_uuid"], "registry", "BOARD-AUDIT-RECORD", payload_json, _sha(payload_json.encode()), now(), principal),
+        )
+        db.commit()
+        return {"event_uuid": payload["event_uuid"], "ledger_event_id": ledger_event_id}
+    except NativeLedgerError:
+        db.rollback()
+        raise
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        _fail("invalid", str(exc))
+    except Exception:
+        db.rollback()
+        raise
+
+
 class NativeLedger:
     """Single-connection facade; callers provide a migrated SQLite handle."""
 
@@ -1245,36 +1329,7 @@ class NativeLedger:
             raise
 
     def _append_internal_event(self, thread_id, kind, state, body, principal, *, event_id=None):
-        event_id = event_id or str(uuid.uuid4())
-        last = self.db.execute("SELECT * FROM ledger_events WHERE thread_id=? ORDER BY thread_ordinal DESC LIMIT 1", (thread_id,)).fetchone()
-        ordinal = 0 if not last else last["thread_ordinal"] + 1
-        predecessor_id = None if not last else last["event_id"]
-        predecessor_hash = None if not last else last["commit_sha256"]
-        content = str(body)
-        encoded = content.encode("utf-8")
-        content_hash = _sha(encoded)
-        metadata = {"kind": kind, "state": state, "reason": content}
-        metadata_json = canonical(metadata)
-        metadata_hash = _sha(metadata_json.encode())
-        committed = now()
-        envelope = {
-            "event_id": event_id, "thread_id": thread_id, "thread_ordinal": ordinal,
-            "post_uid": None,
-            "predecessor_event_id": predecessor_id, "predecessor_commit_sha256": predecessor_hash,
-            "kind": kind, "state": state, "metadata_sha256": metadata_hash, "body_sha256": content_hash,
-            "body_byte_length": len(encoded), "principal": principal, "represented_actor": principal,
-            "claimed_origin": "internal", "authority_scope": "internal", "committed_at": committed,
-        }
-        commit_hash = _canonical_sha(envelope)
-        self.db.execute("INSERT INTO event_content VALUES (?,?,?,?,?)", (event_id, content, "text/plain", len(encoded), content_hash))
-        cursor = self.db.execute(
-            """INSERT INTO ledger_events(event_id,thread_id,thread_ordinal,post_uid,predecessor_event_id,predecessor_commit_sha256,
-               kind,state,owner,addressee,sensitivity,metadata_json,metadata_sha256,body_sha256,body_byte_length,
-               principal,represented_actor,claimed_origin,authority_scope,committed_at,commit_sha256)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (event_id, thread_id, ordinal, None, predecessor_id, predecessor_hash, kind, state, None, None, "INTERNAL", metadata_json, metadata_hash, content_hash, len(encoded), principal, principal, "internal", "internal", committed, commit_hash),
-        )
-        return cursor.lastrowid
+        return append_internal_event(self.db, thread_id, kind, state, body, principal, event_id=event_id)
 
     def issue_operator_credential(self, principal):
         _fail("forbidden", "operator credentials are issued offline only")
@@ -1297,29 +1352,9 @@ class NativeLedger:
         registry = registry_integration_status()
         if registry["enabled"] and not registry["compatible"]:
             _fail("unavailable", "Registry integration tuple is absent or incompatible")
-        if principal != "registry-audit" or not isinstance(payload, dict) or set(payload) != {"board", "actor", "event_uuid"} or payload.get("board") != "BOARD-AUDIT-RECORD" or payload.get("actor") != "registry" or not isinstance(payload.get("event_uuid"), str):
-            _fail("forbidden", "fixed registry audit capability/schema required")
-        payload_json = canonical(payload)
-        existing = self.db.execute("SELECT canonical_payload FROM registry_audit_events WHERE event_uuid=?", (payload["event_uuid"],)).fetchone()
-        if existing:
-            if existing["canonical_payload"] != payload_json:
-                _fail("conflict", "registry audit event UUID payload mismatch")
-            return {"event_uuid": payload["event_uuid"]}
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            ledger_event_id = str(uuid.uuid4())
-            self._append_internal_event("__registry_audit__", "REGISTRY_AUDIT", "RECORDED", payload_json, "registry", event_id=ledger_event_id)
-            self.db.execute("INSERT INTO registry_audit_events(event_uuid,actor,board,canonical_payload,payload_sha256,created_at,authenticated_principal) VALUES (?,?,?,?,?,?,?)", (payload["event_uuid"], "registry", "BOARD-AUDIT-RECORD", payload_json, _sha(payload_json.encode()), now(), principal))
-            self.db.commit()
-            return {"event_uuid": payload["event_uuid"], "ledger_event_id": ledger_event_id}
-        except sqlite3.IntegrityError as exc:
-            self.db.rollback()
-            if "UNIQUE" in str(exc).upper():
-                return {"event_uuid": payload["event_uuid"]}
-            _fail("invalid", str(exc))
-        except Exception:
-            self.db.rollback()
-            raise
+        # The existing = self.db.execute lookup is deliberately owned by the
+        # reusable transaction so HTTP and recovery cannot race or diverge.
+        return ingest_registry_audit(self.db, principal, payload)
 
     def registry_audit_events(self, event_uuid):
         return [dict(row) for row in self.db.execute("SELECT * FROM registry_audit_events WHERE event_uuid=? ORDER BY audit_seq", (event_uuid,))]

@@ -39,6 +39,18 @@ class BackupRecoveryReworkTests(unittest.TestCase):
             db.execute("UPDATE audit_outbox SET lease_owner='worker-1',lease_until='2026-10-06T00:01:00Z'")
         db.commit(); db.close()
 
+    def ledger(self,path):
+        from registrar.app.db import connect,migrate
+        db=connect(path)
+        try:migrate(db)
+        finally:db.close()
+
+    def reconciliation(self,drill,event_ids=("pending-1",)):
+        (drill/"reconciliation.json").write_text(json.dumps({
+            "schema":"townsquare-offline-reconciliation-v1","origin":"restored-drill-only",
+            "pending_event_uuids":list(event_ids),"replay_performed":False,
+        }),encoding="utf-8")
+
     def test_registry_v1_backup_and_restore_parity_do_not_query_missing_lease_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); source=root/"registry-v1.db"; copy=root/"copy.db"; self.registry(source,version=1)
@@ -65,26 +77,61 @@ class BackupRecoveryReworkTests(unittest.TestCase):
         self.assertNotIn("registry.app",source); self.assertNotIn("deliver_once",source)
         self.assertNotIn("urllib",source); self.assertIn("pending_event_uuids",source); self.assertIn("replay_performed",source)
 
-    def test_isolated_replay_calls_fixed_delivery_twice_and_leaves_one_inbox_row(self):
+    def test_isolated_replay_calls_production_boundaries_twice_and_commits_full_side_effects(self):
         with tempfile.TemporaryDirectory() as tmp:
             drill=Path(tmp); self.registry(drill/"registry.db",version=2,lease=True)
-            ledger=sqlite3.connect(drill/"ledger.db")
-            ledger.execute("""CREATE TABLE registry_audit_events(
-                audit_seq INTEGER PRIMARY KEY AUTOINCREMENT,event_uuid TEXT NOT NULL UNIQUE,
-                actor TEXT NOT NULL,board TEXT NOT NULL,canonical_payload TEXT NOT NULL,
-                payload_sha256 TEXT NOT NULL,created_at TEXT NOT NULL,authenticated_principal TEXT)""")
-            ledger.commit(); ledger.close()
-            (drill/"reconciliation.json").write_text(json.dumps({"schema":"townsquare-offline-reconciliation-v1","origin":"restored-drill-only","pending_event_uuids":["pending-1"],"replay_performed":False}),encoding="utf-8")
+            self.ledger(drill/"ledger.db"); self.reconciliation(drill)
             token=drill/"drill-replay.token"; token.write_bytes(b"isolated-recovery-drill-token-0123456789")
             evidence=self.replay.run_replay(drill,token)
             self.assertTrue(evidence["exactly_once"]); self.assertEqual({"pending-1":2},evidence["attempts_per_event"])
-            ledger=sqlite3.connect(drill/"ledger.db")
+            ledger=sqlite3.connect(drill/"ledger.db"); ledger.row_factory=sqlite3.Row
+            registry=sqlite3.connect(drill/"registry.db"); registry.row_factory=sqlite3.Row
             try:
                 self.assertEqual(1,ledger.execute("SELECT count(*) FROM registry_audit_events WHERE event_uuid='pending-1'").fetchone()[0])
-                boundary=self.replay.FixedDrillDelivery(ledger,token.read_bytes())
+                self.assertEqual(1,ledger.execute("SELECT count(*) FROM ledger_events WHERE kind='REGISTRY_AUDIT' AND state='RECORDED'").fetchone()[0])
+                self.assertEqual("registry-audit",ledger.execute("SELECT authenticated_principal FROM registry_audit_events WHERE event_uuid='pending-1'").fetchone()[0])
+                outbox=registry.execute("SELECT * FROM audit_outbox WHERE event_id='pending-1'").fetchone()
+                self.assertEqual(1,outbox["attempts"]); self.assertIsNotNone(outbox["delivered_utc"])
+                self.assertIsNone(outbox["last_error"]); self.assertIsNone(outbox["lease_owner"]); self.assertIsNone(outbox["lease_until"])
+                boundary=self.replay.FixedDrillDelivery(ledger,registry,token.read_bytes())
                 with self.assertRaises(PermissionError):boundary.deliver_once("pending-1",b"wrong-drill-credential")
                 self.assertEqual(1,ledger.execute("SELECT count(*) FROM registry_audit_events WHERE event_uuid='pending-1'").fetchone()[0])
+            finally:ledger.close(); registry.close()
+
+    def test_crash_window_reconciles_precommitted_ledger_event_and_acks_pending_outbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drill=Path(tmp); self.registry(drill/"registry.db",version=2,lease=True); self.ledger(drill/"ledger.db"); self.reconciliation(drill)
+            token=drill/"drill-replay.token"; token.write_bytes(b"isolated-recovery-drill-token-0123456789")
+            ledger=sqlite3.connect(drill/"ledger.db",isolation_level=None); ledger.row_factory=sqlite3.Row
+            try:self.replay.ingest_registry_audit(ledger,"registry-audit",{"actor":"registry","board":"BOARD-AUDIT-RECORD","event_uuid":"pending-1"})
             finally:ledger.close()
+            evidence=self.replay.run_replay(drill,token)
+            self.assertTrue(evidence["exactly_once"])
+            ledger=sqlite3.connect(drill/"ledger.db"); registry=sqlite3.connect(drill/"registry.db")
+            try:
+                self.assertEqual(1,ledger.execute("SELECT count(*) FROM registry_audit_events WHERE event_uuid='pending-1'").fetchone()[0])
+                self.assertEqual(1,ledger.execute("SELECT count(*) FROM ledger_events WHERE kind='REGISTRY_AUDIT'").fetchone()[0])
+                self.assertEqual((1,1,None,None),registry.execute("SELECT attempts,delivered_utc IS NOT NULL,lease_owner,lease_until FROM audit_outbox WHERE event_id='pending-1'").fetchone())
+            finally:ledger.close(); registry.close()
+
+    def test_restore_rejects_malicious_duplicate_and_nonregular_manifest_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp); (source/"ledger.db.age").write_bytes(b"ledger"); (source/"registry.db.age").write_bytes(b"registry")
+            good={"domains":[{"domain":"ledger","ciphertext":"ledger.db.age"},{"domain":"registry","ciphertext":"registry.db.age"}]}
+            self.assertEqual(2,len(self.restore.validate_domains(source,good)))
+            bad_values=("../ledger.db.age","sub/ledger.db.age","sub\\ledger.db.age",str((source/"ledger.db.age").resolve()))
+            for value in bad_values:
+                bad=json.loads(json.dumps(good)); bad["domains"][0]["ciphertext"]=value
+                with self.subTest(value=value),self.assertRaises(SystemExit):self.restore.validate_domains(source,bad)
+            duplicate=json.loads(json.dumps(good)); duplicate["domains"][1]={"domain":"ledger","ciphertext":"ledger.db.age"}
+            with self.assertRaises(SystemExit):self.restore.validate_domains(source,duplicate)
+            (source/"registry.db.age").unlink(); (source/"registry.db.age").mkdir()
+            with self.assertRaises(SystemExit):self.restore.validate_domains(source,good)
+            (source/"registry.db.age").rmdir()
+            try:(source/"registry.db.age").symlink_to(source/"ledger.db.age")
+            except OSError:pass
+            else:
+                with self.assertRaises(SystemExit):self.restore.validate_domains(source,good)
 
     def test_replay_rejects_non_drill_credentials_and_has_no_network_origin(self):
         source=(ROOT/"backup/recovery_replay_drill.py").read_text(encoding="utf-8")
@@ -99,6 +146,7 @@ class BackupRecoveryReworkTests(unittest.TestCase):
     def test_backup_image_packages_both_offline_restore_entrypoints(self):
         dockerfile=(ROOT/"backup/Dockerfile").read_text(encoding="utf-8")
         self.assertIn("restore-drill.py",dockerfile); self.assertIn("recovery_replay_drill.py",dockerfile)
+        self.assertIn("registrar/app/native_ledger.py",dockerfile); self.assertIn("registry/app.py",dockerfile)
         self.assertIn("/usr/local/bin/age",dockerfile); self.assertIn("/usr/local/bin/minisign",dockerfile)
 
 

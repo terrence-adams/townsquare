@@ -30,6 +30,24 @@ def reconcile_pending_event_uuids(registry):
  db=sqlite3.connect(registry)
  try:return [r[0] for r in db.execute("SELECT event_id FROM audit_outbox WHERE delivered_utc IS NULL ORDER BY event_id")]
  finally:db.close()
+def validate_domains(source,manifest):
+ items=manifest.get('domains')
+ if not isinstance(items,list) or len(items)!=2: raise SystemExit('manifest must contain exactly ledger and registry once')
+ expected={'ledger':'ledger.db.age','registry':'registry.db.age'}; seen_domains=set(); seen_files=set(); validated=[]
+ for item in items:
+  if not isinstance(item,dict): raise SystemExit('manifest domain entry must be an object')
+  domain=item.get('domain'); filename=item.get('ciphertext')
+  if domain not in expected or domain in seen_domains: raise SystemExit('manifest must contain exactly ledger and registry once')
+  if filename!=expected[domain] or filename in seen_files: raise SystemExit(f'invalid ciphertext path for {domain}')
+  if Path(filename).is_absolute() or '/' in filename or '\\' in filename or filename in {'.','..'}: raise SystemExit(f'invalid ciphertext path for {domain}')
+  candidate=source/filename
+  if candidate.is_symlink() or not candidate.is_file(): raise SystemExit(f'ciphertext must be a regular non-symlink file: {filename}')
+  resolved=candidate.resolve()
+  try: resolved.relative_to(source)
+  except ValueError: raise SystemExit(f'ciphertext escapes backup directory: {filename}')
+  seen_domains.add(domain); seen_files.add(filename); validated.append((item,resolved))
+ if seen_domains!=set(expected) or seen_files!=set(expected.values()): raise SystemExit('manifest must contain exactly ledger and registry once')
+ return validated
 def main():
  if len(sys.argv)!=3: raise SystemExit("usage: restore-drill.py BACKUP_DIR EMPTY_DRILL_DIR")
  source=Path(sys.argv[1]).resolve(); drill=Path(sys.argv[2]).resolve()
@@ -39,9 +57,9 @@ def main():
  if not key or not public or not checkpoint.is_file() or not signature.is_file(): raise SystemExit("identity, public key, and externally signed checkpoint are required")
  run(["minisign","-Vm",str(checkpoint),"-p",public,"-x",str(signature)])
  manifest=json.loads((source/'manifest.json').read_text())
+ domains=validate_domains(source,manifest)
  if json.loads(checkpoint.read_text()).get('manifest_sha256') != sha(source/'manifest.json'): raise SystemExit('external checkpoint does not bind this manifest')
- for item in manifest["domains"]:
-  cipher=source/item['ciphertext']
+ for item,cipher in domains:
   if sha(cipher)!=item['ciphertext_sha256']: raise SystemExit(f"ciphertext hash mismatch: {cipher.name}")
   output=drill/f"{item['domain']}.db"; run(["age","--decrypt","--identity",key,"--output",str(output),str(cipher)])
   if sha(output)!=item['plaintext_sha256']: raise SystemExit(f"plaintext hash mismatch: {item['domain']}")
