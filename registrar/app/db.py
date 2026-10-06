@@ -1,7 +1,12 @@
-import sqlite3
+import os,sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 MIGRATIONS=Path(__file__).parents[1]/"migrations"
+LEDGER_SERVICE_VERSION="townsquare-ledger-v0"
+LEDGER_SCHEMA_VERSION=14
+REGISTRY_SERVICE_VERSION="townsquare-registry-v0"
+REGISTRY_SCHEMA_VERSION=1
+REGISTRY_AUDIT_CONTRACT_VERSION="registry-ledger-audit-v1"
 def connect(path):
     db=sqlite3.connect(path,timeout=5,isolation_level=None,check_same_thread=False); db.row_factory=sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON"); db.execute("PRAGMA journal_mode=WAL"); db.execute("PRAGMA synchronous=FULL"); db.execute("PRAGMA busy_timeout=5000"); return db
@@ -43,4 +48,30 @@ def verify_schema(db):
     if applied != expected:
         missing=sorted(expected-applied); unexpected=sorted(applied-expected)
         raise RuntimeError(f"Registrar schema is not release-ready: missing={missing} unexpected={unexpected}")
-    return max(expected) if expected else 0
+    version=max(expected) if expected else 0
+    if version != LEDGER_SCHEMA_VERSION:
+        raise RuntimeError(f"Ledger release schema mismatch: expected={LEDGER_SCHEMA_VERSION} actual={version}")
+    return version
+
+def registry_integration_status():
+    """Compare configured Registry identity with the Ledger audit contract."""
+    raw=os.environ.get("REGISTRY_INTEGRATION_ENABLED")
+    if raw is None or raw.strip().lower() in {"","0","false","no","off"}:
+        return {"enabled":False,"compatible":True,"configured":None}
+    enabled=raw.strip().lower() in {"1","true","yes","on"}
+    configured={
+        "service_version":os.environ.get("REGISTRY_SERVICE_VERSION",os.environ.get("REGISTRY_SERVICE_ID")),
+        "schema_version":os.environ.get("REGISTRY_SCHEMA_VERSION",os.environ.get("REGISTRY_SCHEMA_HEAD")),
+        "audit_contract_version":os.environ.get("REGISTRY_AUDIT_CONTRACT_VERSION"),
+    }
+    expected={
+        "service_version":REGISTRY_SERVICE_VERSION,
+        "schema_version":str(REGISTRY_SCHEMA_VERSION),
+        "audit_contract_version":REGISTRY_AUDIT_CONTRACT_VERSION,
+    }
+    return {
+        "enabled":True,
+        "compatible":enabled and configured==expected,
+        "configured":configured,
+        "expected":expected,
+    }

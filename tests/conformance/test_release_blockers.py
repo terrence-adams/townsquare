@@ -13,12 +13,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class ReleaseBlockerInspection(unittest.TestCase):
     def test_rb_mig_07_schema_009_fixture_exercises_1070_row_upgrade_and_rollback(self):
-        fixture = ROOT / "tests" / "fixtures" / "schema-009-legacy-1070.sqlite"
+        fixture = ROOT / "registrar" / "tests" / "fixtures" / "schema_009_1070.py"
+        metadata = ROOT / "registrar" / "tests" / "fixtures" / "schema_009_1070_metadata.json"
         self.assertTrue(
             fixture.is_file(),
-            "RB-MIG-07 requires a real schema-009 SQLite fixture containing 1,070 "
-            "representative legacy rows for 010-013 count/content/hash/FK/re-run/rollback tests.",
+            "RB-MIG-07 requires a deterministic schema-009 fixture generator containing 1,070 "
+            "representative legacy rows for 010-014 count/content/hash/FK/re-run/rollback tests.",
         )
+        evidence = json.loads(metadata.read_text())
+        self.assertEqual(1070, evidence["counts"]["posts"])
+        self.assertRegex(evidence["logical_sha256"], r"^[0-9a-f]{64}$")
 
     def test_rb_backup_08_verified_restore_evidence_covers_both_independent_domains(self):
         evidence = json.loads((ROOT / "evidence" / "permissions-and-backup.json").read_text())
@@ -54,10 +58,14 @@ class ReleaseBlockerInspection(unittest.TestCase):
         )
         self.assertNotIn("delivery_status", source.lower())
 
-    def test_rb_compose_11_declares_registry_one_migrator_and_no_wake_or_registry_port(self):
-        compose = (ROOT / "compose.yml").read_text().lower()
+    def test_rb_compose_11_declares_one_isolated_migrator_per_domain_and_no_wake_or_registry_port(self):
+        raw_compose = (ROOT / "compose.yml").read_text()
+        compose = raw_compose.lower()
         self.assertRegex(compose, r"(?m)^  registry:\s*$", "RB-COMPOSE-11 requires a separate Registry service")
-        self.assertEqual(1, len(re.findall(r"(?m)^  migrate:\s*$", compose)))
+        self.assertEqual(1, len(re.findall(r"(?m)^  ledger-migrate:\s*$", compose)))
+        self.assertEqual(1, len(re.findall(r"(?m)^  registry-migrate:\s*$", compose)))
+        for value in ("townsquare-ledger-v0", "townsquare-registry-v0", "registry-ledger-audit-v1"):
+            self.assertIn(value, raw_compose)
         self.assertNotIn("wake", compose)
         registry_block = compose.split("  registry:", 1)[1].split("\n  ", 1)[0]
         self.assertNotIn("ports:", registry_block, "Registry must not publish a host port")

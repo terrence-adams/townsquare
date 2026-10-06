@@ -2,7 +2,7 @@ import os,sqlite3
 from fastapi import Depends,FastAPI,Header,HTTPException,Query,Request
 from fastapi.responses import JSONResponse
 from .auth import authenticate_identity,authenticate_native_identity
-from .db import session,verify_schema
+from .db import LEDGER_SERVICE_VERSION,REGISTRY_AUDIT_CONTRACT_VERSION,registry_integration_status,session,verify_schema
 from .service import Conflict,Forbidden,Invalid,Registrar,Unavailable
 from .native_ledger import NativeLedger,NativeLedgerError,ensure_receipt_key_at_startup
 from .attestation import verify as verify_attestation
@@ -192,7 +192,11 @@ def live(): return {"ok":True}
 def ready(db:sqlite3.Connection=Depends(get_db)):
     checks={"foreign_keys":db.execute("PRAGMA foreign_keys").fetchone()[0],"journal_mode":db.execute("PRAGMA journal_mode").fetchone()[0],"synchronous":db.execute("PRAGMA synchronous").fetchone()[0]}
     if checks!={"foreign_keys":1,"journal_mode":"wal","synchronous":2}: raise HTTPException(503,checks)
-    return {"ok":True,"schema_version":db.execute("SELECT max(version) FROM schema_migrations").fetchone()[0]}
+    schema_version=verify_schema(db); registry=registry_integration_status()
+    result={"ok":True,"service_version":LEDGER_SERVICE_VERSION,"schema_version":schema_version,"audit_contract_version":REGISTRY_AUDIT_CONTRACT_VERSION}
+    if registry["enabled"] and not registry["compatible"]:
+        raise HTTPException(503,{**result,"ok":False,"registry":registry})
+    return result
 @app.post("/v1/roots/reserve",status_code=201)
 async def reserve_root(request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     who,_=identity(db,authorization,"post:write"); body=await request.json(); return invoke(lambda:Registrar(db).reserve_root(who,idempotency_key,body))
@@ -308,6 +312,7 @@ def native_notice_attempts(notice_id:str,authorization:str|None=Header(None),db:
     who,_=native_identity(db,authorization,"notice:read")
     return {"attempts":invoke_native(lambda:_native_ledger(db).notice_attempts(notice_id,principal=who))}
 
+@app.post("/v1/registry/audit",status_code=201)
 @app.post("/v1/native/registry-audit-events",status_code=201)
 async def native_registry_audit(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     who,_=native_identity(db,authorization,"registry:audit:append"); body=await request.json()

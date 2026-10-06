@@ -17,6 +17,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 
+from .db import registry_integration_status
 from .service import canonical, now
 
 
@@ -1228,6 +1229,9 @@ class NativeLedger:
         _fail("forbidden", "Registry outbox belongs to the external Registry service")
 
     def append_registry_audit(self, principal, payload):
+        registry = registry_integration_status()
+        if registry["enabled"] and not registry["compatible"]:
+            _fail("unavailable", "Registry integration tuple is absent or incompatible")
         if principal != "registry-audit" or not isinstance(payload, dict) or set(payload) != {"board", "actor", "event_uuid"} or payload.get("board") != "BOARD-AUDIT-RECORD" or payload.get("actor") != "registry" or not isinstance(payload.get("event_uuid"), str):
             _fail("forbidden", "fixed registry audit capability/schema required")
         payload_json = canonical(payload)
