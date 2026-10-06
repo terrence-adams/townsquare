@@ -54,6 +54,10 @@ def _canonical_sha(value) -> str:
     return _sha(canonical(value).encode("utf-8"))
 
 
+def _manifest_content_sha(manifest) -> str:
+    return _canonical_sha({name: value for name, value in manifest.items() if name != "sha256"})
+
+
 def _jsonable(value):
     if isinstance(value, dict):
         return {key: _jsonable(item) for key, item in sorted(value.items())}
@@ -75,32 +79,81 @@ def _not_expired(value: str) -> bool:
         return False
 
 
+def _load_key_file(path_name, key_id_name, label, *, require_explicit_id=True):
+    path = os.environ.get(path_name)
+    key_id = os.environ.get(key_id_name)
+    if not path or not os.path.isfile(path):
+        raise RuntimeError(f"{label} key file is required")
+    try:
+        with open(path, "rb") as handle:
+            key = handle.read()
+    except OSError as exc:
+        raise RuntimeError(f"{label} key file is unreadable") from exc
+    if len(key) < 32:
+        raise RuntimeError(f"{label} key must contain at least 32 bytes")
+    if not key_id:
+        if require_explicit_id:
+            raise RuntimeError(f"{label} key id is required")
+        key_id = "sha256:" + _sha(key)
+    return key_id, key
+
+
+def _authority_proof_mac(proof, key):
+    material = {name: value for name, value in proof.items() if name != "signature"}
+    return hmac.new(key, canonical(_jsonable(material)).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _parse_utc(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def ensure_receipt_key_at_startup():
+    _load_key_file(
+        "TOWNSQUARE_RECEIPT_HASH_KEY_FILE", "TOWNSQUARE_RECEIPT_HASH_KEY_ID", "receipt hash",
+        require_explicit_id=False,
+    )
+
+
 class NativeLedger:
     """Single-connection facade; callers provide a migrated SQLite handle."""
 
     def __init__(self, db: sqlite3.Connection, *, context_manifest=None, governance_authority=None):
         self.db = db
         self._context_manifest = context_manifest
-        # The HTTP boundary supplies this from a separately mounted,
-        # operator-controlled resolver result.  The manifest fallback keeps
-        # the direct service adapter backwards compatible: in that adapter
-        # the whole object is dependency-injected, not loaded from a mounted
-        # candidate manifest.
-        self._governance_authority = (
-            governance_authority
-            if governance_authority is not None
-            else context_manifest.get("governance_authority") if isinstance(context_manifest, dict) else None
-        )
         self._failure_boundary = None
-        self._receipt_key = os.environ.get(
-            "TOWNSQUARE_RECEIPT_HASH_KEY", "townsquare-mvp-local-receipt-hash-key"
-        ).encode("utf-8")
+        self._receipt_key_id, self._receipt_key = _load_key_file(
+            "TOWNSQUARE_RECEIPT_HASH_KEY_FILE", "TOWNSQUARE_RECEIPT_HASH_KEY_ID", "receipt hash",
+            require_explicit_id=False,
+        )
+        self._governance_authority = None
+        if governance_authority is not None:
+            self.set_authority_proof(governance_authority)
 
     # ---- context -----------------------------------------------------
 
     def set_context_manifest(self, manifest):
         self._context_manifest = manifest
-        self._governance_authority = manifest.get("governance_authority") if isinstance(manifest, dict) else None
+
+    def set_authority_proof(self, proof):
+        """Verify one resolver-produced adoption proof against a pinned key."""
+        if not isinstance(proof, dict):
+            _fail("context_required", "authenticated authority proof is required")
+        key_id, key = _load_key_file(
+            "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_FILE", "TOWNSQUARE_AUTHORITY_RESOLVER_KEY_ID", "authority resolver"
+        )
+        signature = proof.get("signature")
+        if proof.get("schema") != "townsquare-authority-proof-v1" or proof.get("resolver_key_id") != key_id:
+            _fail("context_required", "authority proof trust binding is invalid")
+        if not isinstance(signature, str) or not hmac.compare_digest(signature, _authority_proof_mac(proof, key)):
+            _fail("context_required", "authority proof signature is invalid")
+        self._governance_authority = _jsonable(proof)
+
+    def clear_authority_proof(self):
+        """Drop resolver evidence for fail-closed diagnostics and rotation."""
+        self._governance_authority = None
 
     def _manifest(self):
         manifest = self._context_manifest
@@ -217,7 +270,7 @@ class NativeLedger:
         bound_principal = principal if isinstance(principal, str) and principal else "__anonymous__"
         if not bundle or bundle["principal"] != bound_principal:
             _fail("context_required", "unknown or mismatched context bundle")
-        expected = json.loads(bundle["required_item_hashes_json"])
+        expected = self._validated_bundle_hashes(bundle)
         if not isinstance(acknowledged_hashes, list) or sorted(acknowledged_hashes) != expected or len(set(acknowledged_hashes)) != len(expected):
             _fail("context_required", "every exact context item hash must be acknowledged")
         retrieved = set()
@@ -234,12 +287,16 @@ class NativeLedger:
         expires = _utc_after(RECEIPT_TTL_SECONDS)
         aggregate = _canonical_sha(expected)
         self.db.execute(
-            "INSERT INTO context_receipt_issues VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO context_receipt_issues(
+                 receipt_id,token_hash,principal,permitted_action,target_thread,expected_revision,
+                 manifest_id,manifest_sha256,bundle_id,bundle_sha256,required_item_hashes_json,
+                 required_items_sha256,issued_at,expires_at,ttl_seconds,receipt_hash_key_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 receipt_id, token_hash, bound_principal, bundle["permitted_action"], bundle["target_thread"],
                 bundle["expected_revision"], bundle["manifest_id"], bundle["manifest_sha256"], bundle_id,
                 bundle["bundle_sha256"], bundle["required_item_hashes_json"], aggregate, issued, expires,
-                RECEIPT_TTL_SECONDS,
+                RECEIPT_TTL_SECONDS, self._receipt_key_id,
             ),
         )
         self._context_audit("receipt_issued", bound_principal, bundle_id, receipt_id, bundle["target_thread"], {"expires_at": expires})
@@ -249,6 +306,37 @@ class NativeLedger:
         if not isinstance(token, str):
             return ""
         return hmac.new(self._receipt_key, b"townsquare-context-receipt-v1\0" + token.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def _validated_bundle_hashes(self, bundle):
+        if not bundle:
+            _fail("context_required", "context bundle is missing")
+        rows = list(self.db.execute(
+            "SELECT * FROM context_bundle_items WHERE bundle_id=? ORDER BY ordinal,item_id",
+            (bundle["bundle_id"],),
+        ))
+        hashes = []
+        for expected_ordinal, item in enumerate(rows):
+            digest = _sha(item["content_json"].encode("utf-8"))
+            item_id = _sha(f"{item['source']}\0{item['ref']}\0{item['ordinal']}\0{digest}".encode("utf-8"))
+            if item["ordinal"] != expected_ordinal or item["content_sha256"] != digest or item["item_id"] != item_id:
+                _fail("context_required", "persisted context item binding is invalid")
+            hashes.append(digest)
+        hashes.sort()
+        try:
+            persisted_hashes = json.loads(bundle["required_item_hashes_json"])
+        except (TypeError, ValueError):
+            _fail("context_required", "persisted context item hash set is invalid")
+        if hashes != persisted_hashes or len(hashes) != len(set(hashes)):
+            _fail("context_required", "persisted context item hash set changed")
+        material = {
+            "principal": bundle["principal"], "action": bundle["permitted_action"],
+            "thread_id": bundle["target_thread"], "expected_revision": bundle["expected_revision"],
+            "manifest_id": bundle["manifest_id"], "manifest_sha256": bundle["manifest_sha256"],
+            "required_item_hashes": hashes,
+        }
+        if bundle["bundle_sha256"] != _canonical_sha(material):
+            _fail("context_required", "persisted context bundle binding is invalid")
+        return hashes
 
     def receipt_record(self, token):
         row = self.db.execute("SELECT * FROM context_receipt_issues WHERE token_hash=?", (self._receipt_hash(token),)).fetchone()
@@ -427,6 +515,8 @@ class NativeLedger:
     def required_action_capability(payload):
         if not isinstance(payload, dict):
             _fail("invalid", "event payload must be an object")
+        if str(payload.get("purpose", "")).upper() == "CORRECTION":
+            return "request:correct"
         state = str(payload.get("state", "")).upper()
         capability = ACTION_CAPABILITIES.get(state)
         if not capability:
@@ -439,30 +529,70 @@ class NativeLedger:
         disposition = "EFFECTIVE"
         if not isinstance(authority, dict):
             disposition, reason = "UNKNOWN", "authority_source_absent"
-        elif authority.get("status") != "ADOPTED":
+        elif authority.get("decision") != "ADOPT":
             disposition, reason = "NOT_EFFECTIVE", "authority_not_adopted"
-        elif authority.get("effective") is not True:
-            disposition, reason = "NOT_EFFECTIVE", "authority_not_effective"
-        elif authority.get("verified") is not True:
-            disposition, reason = "UNKNOWN", "authority_unverified"
-        elif not isinstance(authority.get("authority_ref"), str) or not authority["authority_ref"]:
-            disposition, reason = "UNKNOWN", "authority_reference_missing"
-        elif not re.fullmatch(r"[0-9a-f]{64}", str(authority.get("digest", ""))):
-            disposition, reason = "UNKNOWN", "authority_digest_invalid"
-        capabilities = authority.get("capabilities", {}) if isinstance(authority, dict) else {}
+        elif (
+            authority.get("manifest_id") != manifest.get("id")
+            or authority.get("manifest_sha256") != manifest.get("sha256")
+            or authority.get("manifest_content_sha256") != _manifest_content_sha(manifest)
+        ):
+            disposition, reason = "NOT_EFFECTIVE", "authority_manifest_mismatch"
+        elif authority.get("revoked") is not False:
+            disposition, reason = "NOT_EFFECTIVE", "authority_revoked_or_unknown"
+        elif authority.get("status_history_complete") is not True:
+            disposition, reason = "UNKNOWN", "authority_status_history_incomplete"
+        elif not isinstance(authority.get("authority_sequence"), int) or authority["authority_sequence"] < 1:
+            disposition, reason = "UNKNOWN", "authority_sequence_invalid"
+        elif not isinstance(authority.get("authority_watermark"), int) or authority["authority_watermark"] < authority["authority_sequence"]:
+            disposition, reason = "UNKNOWN", "authority_watermark_stale"
+        elif not isinstance(authority.get("revocation_checked_through"), int) or authority["revocation_checked_through"] < authority["authority_watermark"]:
+            disposition, reason = "UNKNOWN", "authority_revocation_watermark_stale"
+        elif _parse_utc(authority.get("effective_from")) is None or _parse_utc(authority["effective_from"]) > datetime.now(timezone.utc):
+            disposition, reason = "NOT_EFFECTIVE", "authority_not_yet_effective"
+        elif authority.get("effective_until") is not None and (
+            _parse_utc(authority.get("effective_until")) is None
+            or _parse_utc(authority["effective_until"]) <= datetime.now(timezone.utc)
+        ):
+            disposition, reason = "NOT_EFFECTIVE", "authority_expired"
+        prior_watermark = None
+        if isinstance(authority, dict) and isinstance(authority.get("resolver_key_id"), str):
+            prior_watermark = self.db.execute(
+                "SELECT MAX(authority_watermark) FROM governance_resolution_audit WHERE resolver_key_id=?",
+                (authority["resolver_key_id"],),
+            ).fetchone()[0]
+        if disposition == "EFFECTIVE" and prior_watermark is not None and authority["authority_watermark"] < prior_watermark:
+            disposition, reason = "UNKNOWN", "authority_watermark_rollback"
+        scope = authority.get("scope", {}) if isinstance(authority, dict) else {}
+        capabilities = scope.get("capabilities", {}) if isinstance(scope, dict) else {}
+        actions = set(scope.get("actions", [])) if isinstance(scope, dict) and isinstance(scope.get("actions"), list) else set()
+        targets = set(scope.get("targets", [])) if isinstance(scope, dict) and isinstance(scope.get("targets"), list) else set()
+        if disposition == "EFFECTIVE" and (capability not in actions or ("*" not in targets and thread_id not in targets)):
+            disposition, reason = "NOT_EFFECTIVE", "authority_scope_mismatch"
         granted = capabilities.get(principal, set()) if isinstance(capabilities, dict) else set()
+        authority_ref = authority.get("adoption_event_id") if isinstance(authority, dict) else None
+        authority_digest = _canonical_sha({name: value for name, value in authority.items() if name != "signature"}) if isinstance(authority, dict) else None
         evidence = {
             "resolver_version": "governed-native-v1", "principal": principal, "capability": capability,
             "target_thread": thread_id, "manifest_id": manifest.get("id"), "manifest_sha256": manifest.get("sha256"),
-            "authority": _jsonable(authority), "disposition": disposition, "reason_code": reason,
+            "authority_ref": authority_ref, "authority_digest": authority_digest,
+            "resolver_key_id": authority.get("resolver_key_id") if isinstance(authority, dict) else None,
+            "authority_sequence": authority.get("authority_sequence") if isinstance(authority, dict) else None,
+            "authority_watermark": authority.get("authority_watermark") if isinstance(authority, dict) else None,
+            "signature_valid": isinstance(authority, dict), "disposition": disposition, "reason_code": reason,
         }
         self.db.execute(
-            "INSERT INTO governance_resolution_audit VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO governance_resolution_audit(
+                 resolution_id,native_request_principal,native_request_operation,native_request_key,
+                 action_capability,target_thread,manifest_id,manifest_sha256,authority_ref,authority_digest,
+                 disposition,reason_code,evidence_json,resolved_at,resolver_key_id,authority_sequence,authority_watermark)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 str(uuid.uuid4()), principal, operation, request_key, capability, str(thread_id), manifest.get("id"),
-                manifest.get("sha256"), authority.get("authority_ref") if isinstance(authority, dict) else None,
-                authority.get("digest") if isinstance(authority, dict) else None, disposition, reason,
+                manifest.get("sha256"), authority_ref, authority_digest, disposition, reason,
                 canonical(evidence), now(),
+                authority.get("resolver_key_id") if isinstance(authority, dict) else None,
+                authority.get("authority_sequence") if isinstance(authority, dict) else None,
+                authority.get("authority_watermark") if isinstance(authority, dict) else None,
             ),
         )
         if disposition != "EFFECTIVE":
@@ -474,7 +604,7 @@ class NativeLedger:
             # action.  No ordinary ledger mutation has happened yet.
             self.db.commit()
             _fail("forbidden", f"principal lacks {capability}")
-        return authority
+        return {**authority, "authority_ref": authority_ref, "digest": authority_digest, "capabilities": capabilities}
 
     def _validate_event(self, principal, revision, payload):
         if "represented_actor" in payload and payload["represented_actor"] != principal:
@@ -542,11 +672,17 @@ class NativeLedger:
             event["criteria_refs"] = authoritative_criteria
             if purpose == "CORRECTION":
                 corrected = event.get("corrects_event")
-                target = self.db.execute("SELECT 1 FROM ledger_events WHERE event_id=? AND thread_id=?", (corrected, event["thread_id"])).fetchone()
+                target = self.db.execute("SELECT * FROM ledger_events WHERE event_id=? AND thread_id=?", (corrected, event["thread_id"])).fetchone()
                 if not target:
                     _fail("invalid_transition", "correction must reference an event in the same thread")
+                if target["principal"] != principal:
+                    _fail("forbidden", "only the target event author may correct that event")
                 if state != latest["state"]:
                     _fail("invalid_transition", "correction purpose carries the current lifecycle state")
+                if state == "OPEN" and principal != opening["owner"]:
+                    _fail("forbidden", "only the authoritative owner may correct an open Request")
+                if state in {"WORKING", "BLOCKED", "RESOLVED"} and principal not in {opening["owner"], opening["addressee"]}:
+                    _fail("forbidden", "principal is not an authoritative work actor")
                 return event
             if state == "OPEN":
                 _fail("invalid_transition", "a terminal or existing thread cannot be reopened")
@@ -554,6 +690,8 @@ class NativeLedger:
                 _fail("forbidden", "only the authoritative addressee may begin work")
             if state in {"WORKING", "BLOCKED", "RESOLVED"} and principal not in {opening["owner"], opening["addressee"]}:
                 _fail("forbidden", "principal is not an authoritative work actor")
+            if state == "CANCELLED" and principal not in {opening["owner"], opening["addressee"], "operator"}:
+                _fail("forbidden", "only the owner, addressee, or operator may cancel a Request")
             if state == "RESOLVED" and (not event.get("evidence_refs") or not authoritative_criteria):
                 _fail("context_required", "resolution requires evidence and criteria dispositions")
             if state == "CLOSED":
@@ -646,12 +784,22 @@ class NativeLedger:
             _fail("context_required", "context receipt expired")
         if self.db.execute("SELECT 1 FROM context_receipt_consumptions WHERE receipt_id=?", (receipt["receipt_id"],)).fetchone():
             _fail("context_required", "context receipt already consumed")
+        if receipt["receipt_hash_key_id"] != self._receipt_key_id:
+            _fail("context_required", "context receipt key binding is unavailable")
+        bundle = self.db.execute("SELECT * FROM context_bundles WHERE bundle_id=?", (receipt["bundle_id"],)).fetchone()
+        persisted_hashes = self._validated_bundle_hashes(bundle)
+        if (
+            receipt["bundle_sha256"] != bundle["bundle_sha256"]
+            or receipt["required_item_hashes_json"] != bundle["required_item_hashes_json"]
+            or receipt["required_items_sha256"] != _canonical_sha(persisted_hashes)
+        ):
+            _fail("context_required", "persisted receipt binding is invalid")
         manifest = self._manifest()
         if receipt["manifest_id"] != manifest["id"] or receipt["manifest_sha256"] != manifest["sha256"]:
             _fail("context_required", "context manifest changed")
         selected, _ = self._context_items(principal, action, thread_id, revision, manifest)
         current_hashes = sorted(item["sha256"] for item in selected)
-        if current_hashes != json.loads(receipt["required_item_hashes_json"]):
+        if current_hashes != persisted_hashes:
             _fail("context_required", "authoritative context changed after receipt issuance")
         retrieved = set()
         for row in self.db.execute("SELECT detail_json FROM context_audit WHERE bundle_id=? AND kind='item_retrieved'", (receipt["bundle_id"],)):
@@ -714,6 +862,21 @@ class NativeLedger:
             return False
         if _sha(row["metadata_json"].encode("utf-8")) != row["metadata_sha256"]:
             return False
+        if row["predecessor_event_id"] is None:
+            if row["predecessor_commit_sha256"] is not None or row["thread_ordinal"] != 0:
+                return False
+        else:
+            predecessor = self.db.execute(
+                "SELECT thread_id,thread_ordinal,commit_sha256 FROM ledger_events WHERE event_id=?",
+                (row["predecessor_event_id"],),
+            ).fetchone()
+            if (
+                not predecessor
+                or predecessor["thread_id"] != row["thread_id"]
+                or predecessor["thread_ordinal"] != row["thread_ordinal"] - 1
+                or predecessor["commit_sha256"] != row["predecessor_commit_sha256"]
+            ):
+                return False
         envelope = {
             "event_id": row["event_id"], "thread_id": row["thread_id"], "thread_ordinal": row["thread_ordinal"],
             "post_uid": row["post_uid"],
@@ -726,8 +889,12 @@ class NativeLedger:
         }
         return _canonical_sha(envelope) == row["commit_sha256"]
 
-    def get_thread(self, thread_id, *, principal="operator", include_archived=False):
-        if principal not in READ_PRINCIPALS:
+    def get_thread(self, thread_id, *, principal="operator", capabilities=None, include_archived=False):
+        if capabilities is None:
+            from .auth import NATIVE_CAPABILITY_POLICIES
+            capabilities = NATIVE_CAPABILITY_POLICIES["townsquare-mvp-v1"].get(principal, set())
+        capabilities = set(capabilities)
+        if principal not in READ_PRINCIPALS or "post:read" not in capabilities:
             _fail("forbidden", "principal lacks post:read")
         archived = self.db.execute("SELECT * FROM logical_archives WHERE thread_id=?", (thread_id,)).fetchone()
         if archived and not include_archived:
@@ -738,7 +905,7 @@ class NativeLedger:
         ).fetchall()
         if not rows:
             _fail("invalid", "unknown thread")
-        if any(row["sensitivity"] == "RESTRICTED" for row in rows) and principal in {"viewer", "crier", "projector"}:
+        if any(row["sensitivity"] == "RESTRICTED" for row in rows) and "content:restricted:read" not in capabilities:
             _fail("forbidden", "restricted content capability required")
         events = []
         for row in rows:
@@ -801,7 +968,7 @@ class NativeLedger:
         if registry_dep and not registry_dep["available"]:
             registry = {"status": "DEGRADED", "agents": None, "findings": [{"code": "registry_unavailable", "detail": registry_dep["detail"]}]}
         else:
-            registry = {"status": "OK", "agents": [dict(row) for row in self.db.execute("SELECT * FROM registry_agents ORDER BY agent_id")], "findings": []}
+            registry = {"status": "EXTERNAL", "agents": None, "findings": []}
         boards = {}
         projects = {}
         for row in self.db.execute("SELECT thread_id,metadata_json FROM ledger_events WHERE kind NOT IN ('CONTROL','ARCHIVE','REGISTRY_AUDIT') ORDER BY ledger_seq"):
@@ -1049,78 +1216,31 @@ class NativeLedger:
     # ---- registry audit contract ------------------------------------
 
     def registry_mutate(self, principal, operation, record, *, event_uuid=None, deliver=True):
-        if principal != "registry-admin":
-            _fail("forbidden", "registry mutation capability required")
-        if operation not in {"register", "retire"} or not isinstance(record, dict) or not isinstance(record.get("agent_id"), str) or not record["agent_id"]:
-            _fail("invalid", "invalid registry mutation")
-        event_uuid = event_uuid or str(uuid.uuid4())
-        payload = {"operation": operation, "record": record}
-        payload_json = canonical(payload)
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            existing = self.db.execute("SELECT * FROM registry_events WHERE event_uuid=?", (event_uuid,)).fetchone()
-            if existing:
-                if existing["canonical_payload"] != payload_json:
-                    _fail("conflict", "registry event UUID payload mismatch")
-                agent = self.db.execute("SELECT * FROM registry_agents WHERE agent_id=?", (existing["agent_id"],)).fetchone()
-                result = {"event_uuid": event_uuid, "agent_id": existing["agent_id"], "operation": existing["operation"], "status": agent["status"]}
-                self.db.commit()
-            else:
-                current = self.db.execute("SELECT * FROM registry_agents WHERE agent_id=?", (record["agent_id"],)).fetchone()
-                if operation == "retire" and not current:
-                    _fail("invalid", "cannot retire unknown agent")
-                status = "active" if operation == "register" else "retired"
-                stamped = now()
-                self.db.execute("INSERT INTO registry_events VALUES (?,?,?,?,?,?)", (event_uuid, operation, record["agent_id"], principal, payload_json, stamped))
-                self.db.execute(
-                    "INSERT INTO registry_agents VALUES (?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET status=excluded.status,record_json=excluded.record_json,updated_event_uuid=excluded.updated_event_uuid,updated_at=excluded.updated_at",
-                    (record["agent_id"], status, canonical(record), event_uuid, stamped),
-                )
-                audit_payload = canonical({"actor": "registry", "board": "BOARD-AUDIT-RECORD", "event_uuid": event_uuid, "mutation": payload})
-                self.db.execute("INSERT INTO registry_outbox VALUES (?,?,?,?)", (event_uuid, audit_payload, _sha(audit_payload.encode()), stamped))
-                self.db.commit()
-                result = {"event_uuid": event_uuid, "agent_id": record["agent_id"], "operation": operation, "status": status}
-        except NativeLedgerError:
-            self.db.rollback()
-            raise
-        except Exception:
-            self.db.rollback()
-            raise
-        if deliver:
-            self._deliver_registry_outbox(event_uuid)
-        return result
+        _fail("forbidden", "Registry authority is external; submit only authenticated audit events")
 
     def registry_query(self, agent_id):
-        row = self.db.execute("SELECT * FROM registry_agents WHERE agent_id=?", (agent_id,)).fetchone()
-        return dict(row) if row else None
+        _fail("forbidden", "Registry reads belong to the external Registry service")
 
     def registry_history(self, agent_id):
-        return [dict(row) for row in self.db.execute("SELECT * FROM registry_events WHERE agent_id=? ORDER BY created_at,event_uuid", (agent_id,))]
+        _fail("forbidden", "Registry history belongs to the external Registry service")
 
     def registry_outbox(self, event_uuid):
-        row = self.db.execute("SELECT * FROM registry_outbox WHERE event_uuid=?", (event_uuid,)).fetchone()
-        return dict(row) if row else None
-
-    def _deliver_registry_outbox(self, event_uuid):
-        if self.db.execute("SELECT 1 FROM registry_audit_events WHERE event_uuid=?", (event_uuid,)).fetchone():
-            return
-        outbox = self.db.execute("SELECT * FROM registry_outbox WHERE event_uuid=?", (event_uuid,)).fetchone()
-        if not outbox:
-            return
-        payload = json.loads(outbox["canonical_payload"])
-        self.append_registry_audit("registry-audit", {"board": payload["board"], "actor": payload["actor"], "event_uuid": payload["event_uuid"]})
+        _fail("forbidden", "Registry outbox belongs to the external Registry service")
 
     def append_registry_audit(self, principal, payload):
         if principal != "registry-audit" or not isinstance(payload, dict) or set(payload) != {"board", "actor", "event_uuid"} or payload.get("board") != "BOARD-AUDIT-RECORD" or payload.get("actor") != "registry" or not isinstance(payload.get("event_uuid"), str):
             _fail("forbidden", "fixed registry audit capability/schema required")
-        if self.db.execute("SELECT 1 FROM registry_audit_events WHERE event_uuid=?", (payload["event_uuid"],)).fetchone():
-            return {"event_uuid": payload["event_uuid"]}
         payload_json = canonical(payload)
+        existing = self.db.execute("SELECT canonical_payload FROM registry_audit_events WHERE event_uuid=?", (payload["event_uuid"],)).fetchone()
+        if existing:
+            if existing["canonical_payload"] != payload_json:
+                _fail("conflict", "registry audit event UUID payload mismatch")
+            return {"event_uuid": payload["event_uuid"]}
         self.db.execute("BEGIN IMMEDIATE")
         try:
             ledger_event_id = str(uuid.uuid4())
             self._append_internal_event("__registry_audit__", "REGISTRY_AUDIT", "RECORDED", payload_json, "registry", event_id=ledger_event_id)
-            self.db.execute("INSERT INTO registry_audit_events(event_uuid,actor,board,canonical_payload,payload_sha256,created_at) VALUES (?,?,?,?,?,?)", (payload["event_uuid"], "registry", "BOARD-AUDIT-RECORD", payload_json, _sha(payload_json.encode()), now()))
+            self.db.execute("INSERT INTO registry_audit_events(event_uuid,actor,board,canonical_payload,payload_sha256,created_at,authenticated_principal) VALUES (?,?,?,?,?,?,?)", (payload["event_uuid"], "registry", "BOARD-AUDIT-RECORD", payload_json, _sha(payload_json.encode()), now(), principal))
             self.db.commit()
             return {"event_uuid": payload["event_uuid"], "ledger_event_id": ledger_event_id}
         except sqlite3.IntegrityError as exc:
@@ -1136,10 +1256,7 @@ class NativeLedger:
         return [dict(row) for row in self.db.execute("SELECT * FROM registry_audit_events WHERE event_uuid=? ORDER BY audit_seq", (event_uuid,))]
 
     def reconcile_registry_outbox(self):
-        pending = [row[0] for row in self.db.execute("SELECT o.event_uuid FROM registry_outbox o LEFT JOIN registry_audit_events a USING(event_uuid) WHERE a.event_uuid IS NULL ORDER BY o.created_at,o.event_uuid")]
-        for event_uuid in pending:
-            self._deliver_registry_outbox(event_uuid)
-        return {"reconciled": len(pending)}
+        _fail("forbidden", "Registry reconciliation belongs to the external Registry service")
 
     # ---- safe display ------------------------------------------------
 

@@ -33,3 +33,14 @@ def migrate(db):
                 for statement in statements: db.execute(statement)
                 db.execute("INSERT INTO schema_migrations VALUES (?,strftime('%Y-%m-%dT%H:%M:%SZ','now'))",(version,)); db.commit()
             except Exception: db.rollback(); raise
+
+def verify_schema(db):
+    """Fail closed unless the canonical migrator has applied this release exactly."""
+    expected={int(path.name[:3]) for path in MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")}
+    table=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone()
+    if not table: raise RuntimeError("Registrar schema is not migrated")
+    applied={row[0] for row in db.execute("SELECT version FROM schema_migrations")}
+    if applied != expected:
+        missing=sorted(expected-applied); unexpected=sorted(applied-expected)
+        raise RuntimeError(f"Registrar schema is not release-ready: missing={missing} unexpected={unexpected}")
+    return max(expected) if expected else 0

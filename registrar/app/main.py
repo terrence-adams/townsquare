@@ -2,9 +2,9 @@ import os,sqlite3
 from fastapi import Depends,FastAPI,Header,HTTPException,Query,Request
 from fastapi.responses import JSONResponse
 from .auth import authenticate_identity,authenticate_native_identity
-from .db import migrate,session
+from .db import session,verify_schema
 from .service import Conflict,Forbidden,Invalid,Registrar,Unavailable
-from .native_ledger import NativeLedger,NativeLedgerError
+from .native_ledger import NativeLedger,NativeLedgerError,ensure_receipt_key_at_startup
 from .attestation import verify as verify_attestation
 from .runtime import ensure_runtime_mode,verification_enabled
 
@@ -12,42 +12,12 @@ ensure_runtime_mode(os.environ.get("REGISTRAR_ENV","development"))
 
 DB_PATH=os.environ.get("REGISTRAR_DB","/data/registrar.db")
 
-# Migrate at import, inside a function, on a `session` that closes in its own
-# `finally` -- before `app` exists and long before any request can arrive.
-# This used to be the same call that left its connection behind as the
-# process-lifetime `db` global every handler then shared -- the defect this
-# change removes (docs/town-registrar-connection-concurrency.md).
-#
-# Two deliberate properties (Addendum B2), neither of which a bare
-# connect/migrate/close achieved:
-#
-# - Function scope, not a module-level `_boot` name that is merely closed.
-#   "No handler can reach a module-level connection" becomes structurally
-#   true instead of true-by-convention -- there is no module attribute of
-#   this module that is a sqlite3.Connection, so a future edit cannot
-#   resurrect the shared-global topology by dropping a `.close()` while
-#   leaving the name.
-# - `session` closes on the failure path too. The previous line closed only
-#   on success: if `migrate()` raises (partial migration, DDL error, a busy
-#   BEGIN EXCLUSIVE) the traceback frame holds the connection open, and on
-#   Windows an open handle blocks deleting the file -- exactly the hazard
-#   `session` exists for.
-#
-# `connect` is deliberately not imported into this module: `session` is the
-# only door out of db.py it uses, so everything main.py opens is closed in a
-# `finally` by construction.
-#
-# Deliberately NOT a `lifespan` handler (Addendum A1): `main.py`'s other two
-# startup gates -- ensure_runtime_mode above and
-# ensure_cursor_signing_key_at_startup below -- are import-time side effects,
-# and a split startup is worse than either pure option. Starlette only runs
-# lifespan inside `TestClient.__enter__`, so moving migration alone would also
-# force a rewrite of the startup-probe security regression tests that assert a
-# misprovisioned key raises on *import*. Moving all three gates into lifespan
-# together, with the matching harness rewrite, is its own change.
-def _migrate_at_boot(path):
-    with session(path) as db: migrate(db)
-_migrate_at_boot(DB_PATH)
+# The separate one-shot migrator is the sole schema writer. Application boot
+# only verifies its exact release schema and never races it with DDL.
+def _verify_schema_at_boot(path):
+    with session(path) as db: verify_schema(db)
+_verify_schema_at_boot(DB_PATH)
+ensure_receipt_key_at_startup()
 
 app=FastAPI(title="Town Registrar",version="1")
 
@@ -320,8 +290,8 @@ async def native_event(request:Request,authorization:str|None=Header(None),idemp
 
 @app.get("/v1/native/threads/{thread_id}")
 def native_thread(thread_id:str,include_archived:bool=False,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
-    who,_=native_identity(db,authorization,"post:read")
-    return invoke_native(lambda:_native_ledger(db).get_thread(thread_id,principal=who,include_archived=include_archived))
+    who,capabilities=native_identity(db,authorization,"post:read")
+    return invoke_native(lambda:_native_ledger(db).get_thread(thread_id,principal=who,capabilities=capabilities,include_archived=include_archived))
 
 @app.get("/v1/native/discovery")
 def native_discovery(authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
@@ -337,6 +307,11 @@ def native_notices(event_id:str|None=None,authorization:str|None=Header(None),db
 def native_notice_attempts(notice_id:str,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     who,_=native_identity(db,authorization,"notice:read")
     return {"attempts":invoke_native(lambda:_native_ledger(db).notice_attempts(notice_id,principal=who))}
+
+@app.post("/v1/native/registry-audit-events",status_code=201)
+async def native_registry_audit(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"registry:audit:append"); body=await request.json()
+    return invoke_native(lambda:_native_ledger(db).append_registry_audit(who,body))
 
 @app.post("/v1/operator/stop")
 async def native_stop(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):

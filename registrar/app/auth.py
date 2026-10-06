@@ -37,15 +37,14 @@ def authenticate_identity(db,credential,scope):
 # decision, while each credential pins the policy version it was issued for.
 NATIVE_CAPABILITY_POLICIES={
     "townsquare-mvp-v1":{
-        "writer-a":{"post:read","context:read","context:attest","request:open","request:work","request:resolve"},
-        "writer-b":{"post:read","context:read","context:attest","request:work","request:block","request:resolve","request:cancel"},
+        "writer-a":{"post:read","context:read","context:attest","request:open","request:work","request:resolve","request:correct"},
+        "writer-b":{"post:read","context:read","context:attest","request:work","request:block","request:resolve","request:cancel","request:correct"},
         "reviewer":{"post:read","context:read","context:attest","request:accept"},
         "viewer":{"post:read","notice:read"},
         "crier":{"post:read","notice:read"},
         "projector":{"post:read","notice:read"},
         "operator":{"post:read","notice:read","context:read","context:attest","content:restricted:read","operator:stop","request:cancel","request:archive"},
         "operator-resume":{"operator:resume"},
-        "registry-admin":{"registry:mutate"},
         "registry-audit":{"registry:audit:append"},
     }
 }
@@ -83,7 +82,7 @@ def authenticate_native_identity(db,credential,capability):
 def main():
     """Offline bootstrap; run only from the protected Registrar container console."""
     import argparse,sys
-    from .db import connect,migrate
+    from .db import connect,verify_schema
     ap=argparse.ArgumentParser(); ap.add_argument("--db",required=True); ap.add_argument("--principal",required=True)
     ap.add_argument("--namespace",action="append",default=[]); ap.add_argument("--board",action="append",default=[])
     # WS3 item 7: `action="append"` APPENDS to `default`, so the old
@@ -97,10 +96,14 @@ def main():
     # all, instead of silently unioning it into every invocation.
     ap.add_argument("--scope",action="append",default=[]); args=ap.parse_args()
     if not args.scope: args.scope=["post:write"]
-    db=connect(args.db); migrate(db)
-    for kind,values in (("namespace",args.namespace),("board",args.board)):
-        for value in values: db.execute("INSERT OR IGNORE INTO acls VALUES (?,?,?,NULL,NULL)",(args.principal,kind,value.lower()))
-    token=create_token(db,args.principal,args.scope)
+    db=connect(args.db)
+    try:
+        verify_schema(db)
+        for kind,values in (("namespace",args.namespace),("board",args.board)):
+            for value in values: db.execute("INSERT OR IGNORE INTO acls VALUES (?,?,?,NULL,NULL)",(args.principal,kind,value.lower()))
+        token=create_token(db,args.principal,args.scope)
+    finally:
+        db.close()
     # gsp's NEW-2 (WS3 post-review, 2026-09-22): the class of bug item 7
     # just fixed (a token silently minted with MORE scope than requested)
     # was invisible at mint time -- only the credential itself ever printed.
