@@ -1,8 +1,8 @@
-import json,os,sqlite3,urllib.request
+import json,os,secrets,sqlite3,urllib.request
 from fastapi import Depends,FastAPI,Header,HTTPException,Query,Request
 from fastapi.responses import JSONResponse
 from .auth import authenticate_identity,authenticate_native_identity
-from .db import LEDGER_SERVICE_VERSION,REGISTRY_AUDIT_CONTRACT_VERSION,registry_integration_status,session,verify_schema
+from .db import LEDGER_SERVICE_VERSION,REGISTRY_AUDIT_CONTRACT_VERSION,REGISTRY_SCHEMA_VERSION,REGISTRY_SERVICE_VERSION,registry_integration_status,session,verify_schema
 from .service import Conflict,Forbidden,Invalid,Registrar,Unavailable
 from .native_ledger import NativeLedger,NativeLedgerError,ensure_receipt_key_at_startup
 from .attestation import verify as verify_attestation
@@ -205,9 +205,9 @@ def _registry_peer_readiness():
         peer=json.loads(raw.decode("utf-8")); compatibility=peer.get("compatibility",{})
         compatible=(
             peer.get("ok") is True
-            and peer.get("schema_version")==1
-            and compatibility.get("registry_service")=="townsquare-registry-v0"
-            and compatibility.get("registry_schema")==1
+            and peer.get("schema_version")==REGISTRY_SCHEMA_VERSION
+            and compatibility.get("registry_service")==REGISTRY_SERVICE_VERSION
+            and compatibility.get("registry_schema")==REGISTRY_SCHEMA_VERSION
             and compatibility.get("ledger_service")==LEDGER_SERVICE_VERSION
             and compatibility.get("ledger_schema")==14
             and compatibility.get("audit_contract")==REGISTRY_AUDIT_CONTRACT_VERSION
@@ -216,8 +216,7 @@ def _registry_peer_readiness():
     except Exception:
         return {"compatible":False,"detail":"registry readiness exchange failed"}
 
-@app.get("/health/ready")
-def ready(db:sqlite3.Connection=Depends(get_db)):
+def _readiness_state(db):
     checks={"foreign_keys":db.execute("PRAGMA foreign_keys").fetchone()[0],"journal_mode":db.execute("PRAGMA journal_mode").fetchone()[0],"synchronous":db.execute("PRAGMA synchronous").fetchone()[0]}
     if checks!={"foreign_keys":1,"journal_mode":"wal","synchronous":2}: raise HTTPException(503,checks)
     schema_version=verify_schema(db); registry=registry_integration_status()
@@ -229,6 +228,38 @@ def ready(db:sqlite3.Connection=Depends(get_db)):
         if not peer["compatible"]: raise HTTPException(503,{**result,"ok":False,"registry_peer":peer})
         result["registry_peer"]=peer
     return result
+
+def _read_readiness_token(path,label):
+    if not path: raise HTTPException(503,f"{label} credential unavailable")
+    try:
+        with open(path,"r",encoding="utf-8") as handle: token=handle.read(4097).strip()
+    except OSError: raise HTTPException(503,f"{label} credential unavailable")
+    if not token or len(token)>4096: raise HTTPException(503,f"{label} credential unavailable")
+    return token
+
+def _authorize_registry_peer(authorization):
+    inbound=_read_readiness_token(os.environ.get("REGISTRY_PEER_READINESS_TOKEN_FILE"),"registry peer readiness")
+    outbound_path=os.environ.get("REGISTRY_READINESS_TOKEN_FILE")
+    if outbound_path:
+        outbound=_read_readiness_token(outbound_path,"registry readiness")
+        if secrets.compare_digest(inbound.encode("utf-8"),outbound.encode("utf-8")):
+            raise HTTPException(503,"directional readiness credentials must be distinct")
+    supplied=authorization[7:] if isinstance(authorization,str) and authorization.startswith("Bearer ") else ""
+    if not secrets.compare_digest(inbound.encode("utf-8"),supplied.encode("utf-8")):
+        raise HTTPException(401,"registry peer readiness authorization required")
+
+@app.get("/health/ready")
+def ready(authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    _authorize_registry_peer(authorization)
+    return _readiness_state(db)
+
+@app.get("/health/internal/ready")
+def internal_ready(request:Request,db:sqlite3.Connection=Depends(get_db)):
+    host=request.client.host if request.client else None
+    if host not in {"127.0.0.1","::1","testclient"}: raise HTTPException(404,"not found")
+    try: _readiness_state(db)
+    except HTTPException: raise HTTPException(503,"not ready")
+    return {"ok":True}
 @app.post("/v1/roots/reserve",status_code=201)
 async def reserve_root(request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     who,_=identity(db,authorization,"post:write"); body=await request.json(); return invoke(lambda:Registrar(db).reserve_root(who,idempotency_key,body))

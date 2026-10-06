@@ -5,7 +5,7 @@ MIGRATIONS=Path(__file__).parents[1]/"migrations"
 LEDGER_SERVICE_VERSION="townsquare-ledger-v0"
 LEDGER_SCHEMA_VERSION=14
 REGISTRY_SERVICE_VERSION="townsquare-registry-v0"
-REGISTRY_SCHEMA_VERSION=1
+REGISTRY_SCHEMA_VERSION=2
 REGISTRY_AUDIT_CONTRACT_VERSION="registry-ledger-audit-v1"
 def connect(path):
     db=sqlite3.connect(path,timeout=5,isolation_level=None,check_same_thread=False); db.row_factory=sqlite3.Row
