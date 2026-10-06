@@ -37,13 +37,13 @@ def authenticate_identity(db,credential,scope):
 # decision, while each credential pins the policy version it was issued for.
 NATIVE_CAPABILITY_POLICIES={
     "townsquare-mvp-v1":{
-        "writer-a":{"post:read","context:read","context:attest","work:open","work:start","work:resolve","work:accept","work:correct"},
-        "writer-b":{"post:read","context:read","context:attest","work:claim","work:start","work:block","work:resolve","work:accept","work:correct"},
-        "reviewer":{"post:read","context:read","context:attest","work:accept"},
+        "writer-a":{"post:read","context:read","context:attest","request:open","request:work","request:resolve"},
+        "writer-b":{"post:read","context:read","context:attest","request:work","request:block","request:resolve","request:cancel"},
+        "reviewer":{"post:read","context:read","context:attest","request:accept"},
         "viewer":{"post:read","notice:read"},
         "crier":{"post:read","notice:read"},
         "projector":{"post:read","notice:read"},
-        "operator":{"post:read","notice:read","context:read","context:attest","content:restricted:read","operator:stop","work:cancel","work:archive"},
+        "operator":{"post:read","notice:read","context:read","context:attest","content:restricted:read","operator:stop","request:cancel","request:archive"},
         "operator-resume":{"operator:resume"},
         "registry-admin":{"registry:mutate"},
         "registry-audit":{"registry:audit:append"},

@@ -350,7 +350,7 @@ async def native_resume(request:Request,authorization:str|None=Header(None),db:s
 
 @app.post("/v1/native/threads/{thread_id}/archive")
 async def native_archive(thread_id:str,request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
-    who,_=native_identity(db,authorization,"work:archive"); body=await request.json()
+    who,_=native_identity(db,authorization,"request:archive"); body=await request.json()
     return invoke_native(lambda:_native_ledger(db).archive_thread(who,thread_id,body.get("reason"),context_receipt=body.get("context_receipt"),expected_revision=body.get("expected_revision")))
 
 def _native_ledger(db):

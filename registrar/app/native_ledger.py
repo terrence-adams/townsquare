@@ -28,10 +28,10 @@ READ_PRINCIPALS = {"writer-a", "writer-b", "reviewer", "viewer", "crier", "proje
 NOTICE_READ_PRINCIPALS = {"viewer", "crier", "projector", "operator"}
 INTERNAL_KINDS = {"CONTROL", "ARCHIVE", "REGISTRY_AUDIT"}
 TERMINAL_STATES = {"CLOSED", "CANCELLED"}
+REQUEST_STATES = {"OPEN", "WORKING", "BLOCKED", "RESOLVED", "CLOSED", "CANCELLED"}
 ACTION_CAPABILITIES = {
-    "OPEN": "work:open", "CLAIMED": "work:claim", "IN_PROGRESS": "work:start",
-    "BLOCKED": "work:block", "RESOLVED": "work:resolve", "CLOSED": "work:accept",
-    "CANCELLED": "work:cancel",
+    "OPEN": "request:open", "WORKING": "request:work", "BLOCKED": "request:block",
+    "RESOLVED": "request:resolve", "CLOSED": "request:accept", "CANCELLED": "request:cancel",
 }
 
 
@@ -318,7 +318,7 @@ class NativeLedger:
             action_capability = self.required_action_capability(payload)
             authority = self._resolve_authority(manifest, principal, action_capability, payload.get("thread_id"), idempotency_key)
             event = self._validate_event(principal, revision, payload)
-            receipt = self._validate_receipt(context_receipt, principal, "post", event["thread_id"], revision)
+            receipt = self._validate_receipt(context_receipt, principal, action_capability, event["thread_id"], revision)
             event_id = str(uuid.uuid4())
             committed_at = now()
             content_bytes = event["body"].encode("utf-8")
@@ -427,12 +427,10 @@ class NativeLedger:
     def required_action_capability(payload):
         if not isinstance(payload, dict):
             _fail("invalid", "event payload must be an object")
-        if str(payload.get("purpose", "")).upper() == "CORRECTION":
-            return "work:correct"
         state = str(payload.get("state", "")).upper()
         capability = ACTION_CAPABILITIES.get(state)
         if not capability:
-            _fail("invalid_transition", "state is outside the adopted Request lifecycle")
+            _fail("invalid_transition", "state is outside the controlled Request lifecycle")
         return capability
 
     def _resolve_authority(self, manifest, principal, capability, thread_id, request_key, *, operation="post"):
@@ -508,7 +506,7 @@ class NativeLedger:
         event["state"] = state
         purpose = str(event.get("purpose", "EVENT")).upper()
         if event["kind"] != "REQUEST":
-            _fail("invalid", "only Request has an adopted governed lifecycle")
+            _fail("invalid", "only Request has a controlled governed lifecycle")
         if state == "CORRECTED":
             _fail("invalid_transition", "correction is a purpose, not a lifecycle state")
         if latest is None:
@@ -552,9 +550,9 @@ class NativeLedger:
                 return event
             if state == "OPEN":
                 _fail("invalid_transition", "a terminal or existing thread cannot be reopened")
-            if state == "CLAIMED" and principal != opening["addressee"]:
-                _fail("forbidden", "only the authoritative addressee may claim work")
-            if state in {"IN_PROGRESS", "BLOCKED", "RESOLVED"} and principal not in {opening["owner"], opening["addressee"]}:
+            if state == "WORKING" and latest["state"] == "OPEN" and principal != opening["addressee"]:
+                _fail("forbidden", "only the authoritative addressee may begin work")
+            if state in {"WORKING", "BLOCKED", "RESOLVED"} and principal not in {opening["owner"], opening["addressee"]}:
                 _fail("forbidden", "principal is not an authoritative work actor")
             if state == "RESOLVED" and (not event.get("evidence_refs") or not authoritative_criteria):
                 _fail("context_required", "resolution requires evidence and criteria dispositions")
@@ -576,11 +574,10 @@ class NativeLedger:
                 if any(value not in {"accepted", "rejected"} for value in dispositions.values()):
                     _fail("invalid_transition", "invalid criterion disposition")
             allowed = {
-                "OPEN": {"CLAIMED", "RESOLVED", "CANCELLED"},
-                "CLAIMED": {"IN_PROGRESS", "BLOCKED", "CANCELLED"},
-                "IN_PROGRESS": {"BLOCKED", "RESOLVED", "CANCELLED"},
-                "BLOCKED": {"IN_PROGRESS", "CANCELLED"},
-                "RESOLVED": {"IN_PROGRESS", "CLOSED", "CANCELLED"},
+                "OPEN": {"WORKING", "CANCELLED"},
+                "WORKING": {"WORKING", "BLOCKED", "RESOLVED", "CANCELLED"},
+                "BLOCKED": {"WORKING", "RESOLVED", "CANCELLED"},
+                "RESOLVED": {"CLOSED", "CANCELLED"},
             }
             if state not in allowed.get(latest["state"], set()):
                 _fail("invalid_transition", f"{latest['state']} cannot transition to {state}")
@@ -743,17 +740,31 @@ class NativeLedger:
             _fail("invalid", "unknown thread")
         if any(row["sensitivity"] == "RESTRICTED" for row in rows) and principal in {"viewer", "crier", "projector"}:
             _fail("forbidden", "restricted content capability required")
-        return {"thread_id": thread_id, "archived": bool(archived), "events": [dict(row) for row in rows]}
+        events = []
+        for row in rows:
+            event = dict(row)
+            metadata = json.loads(event["metadata_json"])
+            if "continues" in metadata:
+                event["continues"] = metadata["continues"]
+            events.append(event)
+        return {"thread_id": thread_id, "archived": bool(archived), "events": events}
 
     def current_projection(self):
-        rows = self.db.execute(
+        rows = list(self.db.execute(
             """SELECT e.thread_id,e.event_id,e.ledger_seq,e.thread_ordinal,e.kind,e.state,e.owner,e.addressee,e.sensitivity,e.committed_at
                FROM ledger_events e JOIN (
                  SELECT thread_id,MAX(thread_ordinal) AS ordinal FROM ledger_events
                  WHERE kind NOT IN ('CONTROL','ARCHIVE','REGISTRY_AUDIT') GROUP BY thread_id
                ) latest ON latest.thread_id=e.thread_id AND latest.ordinal=e.thread_ordinal
                ORDER BY e.thread_id"""
-        )
+        ))
+        obsolete = [row["thread_id"] for row in rows if row["kind"] == "REQUEST" and row["state"] not in REQUEST_STATES]
+        if obsolete:
+            _fail(
+                "context_required",
+                "obsolete native Request lifecycle state requires operator disposition",
+                requirements={"threads": obsolete, "supported_states": sorted(REQUEST_STATES)},
+            )
         return {"threads": [dict(row) for row in rows], "watermark": self.db.execute("SELECT COALESCE(MAX(ledger_seq),0) FROM ledger_events").fetchone()[0]}
 
     def union_reads(self, *, include_legacy=False):
@@ -781,7 +792,7 @@ class NativeLedger:
 
     def open_work(self):
         archived = {row[0] for row in self.db.execute("SELECT thread_id FROM logical_archives")}
-        return [row for row in self.current_projection()["threads"] if row["thread_id"] not in archived and row["state"] not in {"CLOSED", "ARCHIVED"}]
+        return [row for row in self.current_projection()["threads"] if row["thread_id"] not in archived and row["state"] not in TERMINAL_STATES]
 
     def discovery_projection(self):
         threads = self.current_projection()["threads"]
@@ -966,8 +977,8 @@ class NativeLedger:
             if latest["state"] not in TERMINAL_STATES:
                 _fail("context_required", "only a terminal thread is archive eligible")
             manifest = self._manifest()
-            receipt = self._validate_receipt(context_receipt, principal, "archive", thread_id, expected_revision)
-            authority = self._resolve_authority(manifest, principal, "work:archive", thread_id, receipt["receipt_id"], operation="archive")
+            receipt = self._validate_receipt(context_receipt, principal, "request:archive", thread_id, expected_revision)
+            authority = self._resolve_authority(manifest, principal, "request:archive", thread_id, receipt["receipt_id"], operation="archive")
             event_id = str(uuid.uuid4())
             committed = now()
             ledger_seq = self._append_internal_event(thread_id, "ARCHIVE", "ARCHIVED", reason, principal, event_id=event_id)
