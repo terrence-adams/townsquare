@@ -52,6 +52,12 @@ services:
       TOWNSQUARE_SERVICE_ID: townsquare-ledger-v0
       TOWNSQUARE_LEDGER_SCHEMA_HEAD: "14"
       TOWNSQUARE_REGISTRY_AUDIT_CONTRACT: registry-ledger-audit-v1
+      # Release-pinned Registry integration tuple; Ledger readiness fails closed
+      # when this deployed contract does not match its own compiled contract.
+      REGISTRY_INTEGRATION_ENABLED: "true"
+      REGISTRY_SERVICE_ID: townsquare-registry-v0
+      REGISTRY_SCHEMA_HEAD: "1"
+      REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
     volumes:
       - type: bind
         source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
