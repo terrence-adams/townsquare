@@ -24,9 +24,15 @@ MAX_BODY_BYTES = 2 ** 20
 MAX_METADATA_BYTES = 64 * 1024
 RECEIPT_TTL_SECONDS = 900
 MEDIA_TYPES = {"text/plain", "text/plain; charset=utf-8", "text/markdown", "text/markdown; charset=utf-8"}
-WRITE_PRINCIPALS = {"writer-a", "writer-b"}
-READ_PRINCIPALS = WRITE_PRINCIPALS | {"viewer", "crier", "projector", "operator", "operator-resume"}
+READ_PRINCIPALS = {"writer-a", "writer-b", "reviewer", "viewer", "crier", "projector", "operator", "operator-resume"}
+NOTICE_READ_PRINCIPALS = {"viewer", "crier", "projector", "operator"}
 INTERNAL_KINDS = {"CONTROL", "ARCHIVE", "REGISTRY_AUDIT"}
+TERMINAL_STATES = {"CLOSED", "CANCELLED"}
+ACTION_CAPABILITIES = {
+    "OPEN": "work:open", "CLAIMED": "work:claim", "IN_PROGRESS": "work:start",
+    "BLOCKED": "work:block", "RESOLVED": "work:resolve", "CLOSED": "work:accept",
+    "CANCELLED": "work:cancel",
+}
 
 
 class NativeLedgerError(Exception):
@@ -48,6 +54,16 @@ def _canonical_sha(value) -> str:
     return _sha(canonical(value).encode("utf-8"))
 
 
+def _jsonable(value):
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in sorted(value.items())}
+    if isinstance(value, (set, tuple)):
+        return sorted(_jsonable(item) for item in value)
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    return value
+
+
 def _utc_after(seconds: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -62,9 +78,19 @@ def _not_expired(value: str) -> bool:
 class NativeLedger:
     """Single-connection facade; callers provide a migrated SQLite handle."""
 
-    def __init__(self, db: sqlite3.Connection, *, context_manifest=None):
+    def __init__(self, db: sqlite3.Connection, *, context_manifest=None, governance_authority=None):
         self.db = db
         self._context_manifest = context_manifest
+        # The HTTP boundary supplies this from a separately mounted,
+        # operator-controlled resolver result.  The manifest fallback keeps
+        # the direct service adapter backwards compatible: in that adapter
+        # the whole object is dependency-injected, not loaded from a mounted
+        # candidate manifest.
+        self._governance_authority = (
+            governance_authority
+            if governance_authority is not None
+            else context_manifest.get("governance_authority") if isinstance(context_manifest, dict) else None
+        )
         self._failure_boundary = None
         self._receipt_key = os.environ.get(
             "TOWNSQUARE_RECEIPT_HASH_KEY", "townsquare-mvp-local-receipt-hash-key"
@@ -74,6 +100,7 @@ class NativeLedger:
 
     def set_context_manifest(self, manifest):
         self._context_manifest = manifest
+        self._governance_authority = manifest.get("governance_authority") if isinstance(manifest, dict) else None
 
     def _manifest(self):
         manifest = self._context_manifest
@@ -92,7 +119,7 @@ class NativeLedger:
         if not isinstance(action, str) or not isinstance(thread_id, str) or not isinstance(revision, str):
             _fail("context_required", "complete context binding is required")
         bound_principal = principal if isinstance(principal, str) and principal else "__anonymous__"
-        required = [dict(item) for item in manifest["governance"] + manifest["required_items"]]
+        required, contents = self._context_items(bound_principal, action, thread_id, revision, manifest)
         hashes = sorted(item["sha256"] for item in required)
         bundle_id = str(uuid.uuid4())
         manifest_hash = manifest["sha256"]
@@ -112,8 +139,12 @@ class NativeLedger:
             (bundle_id, bound_principal, action, thread_id, revision, manifest["id"], manifest_hash, bundle_hash, canonical(hashes), created),
         )
         self._context_audit("bundle_issued", bound_principal, bundle_id, None, thread_id, {"revision": revision})
-        for item in required:
-            self._context_audit("item_retrieved", bound_principal, bundle_id, None, thread_id, {"ref": item.get("ref"), "sha256": item["sha256"]})
+        for ordinal, item in enumerate(required):
+            self.db.execute(
+                "INSERT INTO context_bundle_items VALUES (?,?,?,?,?,?,?)",
+                (bundle_id, item["item_id"], ordinal, item["ref"], item["source"], contents[item["item_id"]], item["sha256"]),
+            )
+            self._context_audit("required_item_selected", bound_principal, bundle_id, None, thread_id, {"item_id": item["item_id"], "ref": item["ref"], "source": item["source"], "sha256": item["sha256"]})
         return {
             "bundle_id": bundle_id,
             "bundle_sha256": bundle_hash,
@@ -128,6 +159,59 @@ class NativeLedger:
             "limitations": ["does_not_prove_comprehension"],
         }
 
+    def _context_items(self, principal, action, thread_id, revision, manifest=None):
+        manifest = manifest or self._manifest()
+        entries = []
+        for item in manifest["governance"]:
+            entries.append(("governance", str(item.get("ref", "governance")), _jsonable(item)))
+        for item in manifest["required_items"]:
+            entries.append(("operator_note", str(item.get("ref", "operator-note")), _jsonable(item)))
+        authority = _jsonable(self._governance_authority)
+        scope = {
+            "action": action, "principal": principal, "target_thread": thread_id,
+            "expected_revision": revision, "governance_authority": authority,
+            "control_generation": self.db.execute("SELECT COALESCE(MAX(generation),0) FROM control_events").fetchone()[0],
+        }
+        entries.append(("scope", f"scope:{action}:{thread_id}", scope))
+        latest = self._latest_event(thread_id)
+        if latest:
+            metadata = json.loads(latest["metadata_json"])
+            snapshot = {
+                "event_id": latest["event_id"], "commit_sha256": latest["commit_sha256"],
+                "state": latest["state"], "kind": latest["kind"], "owner": latest["owner"],
+                "addressee": latest["addressee"], "criteria_refs": metadata.get("criteria_refs", []),
+            }
+            entries.append(("thread", f"thread:{thread_id}:{latest['event_id']}", snapshot))
+            for criterion in metadata.get("criteria_refs", []):
+                entries.append(("acceptance_criterion", f"criterion:{criterion}", {"criterion_ref": criterion, "thread_id": thread_id, "opening_event_id": self._opening_event(thread_id)["event_id"]}))
+        selected = []
+        contents = {}
+        for ordinal, (source, ref, content) in enumerate(entries):
+            content_json = canonical(content)
+            digest = _sha(content_json.encode("utf-8"))
+            item_id = _sha(f"{source}\0{ref}\0{ordinal}\0{digest}".encode("utf-8"))
+            selected.append({"item_id": item_id, "ref": ref, "source": source, "sha256": digest})
+            contents[item_id] = content_json
+        return selected, contents
+
+    def retrieve_context_item(self, bundle_id, item_reference, *, principal):
+        bound_principal = principal if isinstance(principal, str) and principal else "__anonymous__"
+        bundle = self.db.execute("SELECT * FROM context_bundles WHERE bundle_id=?", (bundle_id,)).fetchone()
+        if not bundle or bundle["principal"] != bound_principal:
+            _fail("context_required", "unknown or mismatched context bundle")
+        row = self.db.execute(
+            "SELECT * FROM context_bundle_items WHERE bundle_id=? AND (item_id=? OR content_sha256=? OR ref=?)",
+            (bundle_id, item_reference, item_reference, item_reference),
+        ).fetchone()
+        if not row:
+            _fail("context_required", "unknown context item")
+        self._context_audit("item_retrieved", bound_principal, bundle_id, None, bundle["target_thread"], {"item_id": row["item_id"], "ref": row["ref"], "source": row["source"], "sha256": row["content_sha256"]})
+        return {"item_id": row["item_id"], "ref": row["ref"], "source": row["source"], "sha256": row["content_sha256"], "content": json.loads(row["content_json"])}
+
+    def retrieve_context_items(self, bundle_id, principal):
+        refs = [row[0] for row in self.db.execute("SELECT item_id FROM context_bundle_items WHERE bundle_id=? ORDER BY ordinal", (bundle_id,))]
+        return [self.retrieve_context_item(bundle_id, ref, principal=principal) for ref in refs]
+
     def acknowledge_context(self, bundle_id, principal, acknowledged_hashes):
         bundle = self.db.execute("SELECT * FROM context_bundles WHERE bundle_id=?", (bundle_id,)).fetchone()
         bound_principal = principal if isinstance(principal, str) and principal else "__anonymous__"
@@ -136,6 +220,13 @@ class NativeLedger:
         expected = json.loads(bundle["required_item_hashes_json"])
         if not isinstance(acknowledged_hashes, list) or sorted(acknowledged_hashes) != expected or len(set(acknowledged_hashes)) != len(expected):
             _fail("context_required", "every exact context item hash must be acknowledged")
+        retrieved = set()
+        for row in self.db.execute("SELECT detail_json FROM context_audit WHERE bundle_id=? AND kind='item_retrieved'", (bundle_id,)):
+            detail = json.loads(row[0])
+            if detail.get("sha256"):
+                retrieved.add(detail["sha256"])
+        if retrieved != set(expected):
+            _fail("context_required", "every selected context item must be retrieved before receipt issuance")
         token = secrets.token_urlsafe(32)
         token_hash = self._receipt_hash(token)
         receipt_id = str(uuid.uuid4())
@@ -187,8 +278,8 @@ class NativeLedger:
     # ---- native writes -----------------------------------------------
 
     def post_event(self, principal, idempotency_key, context_receipt, revision, payload):
-        if not principal or principal in {"expired-writer", "revoked-writer"} or principal not in WRITE_PRINCIPALS:
-            _fail("forbidden", "principal lacks post:write")
+        if not principal or principal in {"expired-writer", "revoked-writer"}:
+            _fail("forbidden", "authenticated governed principal required")
         if not isinstance(idempotency_key, str) or not idempotency_key or len(idempotency_key) > 200:
             _fail("invalid", "Idempotency-Key is required")
         if not isinstance(payload, dict):
@@ -209,10 +300,10 @@ class NativeLedger:
                 self.db.commit()
                 return result
             self._maybe_fail("after_idempotency_lookup")
-            self._manifest()
+            manifest = self._manifest()
             self._assert_not_stopped()
             latest = self._latest_event(payload.get("thread_id")) if isinstance(payload.get("thread_id"), str) else None
-            if latest is not None and revision == "new":
+            if latest is not None and revision != latest["event_id"]:
                 issued = self.db.execute(
                     "SELECT * FROM context_receipt_issues WHERE token_hash=?", (self._receipt_hash(context_receipt),)
                 ).fetchone()
@@ -221,6 +312,11 @@ class NativeLedger:
                 ).fetchone()
                 if consumed or principal != latest["principal"]:
                     _fail("context_required", "fresh current context is required", requirements={"expected_revision": latest["event_id"]})
+                if str(payload.get("state", "")).upper() == "OPEN" and str(payload.get("purpose", "")).upper() != "CORRECTION":
+                    _fail("invalid_transition", "a terminal or existing thread cannot be reopened")
+                _fail("conflict", "stale revision", requirements={"expected_revision": latest["event_id"]})
+            action_capability = self.required_action_capability(payload)
+            authority = self._resolve_authority(manifest, principal, action_capability, payload.get("thread_id"), idempotency_key)
             event = self._validate_event(principal, revision, payload)
             receipt = self._validate_receipt(context_receipt, principal, "post", event["thread_id"], revision)
             event_id = str(uuid.uuid4())
@@ -248,7 +344,7 @@ class NativeLedger:
                 "principal": principal,
                 "represented_actor": principal,
                 "claimed_origin": "native-api",
-                "authority_scope": "post:write",
+                "authority_scope": action_capability,
                 "committed_at": committed_at,
             }
             commit_hash = _canonical_sha(envelope)
@@ -271,7 +367,7 @@ class NativeLedger:
                     event_id, event["thread_id"], ordinal, post_uid, predecessor_id, predecessor_hash,
                     event["kind"], event["state"], event.get("owner"), event.get("addressee"), event["sensitivity"],
                     metadata_json, metadata_hash, content_hash, len(content_bytes), principal, principal,
-                    "native-api", "post:write", committed_at, commit_hash,
+                    "native-api", action_capability, committed_at, commit_hash,
                 ),
             )
             ledger_seq = cursor.lastrowid
@@ -297,7 +393,7 @@ class NativeLedger:
             self._maybe_fail("after_receipt_consumption")
             self.db.execute(
                 "INSERT INTO ledger_audit(event_id,principal,operation,detail_json,created_at) VALUES (?,?,?,?,?)",
-                (event_id, principal, "post", canonical({"idempotency_key_sha256": _sha(idempotency_key.encode())}), committed_at),
+                (event_id, principal, "post", canonical({"idempotency_key_sha256": _sha(idempotency_key.encode()), "action_capability": action_capability, "authority_ref": authority["authority_ref"]}), committed_at),
             )
             self._maybe_fail("after_audit")
             pointer = {"notice_id": notice_id, "event_id": event_id}
@@ -305,6 +401,12 @@ class NativeLedger:
                 "INSERT INTO notice_intents VALUES (?,?,?,?,?,?,?,?)",
                 (notice_id, event_id, ledger_seq, 1, event.get("addressee"), "poll", canonical(pointer), committed_at),
             )
+            continues = event.get("continues")
+            if continues:
+                self.db.execute(
+                    "INSERT INTO thread_continuations VALUES (?,?,?,?,?)",
+                    (event["thread_id"], continues["thread_id"], "continues", event_id, committed_at),
+                )
             self._maybe_fail("after_notice")
             self._maybe_fail("before_commit")
             self.db.commit()
@@ -320,6 +422,61 @@ class NativeLedger:
         except Exception:
             self.db.rollback()
             raise
+
+    @staticmethod
+    def required_action_capability(payload):
+        if not isinstance(payload, dict):
+            _fail("invalid", "event payload must be an object")
+        if str(payload.get("purpose", "")).upper() == "CORRECTION":
+            return "work:correct"
+        state = str(payload.get("state", "")).upper()
+        capability = ACTION_CAPABILITIES.get(state)
+        if not capability:
+            _fail("invalid_transition", "state is outside the adopted Request lifecycle")
+        return capability
+
+    def _resolve_authority(self, manifest, principal, capability, thread_id, request_key, *, operation="post"):
+        authority = self._governance_authority
+        reason = "effective"
+        disposition = "EFFECTIVE"
+        if not isinstance(authority, dict):
+            disposition, reason = "UNKNOWN", "authority_source_absent"
+        elif authority.get("status") != "ADOPTED":
+            disposition, reason = "NOT_EFFECTIVE", "authority_not_adopted"
+        elif authority.get("effective") is not True:
+            disposition, reason = "NOT_EFFECTIVE", "authority_not_effective"
+        elif authority.get("verified") is not True:
+            disposition, reason = "UNKNOWN", "authority_unverified"
+        elif not isinstance(authority.get("authority_ref"), str) or not authority["authority_ref"]:
+            disposition, reason = "UNKNOWN", "authority_reference_missing"
+        elif not re.fullmatch(r"[0-9a-f]{64}", str(authority.get("digest", ""))):
+            disposition, reason = "UNKNOWN", "authority_digest_invalid"
+        capabilities = authority.get("capabilities", {}) if isinstance(authority, dict) else {}
+        granted = capabilities.get(principal, set()) if isinstance(capabilities, dict) else set()
+        evidence = {
+            "resolver_version": "governed-native-v1", "principal": principal, "capability": capability,
+            "target_thread": thread_id, "manifest_id": manifest.get("id"), "manifest_sha256": manifest.get("sha256"),
+            "authority": _jsonable(authority), "disposition": disposition, "reason_code": reason,
+        }
+        self.db.execute(
+            "INSERT INTO governance_resolution_audit VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(uuid.uuid4()), principal, operation, request_key, capability, str(thread_id), manifest.get("id"),
+                manifest.get("sha256"), authority.get("authority_ref") if isinstance(authority, dict) else None,
+                authority.get("digest") if isinstance(authority, dict) else None, disposition, reason,
+                canonical(evidence), now(),
+            ),
+        )
+        if disposition != "EFFECTIVE":
+            self.db.commit()
+            _fail("context_required", f"governance authority resolution failed: {reason}")
+        if capability not in set(granted):
+            # Resolution evidence is independently durable even when the
+            # resolved authority does not grant this actor the requested
+            # action.  No ordinary ledger mutation has happened yet.
+            self.db.commit()
+            _fail("forbidden", f"principal lacks {capability}")
+        return authority
 
     def _validate_event(self, principal, revision, payload):
         if "represented_actor" in payload and payload["represented_actor"] != principal:
@@ -349,30 +506,68 @@ class NativeLedger:
         latest = self._latest_event(event["thread_id"])
         state = str(event["state"]).upper()
         event["state"] = state
+        purpose = str(event.get("purpose", "EVENT")).upper()
+        if event["kind"] != "REQUEST":
+            _fail("invalid", "only Request has an adopted governed lifecycle")
+        if state == "CORRECTED":
+            _fail("invalid_transition", "correction is a purpose, not a lifecycle state")
         if latest is None:
             if revision != "new" or state != "OPEN":
                 _fail("conflict", "new thread requires revision=new and state=OPEN")
+            if not isinstance(event.get("owner"), str) or not event["owner"]:
+                _fail("invalid", "opening owner is required")
+            if not isinstance(event.get("addressee"), str) or not event["addressee"]:
+                _fail("invalid", "opening addressee is required")
+            if event["owner"] != principal:
+                _fail("forbidden", "opening owner must be the authenticated principal")
+            criteria = event.get("criteria_refs")
+            if not isinstance(criteria, list) or not criteria or any(not isinstance(item, str) or not item for item in criteria) or len(set(criteria)) != len(criteria):
+                _fail("invalid", "opening acceptance criteria are required")
+            self._validate_continuation(event)
         else:
-            if state == "OPEN":
-                _fail("invalid_transition", "a terminal or existing thread cannot be reopened")
             if revision != latest["event_id"]:
                 if principal != latest["principal"]:
                     _fail("context_required", "recipient must retrieve current context", requirements={"expected_revision": latest["event_id"]})
                 _fail("conflict", "stale revision", requirements={"expected_revision": latest["event_id"]})
+            opening = self._opening_event(event["thread_id"])
+            opening_metadata = json.loads(opening["metadata_json"])
             if state == "RESOLVED" and (not event.get("evidence_refs") or not event.get("criteria_refs")):
+                _fail("context_required", "resolution requires evidence and criteria dispositions")
+            for field in ("owner", "addressee"):
+                authoritative = opening[field]
+                if field in event and event[field] != authoritative:
+                    _fail("forbidden", f"{field} is authoritative from the opening event")
+                event[field] = authoritative
+            authoritative_criteria = opening_metadata.get("criteria_refs", [])
+            if "criteria_refs" in event and event["criteria_refs"] != authoritative_criteria:
+                _fail("forbidden", "acceptance criteria are authoritative from the opening event")
+            event["criteria_refs"] = authoritative_criteria
+            if purpose == "CORRECTION":
+                corrected = event.get("corrects_event")
+                target = self.db.execute("SELECT 1 FROM ledger_events WHERE event_id=? AND thread_id=?", (corrected, event["thread_id"])).fetchone()
+                if not target:
+                    _fail("invalid_transition", "correction must reference an event in the same thread")
+                if state != latest["state"]:
+                    _fail("invalid_transition", "correction purpose carries the current lifecycle state")
+                return event
+            if state == "OPEN":
+                _fail("invalid_transition", "a terminal or existing thread cannot be reopened")
+            if state == "CLAIMED" and principal != opening["addressee"]:
+                _fail("forbidden", "only the authoritative addressee may claim work")
+            if state in {"IN_PROGRESS", "BLOCKED", "RESOLVED"} and principal not in {opening["owner"], opening["addressee"]}:
+                _fail("forbidden", "principal is not an authoritative work actor")
+            if state == "RESOLVED" and (not event.get("evidence_refs") or not authoritative_criteria):
                 _fail("context_required", "resolution requires evidence and criteria dispositions")
             if state == "CLOSED":
                 accepted_by = event.get("accepted_by")
                 if accepted_by != principal:
                     _fail("forbidden", "accepted_by must be the authenticated acceptor")
-                if principal == latest["principal"]:
-                    _fail("forbidden", "work author cannot accept their own work")
-                if principal not in {latest["owner"], latest["addressee"]}:
-                    _fail("forbidden", "principal is not an authorized acceptor")
+                history_authors = {row[0] for row in self.db.execute("SELECT principal FROM ledger_events WHERE thread_id=? AND kind='REQUEST'", (event["thread_id"],))}
+                if principal in history_authors:
+                    _fail("forbidden", "a thread author cannot accept work from that thread")
                 if latest["state"] != "RESOLVED":
                     _fail("invalid_transition", "closure requires a resolved event")
-                prior = json.loads(latest["metadata_json"])
-                required_criteria = prior.get("criteria_refs")
+                required_criteria = authoritative_criteria
                 dispositions = event.get("criterion_dispositions")
                 if not isinstance(required_criteria, list) or not required_criteria:
                     _fail("invalid_transition", "resolved event has no acceptance criteria")
@@ -381,15 +576,32 @@ class NativeLedger:
                 if any(value not in {"accepted", "rejected"} for value in dispositions.values()):
                     _fail("invalid_transition", "invalid criterion disposition")
             allowed = {
-                "OPEN": {"WORKING", "BLOCKED", "RESOLVED", "CORRECTED"},
-                "WORKING": {"BLOCKED", "RESOLVED", "CORRECTED"},
-                "BLOCKED": {"WORKING", "RESOLVED", "CORRECTED"},
-                "RESOLVED": {"CLOSED", "CORRECTED"},
-                "CORRECTED": {"WORKING", "BLOCKED", "RESOLVED", "CORRECTED"},
+                "OPEN": {"CLAIMED", "RESOLVED", "CANCELLED"},
+                "CLAIMED": {"IN_PROGRESS", "BLOCKED", "CANCELLED"},
+                "IN_PROGRESS": {"BLOCKED", "RESOLVED", "CANCELLED"},
+                "BLOCKED": {"IN_PROGRESS", "CANCELLED"},
+                "RESOLVED": {"IN_PROGRESS", "CLOSED", "CANCELLED"},
             }
             if state not in allowed.get(latest["state"], set()):
                 _fail("invalid_transition", f"{latest['state']} cannot transition to {state}")
         return event
+
+    def _opening_event(self, thread_id):
+        return self.db.execute(
+            "SELECT * FROM ledger_events WHERE thread_id=? AND kind='REQUEST' ORDER BY thread_ordinal LIMIT 1",
+            (thread_id,),
+        ).fetchone()
+
+    def _validate_continuation(self, event):
+        link = event.get("continues")
+        if link is None:
+            return
+        if not isinstance(link, dict) or set(link) != {"thread_id", "relation"} or link.get("relation") != "continues" or not isinstance(link.get("thread_id"), str) or link["thread_id"] == event["thread_id"]:
+            _fail("invalid", "continues must be one typed predecessor reference")
+        predecessor = self._latest_event(link["thread_id"])
+        archived = self.db.execute("SELECT 1 FROM logical_archives WHERE thread_id=?", (link["thread_id"],)).fetchone()
+        if not predecessor or predecessor["state"] not in TERMINAL_STATES or not archived:
+            _fail("invalid", "continues predecessor must be terminal and archived")
 
     def _allocate_post(self, event, principal, ordinal, content_hash, created_at):
         root = self.db.execute("SELECT * FROM roots WHERE thread_id=?", (event["thread_id"],)).fetchone()
@@ -440,6 +652,17 @@ class NativeLedger:
         manifest = self._manifest()
         if receipt["manifest_id"] != manifest["id"] or receipt["manifest_sha256"] != manifest["sha256"]:
             _fail("context_required", "context manifest changed")
+        selected, _ = self._context_items(principal, action, thread_id, revision, manifest)
+        current_hashes = sorted(item["sha256"] for item in selected)
+        if current_hashes != json.loads(receipt["required_item_hashes_json"]):
+            _fail("context_required", "authoritative context changed after receipt issuance")
+        retrieved = set()
+        for row in self.db.execute("SELECT detail_json FROM context_audit WHERE bundle_id=? AND kind='item_retrieved'", (receipt["bundle_id"],)):
+            detail = json.loads(row[0])
+            if detail.get("sha256"):
+                retrieved.add(detail["sha256"])
+        if retrieved != set(current_hashes):
+            _fail("context_required", "receipt lacks complete retrieval evidence")
         return receipt
 
     def _latest_event(self, thread_id):
@@ -643,7 +866,9 @@ class NativeLedger:
 
     # ---- notices -----------------------------------------------------
 
-    def notice_intents(self, *, event_id=None):
+    def notice_intents(self, *, principal="viewer", event_id=None):
+        if principal not in NOTICE_READ_PRINCIPALS:
+            _fail("forbidden", "principal lacks notice:read")
         sql = "SELECT * FROM notice_intents"
         args = ()
         if event_id is not None:
@@ -679,11 +904,13 @@ class NativeLedger:
         )
         return {"notice_id": notice_id, "attempt_number": count + 1, "outcome": str(outcome)}
 
-    def notice_attempts(self, notice_id):
+    def notice_attempts(self, notice_id, *, principal="viewer"):
+        if principal not in NOTICE_READ_PRINCIPALS:
+            _fail("forbidden", "principal lacks notice:read")
         return [dict(row) for row in self.db.execute("SELECT * FROM notice_attempts WHERE notice_id=? ORDER BY attempt_number", (notice_id,))]
 
     def notice_status(self, notice_id):
-        attempts = self.notice_attempts(notice_id)
+        attempts = self.notice_attempts(notice_id, principal="viewer")
         if any(row["outcome"] == "delivered" for row in attempts):
             return "delivered"
         return attempts[-1]["outcome"] if attempts else "pending"
@@ -721,19 +948,51 @@ class NativeLedger:
             self.db.rollback()
             raise
 
-    def archive_thread(self, principal, thread_id, reason):
+    def archive_thread(self, principal, thread_id, reason, *, context_receipt=None, expected_revision=None):
         if principal != "operator":
             _fail("forbidden", "operator archive capability required")
-        if not self._latest_event(thread_id):
-            _fail("invalid", "unknown thread")
+        if not isinstance(reason, str) or not reason.strip():
+            _fail("invalid", "archive reason is required")
+        if context_receipt is None or expected_revision is None:
+            _fail("context_required", "archive requires current context")
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self._assert_not_stopped()
+            latest = self._latest_event(thread_id)
+            if not latest:
+                _fail("invalid", "unknown thread")
+            if latest["event_id"] != expected_revision:
+                _fail("conflict", "archive revision is stale", requirements={"expected_revision": latest["event_id"]})
+            if latest["state"] not in TERMINAL_STATES:
+                _fail("context_required", "only a terminal thread is archive eligible")
+            manifest = self._manifest()
+            receipt = self._validate_receipt(context_receipt, principal, "archive", thread_id, expected_revision)
+            authority = self._resolve_authority(manifest, principal, "work:archive", thread_id, receipt["receipt_id"], operation="archive")
             event_id = str(uuid.uuid4())
-            self._append_internal_event(thread_id, "ARCHIVE", "ARCHIVED", reason, principal, event_id=event_id)
-            self.db.execute("INSERT INTO logical_archives VALUES (?,?,?,?,?)", (thread_id, event_id, reason, principal, now()))
+            committed = now()
+            ledger_seq = self._append_internal_event(thread_id, "ARCHIVE", "ARCHIVED", reason, principal, event_id=event_id)
+            self.db.execute("INSERT INTO logical_archives VALUES (?,?,?,?,?)", (thread_id, event_id, reason, principal, committed))
+            response = {"thread_id": thread_id, "event_id": event_id, "ledger_seq": ledger_seq, "archived": True}
+            request_hash = _canonical_sha({"thread_id": thread_id, "reason": reason, "expected_revision": expected_revision})
+            self.db.execute(
+                "INSERT INTO native_requests VALUES (?,?,?,?,?,?,?,?,?)",
+                (principal, "archive", receipt["receipt_id"], request_hash, event_id, ledger_seq, 201, canonical(response), committed),
+            )
+            self.db.execute(
+                "INSERT INTO context_receipt_consumptions VALUES (?,?,?,?,?,?)",
+                (receipt["receipt_id"], principal, "archive", receipt["receipt_id"], event_id, committed),
+            )
+            self._context_audit("receipt_consumed", principal, receipt["bundle_id"], receipt["receipt_id"], thread_id, {"event_id": event_id, "operation": "archive"})
+            self.db.execute("INSERT INTO archive_requests VALUES (?,?,?,?,?)", (thread_id, receipt["receipt_id"], principal, request_hash, committed))
+            self.db.execute(
+                "INSERT INTO ledger_audit(event_id,principal,operation,detail_json,created_at) VALUES (?,?,?,?,?)",
+                (event_id, principal, "archive", canonical({"authority_ref": authority["authority_ref"], "expected_revision": expected_revision}), committed),
+            )
             self.db.commit()
-            return {"thread_id": thread_id, "event_id": event_id, "archived": True}
+            return response
+        except NativeLedgerError:
+            self.db.rollback()
+            raise
         except sqlite3.IntegrityError as exc:
             self.db.rollback()
             _fail("conflict", str(exc))

@@ -298,47 +298,80 @@ def reconciliation(status:str,authorization:str|None=Header(None),db:sqlite3.Con
 # above retain their original contracts for historical clients.
 @app.get("/v1/context-bundles/{thread_id}")
 def native_context_bundle(thread_id:str,action:str="post",revision:str="new",authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
-    who,_=native_identity(db,authorization,"post:write")
-    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).create_context_bundle(who,action,thread_id,revision))
+    who,_=native_identity(db,authorization,"context:read")
+    return invoke_native(lambda:_native_ledger(db).create_context_bundle(who,action,thread_id,revision))
+
+@app.get("/v1/context-bundle-items/{bundle_id}/{item_sha256}")
+def native_context_item(bundle_id:str,item_sha256:str,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"context:read")
+    return invoke_native(lambda:_native_ledger(db).retrieve_context_item(bundle_id,item_sha256,principal=who))
 
 @app.post("/v1/context-receipts",status_code=201)
 async def native_context_receipt(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
-    who,_=native_identity(db,authorization,"post:write"); body=await request.json()
-    return {"receipt":invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).acknowledge_context(body.get("bundle_id"),who,body.get("acknowledged_hashes")))}
+    who,_=native_identity(db,authorization,"context:attest"); body=await request.json()
+    return {"receipt":invoke_native(lambda:_native_ledger(db).acknowledge_context(body.get("bundle_id"),who,body.get("acknowledged_hashes")))}
 
 @app.post("/v1/events",status_code=201)
 async def native_event(request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),if_match:str|None=Header(None,alias="If-Match"),context_receipt:str|None=Header(None,alias="X-Context-Receipt"),db:sqlite3.Connection=Depends(get_db)):
-    who,_=native_identity(db,authorization,"post:write"); body=await request.json()
-    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).post_event(who,idempotency_key,context_receipt,if_match or "new",body))
+    body=await request.json()
+    capability=invoke_native(lambda:NativeLedger.required_action_capability(body))
+    who,_=native_identity(db,authorization,capability)
+    return invoke_native(lambda:_native_ledger(db).post_event(who,idempotency_key,context_receipt,if_match or "new",body))
 
 @app.get("/v1/native/threads/{thread_id}")
 def native_thread(thread_id:str,include_archived:bool=False,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     who,_=native_identity(db,authorization,"post:read")
-    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).get_thread(thread_id,principal=who,include_archived=include_archived))
+    return invoke_native(lambda:_native_ledger(db).get_thread(thread_id,principal=who,include_archived=include_archived))
 
 @app.get("/v1/native/discovery")
 def native_discovery(authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     native_identity(db,authorization,"post:read")
-    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).discovery_projection())
+    return invoke_native(lambda:_native_ledger(db).discovery_projection())
+
+@app.get("/v1/native/notices")
+def native_notices(event_id:str|None=None,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"notice:read")
+    return {"intents":invoke_native(lambda:_native_ledger(db).notice_intents(principal=who,event_id=event_id))}
+
+@app.get("/v1/native/notices/{notice_id}/attempts")
+def native_notice_attempts(notice_id:str,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    who,_=native_identity(db,authorization,"notice:read")
+    return {"attempts":invoke_native(lambda:_native_ledger(db).notice_attempts(notice_id,principal=who))}
 
 @app.post("/v1/operator/stop")
 async def native_stop(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     who,_=native_identity(db,authorization,"operator:stop"); body=await request.json()
-    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).set_operator_stop(who,True,body.get("reason")))
+    return invoke_native(lambda:_native_ledger(db).set_operator_stop(who,True,body.get("reason")))
 
 @app.post("/v1/operator/resume")
 async def native_resume(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     who,_=native_identity(db,authorization,"operator:resume"); body=await request.json()
-    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).set_operator_resume(who,body.get("reason")))
+    return invoke_native(lambda:_native_ledger(db).set_operator_resume(who,body.get("reason")))
 
 @app.post("/v1/native/threads/{thread_id}/archive")
 async def native_archive(thread_id:str,request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
-    who,_=native_identity(db,authorization,"operator:archive"); body=await request.json()
-    return invoke_native(lambda:NativeLedger(db,context_manifest=_native_context_manifest()).archive_thread(who,thread_id,body.get("reason")))
+    who,_=native_identity(db,authorization,"work:archive"); body=await request.json()
+    return invoke_native(lambda:_native_ledger(db).archive_thread(who,thread_id,body.get("reason"),context_receipt=body.get("context_receipt"),expected_revision=body.get("expected_revision")))
+
+def _native_ledger(db):
+    return NativeLedger(
+        db,
+        context_manifest=_native_context_manifest(),
+        governance_authority=_native_governance_authority(),
+    )
 
 def _native_context_manifest():
     """Load one hash-pinned manifest; absence is intentionally fail-closed."""
     path=os.environ.get("TOWNSQUARE_CONTEXT_MANIFEST")
+    if not path: return None
+    try:
+        import json
+        with open(path,"r",encoding="utf-8") as handle: return json.load(handle)
+    except (OSError,ValueError): return None
+
+def _native_governance_authority():
+    """Load external resolver evidence; a mounted manifest cannot adopt itself."""
+    path=os.environ.get("TOWNSQUARE_GOVERNANCE_AUTHORITY")
     if not path: return None
     try:
         import json
