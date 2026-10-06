@@ -8,17 +8,28 @@ def sha(path):
  with path.open('rb') as f:
   for b in iter(lambda:f.read(1048576),b''): h.update(b)
  return h.hexdigest()
+def lease_state(db,tables):
+ columns={r[1] for r in db.execute("PRAGMA table_info(audit_outbox)")} if 'audit_outbox' in tables else set()
+ if not {'lease_owner','lease_until'} <= columns:return {'supported':False,'rows':[]}
+ rows=[{'event_id':r[0],'lease_owner':r[1],'lease_until':r[2]} for r in db.execute(
+  "SELECT event_id,lease_owner,lease_until FROM audit_outbox WHERE lease_owner IS NOT NULL OR lease_until IS NOT NULL ORDER BY event_id"
+ )]
+ return {'supported':True,'rows':rows}
 def manifest_parity(db,item):
  tables=[r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
  row_counts={name:db.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0] for name in tables}
  schema_head=db.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] if 'schema_migrations' in tables else db.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]
  ledger_watermark=db.execute("SELECT max(ledger_seq) FROM ledger_events").fetchone()[0] if 'ledger_events' in tables else None
  registry_journal_watermark=db.execute("SELECT max(seq) FROM journal").fetchone()[0] if 'journal' in tables else None
- lease_state=[{'event_id':r[0],'lease_owner':r[1],'lease_until':r[2]} for r in db.execute("SELECT event_id,lease_owner,lease_until FROM audit_outbox WHERE lease_until IS NOT NULL")] if 'audit_outbox' in tables else []
- actual={'row_counts':row_counts,'schema_head':schema_head,'ledger_watermark':ledger_watermark,'registry_journal_watermark':registry_journal_watermark,'lease_state':lease_state}
+ leases=lease_state(db,tables)
+ actual={'row_counts':row_counts,'schema_head':schema_head,'ledger_watermark':ledger_watermark,'registry_journal_watermark':registry_journal_watermark,'lease_state':leases}
  for key,value in actual.items():
   if item.get(key)!=value: raise SystemExit(f'manifest parity mismatch: {item.get("domain")} {key}')
  return actual
+def reconcile_pending_event_uuids(registry):
+ db=sqlite3.connect(registry)
+ try:return [r[0] for r in db.execute("SELECT event_id FROM audit_outbox WHERE delivered_utc IS NULL ORDER BY event_id")]
+ finally:db.close()
 def main():
  if len(sys.argv)!=3: raise SystemExit("usage: restore-drill.py BACKUP_DIR EMPTY_DRILL_DIR")
  source=Path(sys.argv[1]).resolve(); drill=Path(sys.argv[2]).resolve()
@@ -39,24 +50,12 @@ def main():
    if db.execute("PRAGMA integrity_check").fetchone()[0]!="ok" or db.execute("PRAGMA foreign_key_check").fetchall(): raise SystemExit(f"integrity failure: {item['domain']}")
    manifest_parity(db,item)
   finally: db.close()
- # Domains are explicitly non-atomic. Reconciliation retains pending stable
- # Registry event UUIDs and asks the fixed Ledger inbox to idempotently accept
- # each pending event_uuid exactly once in a later controlled drill.
- def reconcile_pending_registry_events():
-  return {'pending':[],'non_atomic_domains':manifest.get('non_atomic_domains',[])}
- reconciliation=reconcile_pending_registry_events()
+ # Generic restore is intentionally offline. It records stable pending UUIDs;
+ # the separately invoked recovery_replay_drill.py owns replay verification.
+ reconciliation={'schema':'townsquare-offline-reconciliation-v1','origin':'restored-drill-only','pending_event_uuids':[],'non_atomic_domains':manifest.get('non_atomic_domains',[]),'replay_performed':False}
  registry=drill/'registry.db'
  if registry.exists():
-  db=sqlite3.connect(registry)
- try: reconciliation['pending']=[r[0] for r in db.execute("SELECT event_id FROM audit_outbox WHERE delivered_utc IS NULL ORDER BY event_id")]
- finally: db.close()
- # Controlled replay uses Registry's fixed authenticated delivery boundary. In
- # a drill harness, inject the restored DB and call deliver_once twice; Ledger's
- # stable event_uuid inbox must contain exactly_once one record after retry.
- if reconciliation['pending']:
-  from registry.app import deliver_once
-  deliver_once(); deliver_once()
-  reconciliation['exactly_once']='pending UUID replay delegated to fixed Registry→Ledger delivery boundary'
+  reconciliation['pending_event_uuids']=reconcile_pending_event_uuids(registry)
  (drill/'reconciliation.json').write_text(json.dumps(reconciliation,sort_keys=True)+'\n')
  print("restore drill verified; reconciliation pending registry event_uuid values retained; no live data was changed")
 if __name__=='__main__': main()

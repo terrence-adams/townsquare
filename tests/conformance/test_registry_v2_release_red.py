@@ -142,13 +142,15 @@ class RegistryV2ReleaseContracts(unittest.TestCase):
 
     def test_restore_replays_pending_event_through_fixed_authenticated_endpoint_once(self):
         restore = self.text("backup/restore-drill.py")
-        registry = self.text("registry/app.py")
-        self.assertIn("LEDGER_AUDIT_URL", registry)
-        self.assertIn("ledger_audit_token", registry)
-        self.assertIn("deliver_once", restore,
-                      "restore must invoke the Registry delivery boundary for pending stable UUIDs")
-        self.assertIn("exactly_once", restore.lower(),
-                      "recovery evidence must assert second replay leaves one Ledger inbox row")
+        replay = self.text("backup/recovery_replay_drill.py")
+        self.assertNotIn("registry.app", restore,
+                         "generic restore must stay offline and cannot import production delivery")
+        self.assertNotIn("deliver_once", restore,
+                         "generic restore reports pending UUIDs; a separate harness owns replay")
+        self.assertIn("pending_event_uuids", restore)
+        self.assertIn("deliver_once", replay)
+        self.assertIn("exactly_once", replay.lower(),
+                      "isolated recovery evidence must assert second replay leaves one Ledger inbox row")
 
 
 if __name__ == "__main__":

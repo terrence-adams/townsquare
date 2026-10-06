@@ -10,5 +10,5 @@ RUN python /opt/townsquare/verify-tool-artifacts.py /wheelhouse/tooling /opt/tow
  && install -m 0755 /wheelhouse/tooling/minisign /usr/local/bin/minisign \
  && addgroup --system --gid 10004 backup && adduser --system --uid 10004 --ingroup backup --home /nonexistent backup
 WORKDIR /opt/townsquare/backup
-COPY --chown=10004:10004 backup/create-backup.py backup/restore-drill.py backup/prune.py /opt/townsquare/backup/
+COPY --chown=10004:10004 backup/create-backup.py backup/restore-drill.py backup/recovery_replay_drill.py backup/prune.py /opt/townsquare/backup/
 USER 10004:10004

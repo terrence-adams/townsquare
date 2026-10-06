@@ -20,6 +20,14 @@ def fsync_path(path):
         fd=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
         try: os.fsync(fd)
         finally: os.close(fd)
+def lease_state(db,tables):
+    if 'audit_outbox' not in tables: return {"supported":False,"rows":[]}
+    columns={row[1] for row in db.execute("PRAGMA table_info(audit_outbox)")}
+    if not {"lease_owner","lease_until"} <= columns: return {"supported":False,"rows":[]}
+    rows=[dict(row) for row in db.execute(
+        "SELECT event_id,lease_owner,lease_until FROM audit_outbox WHERE lease_owner IS NOT NULL OR lease_until IS NOT NULL ORDER BY event_id"
+    )]
+    return {"supported":True,"rows":rows}
 def snapshot(source, target):
     if not source.is_file(): raise SystemExit(f"database is not a file: {source}")
     src=sqlite3.connect(f"file:{source}?mode=ro",uri=True); dst=sqlite3.connect(target); dst.row_factory=sqlite3.Row
@@ -33,8 +41,8 @@ def snapshot(source, target):
         schema_head=db_version=dst.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] if 'schema_migrations' in tables else dst.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]
         ledger_watermark=dst.execute("SELECT max(ledger_seq) FROM ledger_events").fetchone()[0] if 'ledger_events' in tables else None
         registry_journal_watermark=dst.execute("SELECT max(seq) FROM journal").fetchone()[0] if 'journal' in tables else None
-        lease_state=[dict(r) for r in dst.execute("SELECT event_id,lease_owner,lease_until FROM audit_outbox WHERE lease_until IS NOT NULL")] if 'audit_outbox' in tables else []
-        return {"integrity_check":integrity,"foreign_key_check":[],"row_counts":counts,"schema_head":schema_head,"ledger_watermark":ledger_watermark,"registry_journal_watermark":registry_journal_watermark,"lease_state":lease_state}
+        leases=lease_state(dst,tables)
+        return {"integrity_check":integrity,"foreign_key_check":[],"row_counts":counts,"schema_head":schema_head,"ledger_watermark":ledger_watermark,"registry_journal_watermark":registry_journal_watermark,"lease_state":leases}
     finally: dst.close(); src.close()
 def main():
     root=need("TOWNSQUARE_BACKUP_DIR").resolve(); recipient=need("TOWNSQUARE_BACKUP_RECIPIENT_FILE")
