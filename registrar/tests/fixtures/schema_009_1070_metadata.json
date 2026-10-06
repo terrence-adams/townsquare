@@ -1,0 +1,21 @@
+{
+  "fixture_kind": "generated-representative-schema-009",
+  "source": "No sanitized historical database is checked into this repository. Aggregate measurements come from docs/town-registrar-ws3-plan.md lines 502-521.",
+  "contains": "Synthetic deterministic metadata only; no production bodies, credentials, or Drive identifiers.",
+  "schema_head": 9,
+  "counts": {
+    "posts": 1070,
+    "roots": 313,
+    "artifacts": 197,
+    "assignments": 1062,
+    "import_runs": 2,
+    "null_drive_created_at": 0
+  },
+  "board_counts": {
+    "requests": 743,
+    "bulletin-board": 307,
+    "seeking": 16,
+    "wanted": 4
+  },
+  "logical_sha256": "ba292cfd8c8e72afd8bd1903316139b82801d87d77fee6921767fde9285f63e3"
+}
