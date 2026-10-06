@@ -7,7 +7,7 @@ services:
       - type: bind
         source: ${TOWNSQUARE_LEDGER_DATA_DIR:?must be NAS-local, not SMB/NFS}
         target: /var/lib/townsquare
-  migrate:
+  ledger-migrate:
     volumes:
       - type: bind
         source: ${TOWNSQUARE_LEDGER_DATA_DIR:?must be NAS-local, not SMB/NFS}

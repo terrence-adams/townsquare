@@ -4,7 +4,15 @@
 __pycache__/
 *.py[cod]
 config.env
+.env
+.env.*
+release.env*
+secrets/
+secrets/**
 *.sig
+*.key
+*.private
+*signing*
 keys/
 state.json
 report*.json

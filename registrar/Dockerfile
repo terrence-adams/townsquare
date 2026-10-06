@@ -18,7 +18,11 @@ WORKDIR /app
 # a release build input.
 COPY wheelhouse /wheelhouse
 COPY requirements/resolved.txt /wheelhouse/resolved.txt
+COPY backup/tool-artifacts.lock.json /opt/townsquare/tool-artifacts.lock.json
+COPY backup/verify-tool-artifacts.py /opt/townsquare/verify-tool-artifacts.py
 RUN pip install --no-index --find-links=/wheelhouse --require-hashes -r /wheelhouse/resolved.txt
+RUN python /opt/townsquare/verify-tool-artifacts.py /wheelhouse/tooling /opt/townsquare/tool-artifacts.lock.json \
+ && install -m 0755 /wheelhouse/tooling/minisign /usr/local/bin/minisign
 COPY --chown=10001:10001 registrar/app /app/registrar/app
 COPY --chown=10001:10001 registrar/migrations /app/registrar/migrations
 COPY --chown=10001:10001 registrar/verifier /app/registrar/verifier

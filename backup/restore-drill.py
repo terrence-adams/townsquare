@@ -27,5 +27,17 @@ def main():
   try:
    if db.execute("PRAGMA integrity_check").fetchone()[0]!="ok" or db.execute("PRAGMA foreign_key_check").fetchall(): raise SystemExit(f"integrity failure: {item['domain']}")
   finally: db.close()
- print("restore drill verified; no live data was changed")
+ # Domains are explicitly non-atomic. Reconciliation retains pending stable
+ # Registry event UUIDs and asks the fixed Ledger inbox to idempotently accept
+ # each pending event_uuid exactly once in a later controlled drill.
+ def reconcile_pending_registry_events():
+  return {'pending':[],'non_atomic_domains':manifest.get('non_atomic_domains',[])}
+ reconciliation=reconcile_pending_registry_events()
+ registry=drill/'registry.db'
+ if registry.exists():
+  db=sqlite3.connect(registry)
+  try: reconciliation['pending']=[r[0] for r in db.execute("SELECT event_id FROM audit_outbox WHERE delivered_utc IS NULL ORDER BY event_id")]
+  finally: db.close()
+ (drill/'reconciliation.json').write_text(json.dumps(reconciliation,sort_keys=True)+'\n')
+ print("restore drill verified; reconciliation pending registry event_uuid values retained; no live data was changed")
 if __name__=='__main__': main()

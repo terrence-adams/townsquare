@@ -14,6 +14,8 @@ LEDGER_AUDIT_TOKEN_FILE=os.environ.get("REGISTRY_LEDGER_AUDIT_TOKEN_FILE","/run/
 # Deliberately fixed Compose-internal origin/path; neither comes from a payload.
 LEDGER_AUDIT_URL="http://ledger:8790/v1/native/registry-audit-events"
 LEDGER_AUDIT_TIMEOUT_SECONDS=3
+LEDGER_READINESS_URL="http://ledger:8790/health/ready"
+LEDGER_READINESS_TOKEN_FILE=os.environ.get("REGISTRY_LEDGER_READINESS_TOKEN_FILE","/run/secrets/ledger_registry_readiness_token")
 def connect():
  d=sqlite3.connect(DB,timeout=5,isolation_level=None); d.row_factory=sqlite3.Row; d.execute("PRAGMA foreign_keys=ON"); d.execute("PRAGMA journal_mode=WAL"); d.execute("PRAGMA synchronous=FULL"); d.execute("PRAGMA busy_timeout=5000"); return d
 SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=1; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
@@ -32,12 +34,34 @@ def ledger_audit_token():
  value=Path(LEDGER_AUDIT_TOKEN_FILE).read_text(encoding="utf-8").strip()
  if not value: raise RuntimeError('registry audit credential is empty')
  return value
+def ledger_readiness_token():
+ value=Path(os.environ.get('REGISTRY_LEDGER_READINESS_TOKEN_FILE','/run/secrets/registry_ledger_readiness_token')).read_text(encoding='utf-8').strip()
+ if not value: raise RuntimeError('registry readiness credential is empty')
+ return value
+def peer_ready():
+ """Live fixed-origin Ledger tuple exchange; never accepts an env self-claim."""
+ import urllib.request
+ try:
+  token=Path(LEDGER_READINESS_TOKEN_FILE).read_text(encoding='utf-8').strip()
+  request=urllib.request.Request(LEDGER_READINESS_URL,headers={'Authorization':'Bearer '+token})
+  with urllib.request.urlopen(request,timeout=LEDGER_AUDIT_TIMEOUT_SECONDS) as response: peer=json.load(response)
+  return peer.get('ok') is True and peer.get('service_version')=='townsquare-ledger-v0' and peer.get('schema_version')==14 and peer.get('audit_contract_version')==AUDIT_CONTRACT_VERSION
+ except Exception:return False
+def claim(db,owner):
+ """Atomically lease one pending stable UUID; expired claims are recoverable."""
+ now=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()); until=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(time.time()+30))
+ row=db.execute("SELECT event_id FROM audit_outbox WHERE delivered_utc IS NULL AND (lease_until IS NULL OR lease_until<?) ORDER BY event_id LIMIT 1",(now,)).fetchone()
+ if not row:return None
+ changed=db.execute("UPDATE audit_outbox SET lease_owner=?,lease_until=? WHERE event_id=? AND delivered_utc IS NULL AND (lease_until IS NULL OR lease_until<?)",(owner,until,row['event_id'],now)).rowcount
+ return row['event_id'] if changed else None
 def deliver_once():
- if not compatible(): return # retain outbox rows; mismatch is never a drop condition
+ if not compatible() or not peer_ready(): return # retain queue on mismatch/failure
  import urllib.request
  d=connect()
  try:
-  for r in d.execute("SELECT j.* FROM journal j JOIN audit_outbox o ON o.event_id=j.event_id WHERE o.delivered_utc IS NULL ORDER BY j.seq LIMIT 20"):
+  owner=str(uuid.uuid4())
+  while (event_id:=claim(d,owner)):
+   r=d.execute("SELECT j.* FROM journal j WHERE j.event_id=?",(event_id,)).fetchone()
    # Ledger accepts only this fixed three-field envelope. The Registry actor is
    # server-bound by Ledger's scoped credential, not by the original caller.
    data=json.dumps({"board":"BOARD-AUDIT-RECORD","actor":"registry","event_uuid":r['event_id']},sort_keys=True,separators=(',',':')).encode()
@@ -45,11 +69,14 @@ def deliver_once():
     req=urllib.request.Request(LEDGER_AUDIT_URL,data=data,headers={"Content-Type":"application/json","Authorization":"Bearer "+ledger_audit_token(),"Idempotency-Key":"registry-"+r['event_id']},method="POST")
     with urllib.request.urlopen(req,timeout=LEDGER_AUDIT_TIMEOUT_SECONDS) as response:
      if response.status//100!=2:raise RuntimeError(str(response.status))
-    d.execute("UPDATE audit_outbox SET attempts=attempts+1,delivered_utc=strftime('%Y-%m-%dT%H:%M:%SZ','now'),last_error=NULL WHERE event_id=?",(r['event_id'],))
+    d.execute("UPDATE audit_outbox SET attempts=attempts+1,delivered_utc=strftime('%Y-%m-%dT%H:%M:%SZ','now'),last_error=NULL,lease_owner=NULL,lease_until=NULL WHERE event_id=? AND lease_owner=?",(r['event_id'],owner))
    except Exception as e:
     # Never retain exception text: HTTP libraries can include request details.
-    d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=? WHERE event_id=?",(type(e).__name__[:80],r['event_id']))
+    d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=?,lease_owner=NULL,lease_until=NULL WHERE event_id=? AND lease_owner=?",(type(e).__name__[:80],r['event_id'],owner))
  finally:d.close()
+def periodic_worker():
+ while True:
+  deliver_once(); time.sleep(5) # bounded periodic retry; attempts are durable
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
  def reply(self,status,value):
@@ -57,6 +84,9 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   if self.path=="/health/live":return self.reply(200,{"ok":True})
   if self.path=="/health/ready":
+   try:
+    if self.headers.get('Authorization')!='Bearer '+ledger_readiness_token(): return self.reply(401,{"ok":False,"detail":"readiness authorization required"})
+   except OSError:return self.reply(503,{"ok":False,"detail":"readiness credential unavailable"})
    try:
     d=connect(); version=d.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]; pending=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL").fetchone()[0]; failed=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL AND last_error IS NOT NULL").fetchone()[0];d.close();
     tuple={"registry_service":SERVICE_ID,"registry_schema":SCHEMA_VERSION,"ledger_service":"townsquare-ledger-v0","ledger_schema":14,"audit_contract":AUDIT_CONTRACT_VERSION}
@@ -87,5 +117,6 @@ class Handler(BaseHTTPRequestHandler):
   finally:d.close()
 def main():
  if not compatible(): raise SystemExit('Registry schema/audit contract incompatible; run registry-migrate')
+ threading.Thread(target=periodic_worker,daemon=True).start()
  ThreadingHTTPServer(("0.0.0.0",8789),Handler).serve_forever()
 if __name__=="__main__":main()

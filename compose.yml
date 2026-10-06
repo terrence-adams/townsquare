@@ -66,12 +66,18 @@ services:
       REGISTRY_SERVICE_ID: townsquare-registry-v0
       REGISTRY_SCHEMA_HEAD: "1"
       REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
+      REGISTRY_READINESS_URL: http://registry:8789/health/ready
+      REGISTRY_READINESS_TOKEN_FILE: /run/secrets/registry_ledger_readiness_token
+      TOWNSQUARE_AUTHORITY_PUBLIC_KEY_FILE: /run/configs/authority_public_key
+      TOWNSQUARE_AUTHORITY_PROOF_FILE: /run/configs/authority_proof
+      TOWNSQUARE_AUTHORITY_SIGNATURE_FILE: /run/configs/authority_proof_signature
+      TOWNSQUARE_MINISIGN_EXECUTABLE: /usr/local/bin/minisign
     volumes:
       - type: bind
         source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
         target: /var/lib/townsquare
-    secrets: [token_pepper, cursor_signing_key, receipt_hash_key]
-    configs: [context_manifest]
+    secrets: [token_pepper, cursor_signing_key, receipt_hash_key, registry_ledger_readiness_token]
+    configs: [context_manifest, authority_public_key, authority_proof, authority_proof_signature]
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
     ports: ["127.0.0.1:${TOWNSQUARE_LEDGER_PORT:-8790}:8790"]
     networks: [app, ingress]
@@ -127,15 +133,17 @@ services:
       REGISTRY_LEDGER_SCHEMA_HEAD: "14"
       REGISTRY_LEDGER_AUDIT_CONTRACT: registry-ledger-audit-v1
       REGISTRY_LEDGER_AUDIT_TOKEN_FILE: /run/secrets/ledger_registry_audit_token
+      LEDGER_READINESS_URL: http://ledger:8790/health/ready
+      REGISTRY_LEDGER_READINESS_TOKEN_FILE: /run/secrets/registry_ledger_readiness_token
     volumes:
       - type: bind
         source: ${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}
         target: /var/lib/registry
-    secrets: [registry_api_token, ledger_registry_audit_token]
+    secrets: [registry_api_token, ledger_registry_audit_token, registry_ledger_readiness_token]
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
     networks: [app]
     healthcheck:
-      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8789/health/ready',timeout=2).read()"]
+      test: [CMD, python, -c, "import urllib.request; t=open('/run/secrets/registry_ledger_readiness_token').read().strip(); urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8789/health/ready',headers={'Authorization':'Bearer '+t}),timeout=2).read()"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -208,6 +216,10 @@ secrets:
   viewer_api_token: {file: ${TOWNSQUARE_VIEWER_API_TOKEN_FILE:?set secret path}}
   registry_api_token: {file: ${TOWNSQUARE_REGISTRY_API_TOKEN_FILE:?set secret path}}
   ledger_registry_audit_token: {file: ${TOWNSQUARE_REGISTRY_LEDGER_AUDIT_TOKEN_FILE:?set scoped secret path}}
+  registry_ledger_readiness_token: {file: ${TOWNSQUARE_REGISTRY_LEDGER_READINESS_TOKEN_FILE:?set scoped secret path}}
   backup_recipient: {file: ${TOWNSQUARE_BACKUP_RECIPIENT_FILE:?set secret path}}
 configs:
   context_manifest: {file: ${TOWNSQUARE_CONTEXT_MANIFEST:?set immutable manifest file}}
+  authority_public_key: {file: ${TOWNSQUARE_AUTHORITY_PUBLIC_KEY_FILE:?set public verification key}}
+  authority_proof: {file: ${TOWNSQUARE_AUTHORITY_PROOF_FILE:?set canonical authority proof}}
+  authority_proof_signature: {file: ${TOWNSQUARE_AUTHORITY_SIGNATURE_FILE:?set detached proof signature}}
