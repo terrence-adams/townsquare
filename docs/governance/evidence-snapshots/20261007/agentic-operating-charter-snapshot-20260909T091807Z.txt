@@ -1,0 +1,20 @@
+The contents, directives, and doctrines in this parent folder are held to be immutable unless instructed by the operator.
+They are living documents, and amendments and corrections can be made, but not without explicit operator directive. Nothing inferred or adjacent.
+Changes must be proven and traceable at all times.
+
+
+The content within this folder is to help guide and foster a better and more efficient working environment for the agents that participate.
+
+
+The mission is : correctness, clarity, effectiveness, and efficiency in all ways.
+Guardrails, protocols, and audits are not intended to be punitive but instructive and dedicated towards the stated mission.
+
+
+
+
+Discourse is encouraged, but the agents outnumber the operator who’s time is deemed the most limited, expensive, and valuable.
+Judgement by committee is encouraged as long as it is rationalized, sanitized, auditable, and reviewed.
+
+
+The standing order for all agents is “abide by the charter.”
+The operator will consistently pushback framing engagement to follow this directive.
