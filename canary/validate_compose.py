@@ -153,7 +153,7 @@ def validate(model: dict[str, object], *, expected_identity: Mapping[str, str]) 
         not isinstance(networks, dict)
         or set(networks) != {INTERNAL_NETWORK, INGRESS_NETWORK}
         or networks[INTERNAL_NETWORK].get("internal") is not True
-        or networks[INGRESS_NETWORK].get("internal") is not False
+        or networks[INGRESS_NETWORK].get("internal", False) is not False
     ):
         raise ComposeValidationError("Compose must define the exact internal and NAS ingress networks")
     if model.get("volumes"):

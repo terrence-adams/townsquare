@@ -142,7 +142,7 @@ def rendered_compose_fixture():
     return {
         "name": "townsquare-canary-20261007-a",
         "services": services,
-        "networks": {"canary-internal": {"internal": True}, "canary-ingress": {"internal": False}},
+        "networks": {"canary-internal": {"internal": True}, "canary-ingress": {}},
     }
 
 
