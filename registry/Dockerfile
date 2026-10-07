@@ -44,7 +44,7 @@ COPY --from=registry-tool-verifier --chown=root:root /verified/minisign /usr/loc
 WORKDIR /app
 COPY --chown=root:root r7-identity.json /opt/townsquare/release/r7-identity.json
 COPY --chown=10003:10003 registry/app.py registry/migrate.py registry/schema.sql /app/
-COPY --chown=root:root contracts/r7/registry-schema.json /app/contracts/r7/registry-schema.json
+COPY --chown=root:root contracts/r7/registry-schema.json /contracts/r7/registry-schema.json
 COPY --chown=10003:10003 shared /app/shared
 COPY --chown=10003:10003 canary/__init__.py canary/preexec.py /app/canary/
 RUN chmod 0444 /opt/townsquare/release/r7-identity.json && find /app /opt/townsquare -type f -exec chmod a-w {} +

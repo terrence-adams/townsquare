@@ -598,6 +598,44 @@ class StaticContainmentTests(unittest.TestCase):
         for path in [*ROOT.glob("**/Dockerfile"), *ROOT.glob("canary/*.py")]:
             self.assertNotIn("requirements/requirements.lock.json", path.read_text(encoding="utf-8"), str(path))
 
+    def test_registry_image_layout_can_load_pinned_contract_and_migrate(self):
+        """Reproduce /app + /contracts image paths without a Docker daemon."""
+        dockerfile = (ROOT / "registry/Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY --chown=root:root contracts/r7/registry-schema.json /contracts/r7/registry-schema.json",
+            dockerfile,
+        )
+        self.assertNotIn("/app/contracts/r7/registry-schema.json", dockerfile)
+        with tempfile.TemporaryDirectory() as temp:
+            image_root = Path(temp)
+            app = image_root / "app"
+            contract = image_root / "contracts/r7"
+            data = image_root / "data"
+            app.mkdir()
+            contract.mkdir(parents=True)
+            data.mkdir()
+            for name in ("migrate.py", "schema.sql"):
+                (app / name).write_bytes((ROOT / "registry" / name).read_bytes())
+            (contract / "registry-schema.json").write_bytes(
+                (ROOT / "contracts/r7/registry-schema.json").read_bytes()
+            )
+            database = data / "registry.db"
+            environment = {**os.environ, "REGISTRY_DB": str(database)}
+            result = subprocess.run(
+                [sys.executable, str(app / "migrate.py")],
+                cwd=image_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            db = sqlite3.connect(database)
+            try:
+                self.assertEqual(1414746695, db.execute("PRAGMA application_id").fetchone()[0])
+                self.assertEqual(2, db.execute("PRAGMA user_version").fetchone()[0])
+            finally:
+                db.close()
+
 
 if __name__ == "__main__":
     unittest.main()
