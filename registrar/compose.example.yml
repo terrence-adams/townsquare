@@ -25,10 +25,10 @@ services:
     volumes:
       # Must be NAS-local durable storage: never SMB/NFS/Drive/rclone.
       - type: bind
-        source: ${REGISTRAR_DATA_DIR:?set a NAS-local REGISTRAR_DATA_DIR}
+        source: "${REGISTRAR_DATA_DIR:?set a NAS-local REGISTRAR_DATA_DIR}"
         target: /var/lib/town-registrar
       - type: bind
-        source: ${REGISTRAR_BACKUP_DIR:?set a NAS-local REGISTRAR_BACKUP_DIR}
+        source: "${REGISTRAR_BACKUP_DIR:?set a NAS-local REGISTRAR_BACKUP_DIR}"
         target: /var/backups/town-registrar
     tmpfs: ["/tmp:size=32m,mode=1777"]
     ports:
@@ -61,6 +61,6 @@ networks:
   registrar-edge: {}
 secrets:
   token_pepper:
-    file: ${REGISTRAR_TOKEN_PEPPER_FILE:?set REGISTRAR_TOKEN_PEPPER_FILE}
+    file: "${REGISTRAR_TOKEN_PEPPER_FILE:?set REGISTRAR_TOKEN_PEPPER_FILE}"
   cursor_signing_key:
-    file: ${REGISTRAR_CURSOR_KEY_FILE:?set REGISTRAR_CURSOR_KEY_FILE}
+    file: "${REGISTRAR_CURSOR_KEY_FILE:?set REGISTRAR_CURSOR_KEY_FILE}"

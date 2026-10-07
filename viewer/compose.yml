@@ -65,4 +65,4 @@ secrets:
   # Compose bind-mounts this file as-is, preserving host ownership and mode, so
   # it must be readable by UID 10002 inside the container (root:10002 0640).
   viewer_api_token:
-    file: ${VIEWER_TOKEN_FILE:?set VIEWER_TOKEN_FILE to the read-only token path}
+    file: "${VIEWER_TOKEN_FILE:?set VIEWER_TOKEN_FILE to the read-only token path}"

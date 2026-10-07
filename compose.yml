@@ -18,11 +18,11 @@ x-hardened: &hardened
 
 services:
   ledger-migrate:
-    image: ${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}
+    image: "${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}"
     build:
       context: .
       dockerfile: registrar/Dockerfile
-      args: {PYTHON_IMAGE: ${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}}
+      args: {PYTHON_IMAGE: "${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}"}
     <<: *hardened
     restart: "no"
     user: "10001:10001"
@@ -33,7 +33,7 @@ services:
       TOWNSQUARE_CONTEXT_MANIFEST: /run/configs/context_manifest
     volumes:
       - type: bind
-        source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
+        source: "${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}"
         target: /var/lib/townsquare
     secrets: [receipt_hash_key]
     configs: [context_manifest]
@@ -41,11 +41,11 @@ services:
     networks: [app]
 
   ledger:
-    image: ${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}
+    image: "${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}"
     build:
       context: .
       dockerfile: registrar/Dockerfile
-      args: {PYTHON_IMAGE: ${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}}
+      args: {PYTHON_IMAGE: "${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}"}
     <<: *hardened
     user: "10001:10001"
     depends_on:
@@ -75,7 +75,7 @@ services:
       TOWNSQUARE_MINISIGN_EXECUTABLE: /usr/local/bin/minisign
     volumes:
       - type: bind
-        source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
+        source: "${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}"
         target: /var/lib/townsquare
     secrets: [token_pepper, cursor_signing_key, receipt_hash_key, registry_ledger_readiness_token, ledger_registry_readiness_token]
     configs: [context_manifest, authority_public_key, authority_proof, authority_proof_signature]
@@ -90,11 +90,11 @@ services:
       start_period: 30s
 
   viewer:
-    image: ${TOWNSQUARE_VIEWER_IMAGE:?set immutable viewer image reference}
+    image: "${TOWNSQUARE_VIEWER_IMAGE:?set immutable viewer image reference}"
     build:
       context: .
       dockerfile: viewer/Dockerfile
-      args: {PYTHON_IMAGE: ${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}}
+      args: {PYTHON_IMAGE: "${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}"}
     <<: *hardened
     user: "10002:10002"
     depends_on:
@@ -115,11 +115,11 @@ services:
       start_period: 45s
 
   registry:
-    image: ${TOWNSQUARE_REGISTRY_IMAGE:?set immutable registry image reference}
+    image: "${TOWNSQUARE_REGISTRY_IMAGE:?set immutable registry image reference}"
     build:
       context: .
       dockerfile: registry/Dockerfile
-      args: {PYTHON_IMAGE: ${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}}
+      args: {PYTHON_IMAGE: "${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}"}
     <<: *hardened
     user: "10003:10003"
     depends_on:
@@ -139,7 +139,7 @@ services:
       REGISTRY_PEER_READINESS_TOKEN_FILE: /run/secrets/ledger_registry_readiness_token
     volumes:
       - type: bind
-        source: ${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}
+        source: "${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}"
         target: /var/lib/registry
     secrets: [registry_api_token, ledger_registry_audit_token, registry_ledger_readiness_token, ledger_registry_readiness_token]
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
@@ -154,11 +154,11 @@ services:
   # Independent database, independent exclusive migrator. This is intentionally
   # not the Ledger `migrate` service and never shares a transaction with it.
   registry-migrate:
-    image: ${TOWNSQUARE_REGISTRY_IMAGE:?set immutable registry image reference}
+    image: "${TOWNSQUARE_REGISTRY_IMAGE:?set immutable registry image reference}"
     build:
       context: .
       dockerfile: registry/Dockerfile
-      args: {PYTHON_IMAGE: ${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}}
+      args: {PYTHON_IMAGE: "${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}"}
     <<: *hardened
     restart: "no"
     user: "10003:10003"
@@ -167,20 +167,20 @@ services:
       REGISTRY_DB: /var/lib/registry/registry.db
     volumes:
       - type: bind
-        source: ${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}
+        source: "${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}"
         target: /var/lib/registry
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
     networks: [app]
 
   backup:
-    image: ${TOWNSQUARE_BACKUP_IMAGE:?set immutable backup image reference}
+    image: "${TOWNSQUARE_BACKUP_IMAGE:?set immutable backup image reference}"
     build:
       context: .
       dockerfile: backup/Dockerfile
       args:
-        PYTHON_IMAGE: ${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}
-        AGE_VERSION: ${TOWNSQUARE_AGE_VERSION:?set exact distro package version}
-        MINISIGN_VERSION: ${TOWNSQUARE_MINISIGN_VERSION:?set exact distro package version}
+        PYTHON_IMAGE: "${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}"
+        AGE_VERSION: "${TOWNSQUARE_AGE_VERSION:?set exact distro package version}"
+        MINISIGN_VERSION: "${TOWNSQUARE_MINISIGN_VERSION:?set exact distro package version}"
     <<: *hardened
     profiles: [operations]
     restart: "no"
@@ -193,15 +193,15 @@ services:
       TOWNSQUARE_BACKUP_RECIPIENT_FILE: /run/secrets/backup_recipient
     volumes:
       - type: bind
-        source: ${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}
+        source: "${TOWNSQUARE_LEDGER_DATA_DIR:?set a local durable data directory}"
         target: /var/lib/townsquare
         read_only: true
       - type: bind
-        source: ${TOWNSQUARE_REGISTRY_DATA_DIR:?set separate registry data directory}
+        source: "${TOWNSQUARE_REGISTRY_DATA_DIR:?set separate registry data directory}"
         target: /var/lib/registry
         read_only: true
       - type: bind
-        source: ${TOWNSQUARE_BACKUP_DIR:?set encrypted backup destination}
+        source: "${TOWNSQUARE_BACKUP_DIR:?set encrypted backup destination}"
         target: /var/backups/townsquare
     secrets: [backup_recipient]
     tmpfs: [/tmp:rw,noexec,nosuid,size=128m,mode=1777]
@@ -212,17 +212,17 @@ networks:
   ingress: {internal: false}
 
 secrets:
-  token_pepper: {file: ${TOWNSQUARE_TOKEN_PEPPER_FILE:?set secret path}}
-  cursor_signing_key: {file: ${TOWNSQUARE_CURSOR_SIGNING_KEY_FILE:?set secret path}}
-  receipt_hash_key: {file: ${TOWNSQUARE_RECEIPT_HASH_KEY_FILE:?set secret path}}
-  viewer_api_token: {file: ${TOWNSQUARE_VIEWER_API_TOKEN_FILE:?set secret path}}
-  registry_api_token: {file: ${TOWNSQUARE_REGISTRY_API_TOKEN_FILE:?set secret path}}
-  ledger_registry_audit_token: {file: ${TOWNSQUARE_REGISTRY_LEDGER_AUDIT_TOKEN_FILE:?set scoped secret path}}
-  registry_ledger_readiness_token: {file: ${TOWNSQUARE_REGISTRY_LEDGER_READINESS_TOKEN_FILE:?set scoped secret path}}
-  ledger_registry_readiness_token: {file: ${TOWNSQUARE_LEDGER_REGISTRY_READINESS_TOKEN_FILE:?set scoped secret path}}
-  backup_recipient: {file: ${TOWNSQUARE_BACKUP_RECIPIENT_FILE:?set secret path}}
+  token_pepper: {file: "${TOWNSQUARE_TOKEN_PEPPER_FILE:?set secret path}"}
+  cursor_signing_key: {file: "${TOWNSQUARE_CURSOR_SIGNING_KEY_FILE:?set secret path}"}
+  receipt_hash_key: {file: "${TOWNSQUARE_RECEIPT_HASH_KEY_FILE:?set secret path}"}
+  viewer_api_token: {file: "${TOWNSQUARE_VIEWER_API_TOKEN_FILE:?set secret path}"}
+  registry_api_token: {file: "${TOWNSQUARE_REGISTRY_API_TOKEN_FILE:?set secret path}"}
+  ledger_registry_audit_token: {file: "${TOWNSQUARE_REGISTRY_LEDGER_AUDIT_TOKEN_FILE:?set scoped secret path}"}
+  registry_ledger_readiness_token: {file: "${TOWNSQUARE_REGISTRY_LEDGER_READINESS_TOKEN_FILE:?set scoped secret path}"}
+  ledger_registry_readiness_token: {file: "${TOWNSQUARE_LEDGER_REGISTRY_READINESS_TOKEN_FILE:?set scoped secret path}"}
+  backup_recipient: {file: "${TOWNSQUARE_BACKUP_RECIPIENT_FILE:?set secret path}"}
 configs:
-  context_manifest: {file: ${TOWNSQUARE_CONTEXT_MANIFEST:?set immutable manifest file}}
-  authority_public_key: {file: ${TOWNSQUARE_AUTHORITY_PUBLIC_KEY_FILE:?set public verification key}}
-  authority_proof: {file: ${TOWNSQUARE_AUTHORITY_PROOF_FILE:?set canonical authority proof}}
-  authority_proof_signature: {file: ${TOWNSQUARE_AUTHORITY_SIGNATURE_FILE:?set detached proof signature}}
+  context_manifest: {file: "${TOWNSQUARE_CONTEXT_MANIFEST:?set immutable manifest file}"}
+  authority_public_key: {file: "${TOWNSQUARE_AUTHORITY_PUBLIC_KEY_FILE:?set public verification key}"}
+  authority_proof: {file: "${TOWNSQUARE_AUTHORITY_PROOF_FILE:?set canonical authority proof}"}
+  authority_proof_signature: {file: "${TOWNSQUARE_AUTHORITY_SIGNATURE_FILE:?set detached proof signature}"}

@@ -5,23 +5,23 @@ services:
   ledger:
     volumes:
       - type: bind
-        source: ${TOWNSQUARE_LEDGER_DATA_DIR:?must be NAS-local, not SMB/NFS}
+        source: "${TOWNSQUARE_LEDGER_DATA_DIR:?must be NAS-local, not SMB/NFS}"
         target: /var/lib/townsquare
   ledger-migrate:
     volumes:
       - type: bind
-        source: ${TOWNSQUARE_LEDGER_DATA_DIR:?must be NAS-local, not SMB/NFS}
+        source: "${TOWNSQUARE_LEDGER_DATA_DIR:?must be NAS-local, not SMB/NFS}"
         target: /var/lib/townsquare
   backup:
     volumes:
       - type: bind
-        source: ${TOWNSQUARE_LEDGER_DATA_DIR:?must be NAS-local, not SMB/NFS}
+        source: "${TOWNSQUARE_LEDGER_DATA_DIR:?must be NAS-local, not SMB/NFS}"
         target: /var/lib/townsquare
         read_only: true
       - type: bind
-        source: ${TOWNSQUARE_REGISTRY_DATA_DIR:?must be separate NAS-local registry data}
+        source: "${TOWNSQUARE_REGISTRY_DATA_DIR:?must be separate NAS-local registry data}"
         target: /var/lib/registry
         read_only: true
       - type: bind
-        source: ${TOWNSQUARE_BACKUP_DIR:?must be a distinct encrypted-backup target}
+        source: "${TOWNSQUARE_BACKUP_DIR:?must be a distinct encrypted-backup target}"
         target: /var/backups/townsquare
