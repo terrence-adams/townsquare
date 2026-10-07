@@ -1,0 +1,15 @@
+{
+  "schema": "townsquare-source-instance-regression-v1",
+  "source_commit": "95209b6cab072c0d2c2c4f0f39bde8314ed2c764",
+  "request": {
+    "credential_class": "valid viewer native credential",
+    "method": "GET",
+    "path": "/health/ready"
+  },
+  "expected": "Viewer credential is rejected because the source route is directional Registry-peer-only",
+  "actual": {
+    "status": 401,
+    "body": {"detail": "registry peer readiness authorization required"}
+  },
+  "classification": "SOURCE TEST EVIDENCE; NOT EXACT-IMAGE OR LIVE CANARY EVIDENCE"
+}

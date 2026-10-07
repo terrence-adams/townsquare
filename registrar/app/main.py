@@ -1,12 +1,36 @@
-import json,os,secrets,sqlite3,urllib.request
+import hashlib,json,os,secrets,sqlite3,urllib.request
 from fastapi import Depends,FastAPI,Header,HTTPException,Query,Request
 from fastapi.responses import JSONResponse
+from shared.canary_authority import CanaryAuthorityError,CanaryProofVerifier,SQLiteNonceStore,canonical_bytes,decode_proof,decode_signature,load_r7_context
+from shared.canary_identity import compatible_identity,require_canary_identity
+from shared.ledger_context import LedgerContextError,load_ledger_context
 from .auth import authenticate_identity,authenticate_native_identity
 from .db import LEDGER_SERVICE_VERSION,REGISTRY_AUDIT_CONTRACT_VERSION,REGISTRY_SCHEMA_VERSION,REGISTRY_SERVICE_VERSION,registry_integration_status,session,verify_schema
 from .service import Conflict,Forbidden,Invalid,Registrar,Unavailable
 from .native_ledger import NativeLedger,NativeLedgerError,ensure_receipt_key_at_startup
 from .attestation import verify as verify_attestation
 from .runtime import ensure_runtime_mode,verification_enabled
+
+# This source artifact is canary-only.  Identity is established before a DB
+# path is resolved or opened and before an ASGI listener can be constructed.
+CANARY_IDENTITY=require_canary_identity()
+
+# Fixed mount targets are part of this canary artifact.  Compose declares the
+# source paths; no secret value or caller-selected path is accepted through
+# its environment.
+CANARY_TEST_PUBLIC_KEY_FILE=os.environ.get("TOWNSQUARE_CANARY_TEST_PUBLIC_KEY_FILE","/run/config/canary-test-authority.pub")
+CANARY_CONTEXT_MANIFEST_FILE=os.environ.get("TOWNSQUARE_CONTEXT_MANIFEST","/run/config/canary-context-manifest.json")
+LEDGER_CONTEXT_MANIFEST_FILE=os.environ.get("TOWNSQUARE_LEDGER_CONTEXT_MANIFEST","/run/config/ledger-context-manifest.json")
+R7_CONTEXT_SHA256=load_r7_context(CANARY_CONTEXT_MANIFEST_FILE,CANARY_IDENTITY)
+REGISTRY_OUTBOUND_READINESS_FILE=os.environ.get("REGISTRY_READINESS_TOKEN_FILE","/run/secrets/ledger-to-registry-readiness")
+REGISTRY_INBOUND_READINESS_FILE=os.environ.get("REGISTRY_PEER_READINESS_TOKEN_FILE","/run/secrets/registry-to-ledger-readiness")
+for _forbidden_authority_name in (
+    "TOWNSQUARE_AUTHORITY_PROOF_FILE",
+    "TOWNSQUARE_AUTHORITY_PUBLIC_KEY_FILE",
+    "TOWNSQUARE_AUTHORITY_SIGNATURE_FILE",
+):
+    if os.environ.get(_forbidden_authority_name):
+        raise RuntimeError(f"{_forbidden_authority_name} is forbidden in the non-authoritative canary")
 
 ensure_runtime_mode(os.environ.get("REGISTRAR_ENV","development"))
 
@@ -98,6 +122,20 @@ def native_identity(db,authorization,capability):
     if not authorization or not authorization.startswith("Bearer "): raise HTTPException(401,"Bearer token required")
     try: return authenticate_native_identity(db,authorization[7:],capability)
     except Forbidden as exc: raise HTTPException(403,str(exc)) from exc
+
+def _require_canary_test_proof(db,proof_header,signature_header,*,action,object_id,context_sha256):
+    try:
+        verifier=CanaryProofVerifier(CANARY_IDENTITY,SQLiteNonceStore(db),CANARY_TEST_PUBLIC_KEY_FILE,r7_context_sha256=R7_CONTEXT_SHA256)
+        return verifier.verify_and_consume(
+            decode_proof(proof_header),decode_signature(signature_header),
+            audience="townsquare-canary-ledger-api",
+            service_id=LEDGER_SERVICE_VERSION,
+            action=action,
+            object_id=object_id,
+            context_sha256=context_sha256,
+        )
+    except CanaryAuthorityError as exc:
+        raise HTTPException(403,str(exc)) from exc
 
 def invoke(fn):
     # Domain exceptions only: deliberate raises from service.py, mapped at the
@@ -193,8 +231,7 @@ def live(): return {"ok":True}
 
 def _registry_peer_readiness():
     """Fetch the live Registry tuple; deployment environment cannot attest for its peer."""
-    path=os.environ.get("REGISTRY_READINESS_TOKEN_FILE")
-    if not path: return {"compatible":False,"detail":"registry readiness credential is absent"}
+    path=REGISTRY_OUTBOUND_READINESS_FILE
     try:
         with open(path,"r",encoding="utf-8") as handle: token=handle.read(4097).strip()
         if not token or len(token)>4096: return {"compatible":False,"detail":"registry readiness credential is invalid"}
@@ -205,6 +242,7 @@ def _registry_peer_readiness():
         peer=json.loads(raw.decode("utf-8")); compatibility=peer.get("compatibility",{})
         compatible=(
             peer.get("ok") is True
+            and compatible_identity(peer,CANARY_IDENTITY)
             and peer.get("schema_version")==REGISTRY_SCHEMA_VERSION
             and compatibility.get("registry_service")==REGISTRY_SERVICE_VERSION
             and compatibility.get("registry_schema")==REGISTRY_SCHEMA_VERSION
@@ -220,7 +258,14 @@ def _readiness_state(db):
     checks={"foreign_keys":db.execute("PRAGMA foreign_keys").fetchone()[0],"journal_mode":db.execute("PRAGMA journal_mode").fetchone()[0],"synchronous":db.execute("PRAGMA synchronous").fetchone()[0]}
     if checks!={"foreign_keys":1,"journal_mode":"wal","synchronous":2}: raise HTTPException(503,checks)
     schema_version=verify_schema(db); registry=registry_integration_status()
-    result={"ok":True,"service_version":LEDGER_SERVICE_VERSION,"schema_version":schema_version,"audit_contract_version":REGISTRY_AUDIT_CONTRACT_VERSION}
+    result={
+        "ok":True,
+        "service_id":LEDGER_SERVICE_VERSION,
+        "service_version":LEDGER_SERVICE_VERSION,
+        "schema_version":schema_version,
+        "audit_contract_version":REGISTRY_AUDIT_CONTRACT_VERSION,
+        **CANARY_IDENTITY.as_dict(),
+    }
     if registry["enabled"] and not registry["compatible"]:
         raise HTTPException(503,{**result,"ok":False,"registry":registry})
     if registry["enabled"]:
@@ -238,12 +283,10 @@ def _read_readiness_token(path,label):
     return token
 
 def _authorize_registry_peer(authorization):
-    inbound=_read_readiness_token(os.environ.get("REGISTRY_PEER_READINESS_TOKEN_FILE"),"registry peer readiness")
-    outbound_path=os.environ.get("REGISTRY_READINESS_TOKEN_FILE")
-    if outbound_path:
-        outbound=_read_readiness_token(outbound_path,"registry readiness")
-        if secrets.compare_digest(inbound.encode("utf-8"),outbound.encode("utf-8")):
-            raise HTTPException(503,"directional readiness credentials must be distinct")
+    inbound=_read_readiness_token(REGISTRY_INBOUND_READINESS_FILE,"registry peer readiness")
+    outbound=_read_readiness_token(REGISTRY_OUTBOUND_READINESS_FILE,"registry readiness")
+    if secrets.compare_digest(inbound.encode("utf-8"),outbound.encode("utf-8")):
+        raise HTTPException(503,"directional readiness credentials must be distinct")
     supplied=authorization[7:] if isinstance(authorization,str) and authorization.startswith("Bearer ") else ""
     if not secrets.compare_digest(inbound.encode("utf-8"),supplied.encode("utf-8")):
         raise HTTPException(401,"registry peer readiness authorization required")
@@ -251,6 +294,12 @@ def _authorize_registry_peer(authorization):
 @app.get("/health/ready")
 def ready(authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
     _authorize_registry_peer(authorization)
+    return _readiness_state(db)
+
+@app.get("/v1/native/status/ready")
+def native_status_ready(authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
+    """Authenticated Viewer readiness; directional peer tokens never enter here."""
+    native_identity(db,authorization,"status:read")
     return _readiness_state(db)
 
 @app.get("/health/internal/ready")
@@ -349,11 +398,20 @@ async def native_context_receipt(request:Request,authorization:str|None=Header(N
     return {"receipt":invoke_native(lambda:_native_ledger(db).acknowledge_context(body.get("bundle_id"),who,body.get("acknowledged_hashes")))}
 
 @app.post("/v1/events",status_code=201)
-async def native_event(request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),if_match:str|None=Header(None,alias="If-Match"),context_receipt:str|None=Header(None,alias="X-Context-Receipt"),db:sqlite3.Connection=Depends(get_db)):
+async def native_event(request:Request,authorization:str|None=Header(None),idempotency_key:str|None=Header(None),if_match:str|None=Header(None,alias="If-Match"),context_receipt:str|None=Header(None,alias="X-Context-Receipt"),canary_proof:str|None=Header(None,alias="X-Canary-Test-Proof"),canary_signature:str|None=Header(None,alias="X-Canary-Test-Signature"),db:sqlite3.Connection=Depends(get_db)):
     body=await request.json()
     capability=invoke_native(lambda:NativeLedger.required_action_capability(body))
     who,_=native_identity(db,authorization,capability)
-    return invoke_native(lambda:_native_ledger(db).post_event(who,idempotency_key,context_receipt,if_match or "new",body))
+    verified_canary_test_proof=_require_canary_test_proof(
+        db,canary_proof,canary_signature,
+        action=capability,
+        object_id=str(body.get("thread_id","")),
+        context_sha256=hashlib.sha256(canonical_bytes(body)).hexdigest(),
+    )
+    return invoke_native(lambda:_native_ledger(db).post_event(
+        who,idempotency_key,context_receipt,if_match or "new",body,
+        verified_canary_test_proof=verified_canary_test_proof,
+    ))
 
 @app.get("/v1/native/threads/{thread_id}")
 def native_thread(thread_id:str,include_archived:bool=False,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
@@ -383,18 +441,15 @@ async def native_registry_audit(request:Request,authorization:str|None=Header(No
 
 @app.post("/v1/operator/stop")
 async def native_stop(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
-    who,_=native_identity(db,authorization,"operator:stop"); body=await request.json()
-    return invoke_native(lambda:_native_ledger(db).set_operator_stop(who,True,body.get("reason")))
+    raise HTTPException(403,"protected operator control is unavailable in the non-authoritative canary")
 
 @app.post("/v1/operator/resume")
 async def native_resume(request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
-    who,_=native_identity(db,authorization,"operator:resume"); body=await request.json()
-    return invoke_native(lambda:_native_ledger(db).set_operator_resume(who,body.get("reason")))
+    raise HTTPException(403,"protected operator control is unavailable in the non-authoritative canary")
 
 @app.post("/v1/native/threads/{thread_id}/archive")
 async def native_archive(thread_id:str,request:Request,authorization:str|None=Header(None),db:sqlite3.Connection=Depends(get_db)):
-    who,_=native_identity(db,authorization,"request:archive"); body=await request.json()
-    return invoke_native(lambda:_native_ledger(db).archive_thread(who,thread_id,body.get("reason"),context_receipt=body.get("context_receipt"),expected_revision=body.get("expected_revision")))
+    raise HTTPException(403,"archive authority is unavailable in the non-authoritative canary")
 
 def _native_ledger(db):
     return NativeLedger(
@@ -405,21 +460,11 @@ def _native_ledger(db):
 
 def _native_context_manifest():
     """Load one hash-pinned manifest; absence is intentionally fail-closed."""
-    path=os.environ.get("TOWNSQUARE_CONTEXT_MANIFEST")
-    if not path: return None
+    path=LEDGER_CONTEXT_MANIFEST_FILE
     try:
-        import json
-        with open(path,"r",encoding="utf-8") as handle: return json.load(handle)
-    except (OSError,ValueError): return None
+        return load_ledger_context(path,os.environ.get("TOWNSQUARE_LEDGER_CONTEXT_MANIFEST_SHA256",""),CANARY_CONTEXT_MANIFEST_FILE)
+    except (OSError,ValueError,LedgerContextError): return None
 
 def _native_governance_authority():
-    """Load canonical proof data; NativeLedger verifies its detached signature."""
-    path=os.environ.get("TOWNSQUARE_AUTHORITY_PROOF_FILE")
-    if not path: return None
-    try:
-        import json
-        with open(path,"rb") as handle:
-            raw=handle.read(256*1024+1)
-        if not raw or len(raw)>256*1024: return None
-        return json.loads(raw.decode("utf-8"))
-    except (OSError,ValueError): return None
+    """The canary never loads adopted/operator authority material."""
+    return None

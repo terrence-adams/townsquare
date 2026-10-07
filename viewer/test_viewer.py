@@ -21,6 +21,16 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 os.environ.setdefault("REGISTRAR_API_TOKEN", "test.token")
+for name, value in {
+    "TOWNSQUARE_RUNTIME_CLASS": "CANARY",
+    "TOWNSQUARE_AUTHORITY_CLASS": "NON-AUTHORITATIVE",
+    "TOWNSQUARE_CANARY_LABEL": "TS-CANARY-NAS1-20261007-A",
+    "TOWNSQUARE_COMPOSE_PROJECT": "townsquare-canary-20261007-a",
+    "TOWNSQUARE_SOURCE_COMMIT": "a" * 40,
+    "TOWNSQUARE_SOURCE_TREE": "b" * 40,
+}.items():
+    os.environ.setdefault(name, value)
+    os.environ.setdefault("TOWNSQUARE_EMBEDDED_" + name.removeprefix("TOWNSQUARE_"), value)
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
@@ -62,8 +72,8 @@ class Canned:
     def __call__(self, path, params=None):
         params = params or {}
         self.calls.append((path, dict(params)))
-        if path == "/health/ready":
-            return {"ok": True, "schema_version": 9}
+        if path == "/v1/native/status/ready":
+            return {"ok": True, "schema_version": 14, **registrar_client.CANARY_IDENTITY.as_dict()}
         if path == "/health/live":
             return {"ok": True}
         if path == "/v1/native/discovery":

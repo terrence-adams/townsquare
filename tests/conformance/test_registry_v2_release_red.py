@@ -24,15 +24,15 @@ class RegistryV2ReleaseContracts(unittest.TestCase):
         return (ROOT / relative).read_text(encoding="utf-8")
 
     def _seed_registry_v1(self, db):
-        """Minimal populated v1: one pending durable event before the v2 lease upgrade."""
-        db.executescript("""
-            CREATE TABLE registry_migrations(version INTEGER PRIMARY KEY, applied_utc TEXT NOT NULL);
-            INSERT INTO registry_migrations VALUES(1, '2026-10-06T00:00:00Z');
-            CREATE TABLE journal(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, agent_id TEXT NOT NULL, action TEXT NOT NULL, body_json TEXT NOT NULL, committed_utc TEXT NOT NULL);
-            CREATE TABLE audit_outbox(event_id TEXT PRIMARY KEY REFERENCES journal(event_id), attempts INTEGER NOT NULL DEFAULT 0, delivered_utc TEXT, last_error TEXT);
-            INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES('pending-v1','agent-1','register','{}','2026-10-06T00:00:00Z');
-            INSERT INTO audit_outbox(event_id) VALUES('pending-v1');
-        """)
+        """Exact populated v1 predecessor, before the reviewed v2 lease step."""
+        statements=[]; current=""
+        for line in self.text("registry/schema.sql").splitlines(True):
+            current+=line
+            if sqlite3.complete_statement(current): statements.append(current); current=""
+        for statement in statements[:6]: db.execute(statement)
+        db.execute("INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES('pending-v1','agent-1','register','{}','2026-10-06T00:00:00Z')")
+        db.execute("INSERT INTO audit_outbox(event_id) VALUES('pending-v1')")
+        db.commit()
 
     @contextmanager
     def registry_migrator(self, db_path):
@@ -92,7 +92,7 @@ class RegistryV2ReleaseContracts(unittest.TestCase):
                 db.close()
 
     def test_schema_and_v2_migration_allow_ack_but_reject_post_delivery_lease(self):
-        from registry.app import acknowledge_delivery
+        from shared.registry_outbox import acknowledge_delivery
         with tempfile.TemporaryDirectory() as tmp:
             trigger_sql=[]
             for origin in ("fresh","migrated"):

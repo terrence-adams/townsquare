@@ -25,6 +25,7 @@ from urllib.parse import quote
 import requests
 import streamlit as st
 from requests.adapters import HTTPAdapter
+from shared.canary_identity import compatible_identity,require_canary_identity
 from urllib3.util import Retry
 
 # ---------------------------------------------------------------- configuration
@@ -34,6 +35,7 @@ from urllib3.util import Retry
 BASE_URL = os.environ.get("REGISTRAR_BASE_URL", "http://registrar:8790").rstrip("/")
 VIEWER_PROFILE = os.environ.get("TOWNSQUARE_VIEWER_PROFILE", "native-ledger-mvp")
 NATIVE_MVP_PROFILE = "native-ledger-mvp"
+CANARY_IDENTITY = require_canary_identity()
 
 # (connect, read). The Registrar is one Uvicorn worker over local SQLite; a
 # read that has not answered in 15s means something is wrong, not slow.
@@ -97,24 +99,13 @@ class RegistrarError(RuntimeError):
 
 # ---------------------------------------------------------------- transport
 def _read_token() -> str:
-    """Resolve the bearer credential. File first, matching the Registrar's own
-    Docker-secret pattern; env second for local development; never a literal."""
-    path = os.environ.get("REGISTRAR_API_TOKEN_FILE")
-    if path:
-        try:
-            with open(path, encoding="utf-8") as handle:
-                return handle.read().strip()
-        except OSError as exc:
-            raise RegistrarError(
-                f"Cannot read REGISTRAR_API_TOKEN_FILE ({exc.strerror})."
-            ) from None
-    token = os.environ.get("REGISTRAR_API_TOKEN", "").strip()
-    if token:
-        return token
-    try:  # st.secrets raises when no secrets.toml exists at all.
-        return str(st.secrets.get("registrar_api_token", "")).strip()
-    except Exception:
-        return ""
+    """Read only the fixed, consumer-owned canary credential mount."""
+    path = "/run/secrets/viewer-native-credential"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read().strip()
+    except OSError as exc:
+        raise RegistrarError(f"Cannot read the mounted Viewer credential ({exc.strerror}).") from None
 
 
 # A 503 from this API means one specific thing: the Registrar's write path
@@ -214,7 +205,8 @@ def _get(path: str, params: dict[str, Any] | None = None) -> Any:
         raise RegistrarError(
             "The Registrar rejected the viewer credential (HTTP "
             f"{response.status_code}). It must be a live token with the "
-            "post:read scope.",
+            "status:read capability for readiness and post:read/notice:read "
+            "capabilities for data reads.",
             response.status_code,
         )
     if response.status_code == 404:
@@ -254,13 +246,15 @@ def _native_get(path: str, params: dict[str, Any] | None = None) -> Any:
 # max_entries so a user cycling filters cannot grow the cache without limit.
 @st.cache_data(ttl="30s", max_entries=4, show_spinner=False)
 def health() -> dict[str, Any]:
-    """`/health/ready` — schema version plus the SQLite pragma assertions.
+    """Authenticated native status plus exact six-field canary identity.
 
     Returns a UI-shaped dict rather than raising, because the health panel has
     to be able to render the bad news too.
     """
     try:
-        payload = _get("/health/ready")
+        payload = _native_get("/v1/native/status/ready")
+        if not compatible_identity(payload, CANARY_IDENTITY):
+            raise RegistrarError("Blocking canary identity mismatch from Registrar status.")
         return {"ok": True, "detail": payload}
     except RegistrarError as exc:
         return {"ok": False, "detail": str(exc), "status": exc.status}

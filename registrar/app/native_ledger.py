@@ -32,7 +32,7 @@ AUTHORITY_SIGNATURE_MAX_BYTES = 16 * 1024
 AUTHORITY_PUBLIC_KEY_MAX_BYTES = 16 * 1024
 MINISIGN_TIMEOUT_SECONDS = 5
 MEDIA_TYPES = {"text/plain", "text/plain; charset=utf-8", "text/markdown", "text/markdown; charset=utf-8"}
-READ_PRINCIPALS = {"writer-a", "writer-b", "reviewer", "viewer", "crier", "projector", "operator", "operator-resume"}
+READ_PRINCIPALS = {"writer-a", "writer-b", "reviewer", "viewer", "crier", "projector", "operator", "operator-resume", "venom", "wolverine", "bishop"}
 NOTICE_READ_PRINCIPALS = {"viewer", "crier", "projector", "operator"}
 INTERNAL_KINDS = {"CONTROL", "ARCHIVE", "REGISTRY_AUDIT"}
 TERMINAL_STATES = {"CLOSED", "CANCELLED"}
@@ -515,7 +515,7 @@ class NativeLedger:
 
     # ---- native writes -----------------------------------------------
 
-    def post_event(self, principal, idempotency_key, context_receipt, revision, payload):
+    def post_event(self, principal, idempotency_key, context_receipt, revision, payload, *, verified_canary_test_proof=None):
         if not principal or principal in {"expired-writer", "revoked-writer"}:
             _fail("forbidden", "authenticated governed principal required")
         if not isinstance(idempotency_key, str) or not idempotency_key or len(idempotency_key) > 200:
@@ -564,6 +564,7 @@ class NativeLedger:
             authority = self._resolve_authority(
                 manifest, principal, action_capability, event["thread_id"], idempotency_key,
                 allow_informational_append=informational_correction,
+                verified_canary_test_proof=verified_canary_test_proof,
             )
             event_id = str(uuid.uuid4())
             committed_at = now()
@@ -590,7 +591,11 @@ class NativeLedger:
                 "principal": principal,
                 "represented_actor": principal,
                 "claimed_origin": "native-api",
-                "authority_scope": "informational:correction" if informational_correction else action_capability,
+                "authority_scope": (
+                    "informational:correction" if informational_correction else
+                    "canary-test:" + action_capability if authority.get("authority_class") == "CANARY_TEST" else
+                    action_capability
+                ),
                 "committed_at": committed_at,
             }
             commit_hash = _canonical_sha(envelope)
@@ -627,6 +632,8 @@ class NativeLedger:
                 "state": event["state"], "notice_eligible": True,
                 "informational_append": informational_correction,
                 "effect_applied": not informational_correction,
+                "authority_class": authority.get("authority_class", "GOVERNED"),
+                "runtime_authority": "NON-AUTHORITATIVE" if authority.get("authority_class") == "CANARY_TEST" else "GOVERNED",
             }
             self.db.execute(
                 "INSERT INTO native_requests VALUES (?,?,?,?,?,?,?,?,?)",
@@ -685,12 +692,30 @@ class NativeLedger:
 
     def _resolve_authority(
         self, manifest, principal, capability, thread_id, request_key, *, operation="post",
-        allow_informational_append=False,
+        allow_informational_append=False, verified_canary_test_proof=None,
     ):
         authority = self._governance_authority
         reason = "effective"
         disposition = "EFFECTIVE"
-        if not isinstance(authority, dict):
+        canary = verified_canary_test_proof
+        canary_scope = canary.get("scope", {}) if isinstance(canary, dict) else {}
+        if (
+            isinstance(canary, dict)
+            and canary.get("authority_class") == "CANARY_TEST"
+            and canary.get("audience") == "townsquare-canary-ledger-api"
+            and canary.get("service_id") == "townsquare-ledger-v0"
+            and canary_scope == {"action": capability, "object_id": thread_id}
+            and isinstance(canary.get("key_id"), str)
+            and isinstance(canary.get("nonce"), str)
+        ):
+            disposition, reason = "CANARY_TEST", "verified_canary_test_proof"
+            authority = {
+                "authority_class": "CANARY_TEST",
+                "adoption_event_id": "canary-test:" + canary["key_id"] + ":" + canary["nonce"],
+                "resolver_key_id": canary["key_id"],
+                "scope": {"capabilities": {principal: [capability]}, "actions": [capability], "targets": [thread_id]},
+            }
+        elif not isinstance(authority, dict):
             disposition, reason = "UNKNOWN", "authority_source_absent"
         elif authority.get("decision") != "ADOPT":
             disposition, reason = "NOT_EFFECTIVE", "authority_not_adopted"
@@ -729,7 +754,7 @@ class NativeLedger:
         capabilities = scope.get("capabilities", {}) if isinstance(scope, dict) else {}
         actions = set(scope.get("actions", [])) if isinstance(scope, dict) and isinstance(scope.get("actions"), list) else set()
         targets = set(scope.get("targets", [])) if isinstance(scope, dict) and isinstance(scope.get("targets"), list) else set()
-        if disposition == "EFFECTIVE" and (capability not in actions or ("*" not in targets and thread_id not in targets)):
+        if disposition in {"EFFECTIVE", "CANARY_TEST"} and (capability not in actions or ("*" not in targets and thread_id not in targets)):
             disposition, reason = "NOT_EFFECTIVE", "authority_scope_mismatch"
         granted = capabilities.get(principal, set()) if isinstance(capabilities, dict) else set()
         authority_ref = authority.get("adoption_event_id") if isinstance(authority, dict) else None
@@ -758,7 +783,7 @@ class NativeLedger:
                 authority.get("authority_watermark") if isinstance(authority, dict) else None,
             ),
         )
-        if disposition != "EFFECTIVE":
+        if disposition not in {"EFFECTIVE", "CANARY_TEST"}:
             if allow_informational_append:
                 return {
                     "authority_ref": authority_ref, "digest": authority_digest,
@@ -777,7 +802,13 @@ class NativeLedger:
             # action.  No ordinary ledger mutation has happened yet.
             self.db.commit()
             _fail("forbidden", f"principal lacks {capability}")
-        return {**authority, "authority_ref": authority_ref, "digest": authority_digest, "capabilities": capabilities}
+        return {
+            **authority,
+            "authority_ref": authority_ref,
+            "digest": authority_digest,
+            "capabilities": capabilities,
+            "authority_class": "CANARY_TEST" if disposition == "CANARY_TEST" else "GOVERNED",
+        }
 
     def _validate_event(self, principal, revision, payload):
         if "represented_actor" in payload and payload["represented_actor"] != principal:

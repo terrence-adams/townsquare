@@ -1,0 +1,28 @@
+{
+  "schema_version":"1",
+  "prohibited":{
+    "exact_names":["fresh-canary-20261007-a-review-r6.zip"],
+    "ids":["1c4b4d65f212e38f695dfa22d2c03b3f7dc4b117cc7d5861af822554748bcde2","1aaa0000000000000000000000000000000000000000000000000000000041a1a"],
+    "path_prefixes":["/volume1/docker/townsquare-mvp","/volume1/docker/townsquare-canary-20261007-a/legacy"],
+    "endpoints":[],
+    "image_prefixes":["townsquare-mvp:"],
+    "container_names":["townsquare-mvp"],
+    "project_names":["townsquare-mvp"],
+    "network_names":["townsquare-mvp_default"],
+    "volume_names":["townsquare-mvp_data"],
+    "incident_sentinels":["prohibited-prefix","incident-sentinel"]
+  },
+  "allowed_r7":{
+    "image_names":["townsquare-canary-ledger","townsquare-canary-registry","townsquare-canary-viewer","townsquare-canary-backup"],
+    "project":"townsquare-canary-20261007-a",
+    "network":"townsquare-canary-20261007-a-internal",
+    "root":"/volume1/docker/townsquare-canary-20261007-a",
+    "loopback_ports":[18502,18790]
+  },
+  "r6_provenance":[
+    {"locator":"source-provenance/fresh-canary-20261007-a-review-r6.zip","sha256":"8c0f517033b08da5816404a55f50f1dcfae35f811ede9743e584e8bb590bd2c9","use":"source-provenance-only"},
+    {"locator":"source-provenance/r6-manifest.json","sha256":"37591eb38e300c97663b5ab0c6aff8c83da971d0dea827bd8f1471c20ce0d546","use":"source-provenance-only"},
+    {"locator":"source-provenance/r6-candidate-input.zip","sha256":"dc87e970ac9dfe716fec462b3ac9a169a9c32f63dfcc78543038be5ee921cbea","use":"source-provenance-only"},
+    {"locator":"docs/architecture/townsquare-fresh-nas-canary-design-20261007.md","sha256":"8c0f60b1cf1d5cf7c912b56d55cc2a52841529f44a38a4555fcd89984a7cfd2b","use":"source-provenance-only"}
+  ]
+}

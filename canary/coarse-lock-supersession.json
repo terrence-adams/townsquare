@@ -1,0 +1,7 @@
+{
+  "schema": "townsquare-coarse-lock-disposition-v1",
+  "file": "requirements/requirements.lock.json",
+  "status": "STALE_SUPERSEDED_NON_BUILD_INPUT",
+  "build_inputs": ["requirements/resolved.txt", "wheelhouse.lock.json"],
+  "note": "The coarse lock is not consumed by a Dockerfile or canary build tool. Conformance tests enforce this boundary."
+}

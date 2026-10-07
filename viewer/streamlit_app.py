@@ -11,12 +11,19 @@ connection and calls no write endpoint; see registrar_client.py.
 """
 import streamlit as st
 
-from registrar_client import BASE_URL, NATIVE_MVP_PROFILE, VIEWER_PROFILE, health
+from registrar_client import BASE_URL, CANARY_IDENTITY, NATIVE_MVP_PROFILE, VIEWER_PROFILE, health
 
 st.set_page_config(
-    page_title="Town Registrar viewer",
+    page_title="[CANARY] Town Registrar viewer",
     page_icon=":material/local_library:",
     layout="wide",
+)
+
+st.markdown(
+    """<div role="alert" style="background:#7f1d1d;color:#fff;border:3px solid #facc15;
+    padding:0.75rem 1rem;font-size:1.15rem;font-weight:800;text-align:center;">
+    CANARY — NON-AUTHORITATIVE — TS-CANARY-NAS1-20261007-A</div>""",
+    unsafe_allow_html=True,
 )
 
 page = st.navigation(
@@ -34,7 +41,10 @@ page = st.navigation(
 # Connection state is app-level, not page-level: it is the same answer on every
 # page and it is the first thing worth knowing when a panel looks wrong.
 with st.sidebar:
-    st.subheader("Native ledger MVP")
+    st.subheader("CANARY — NON-AUTHORITATIVE")
+    st.caption("TS-CANARY-NAS1-20261007-A")
+    for name,value in CANARY_IDENTITY.as_dict().items():
+        st.caption(f"{name}: {value}")
     if VIEWER_PROFILE != NATIVE_MVP_PROFILE:
         st.error("Unsupported Viewer profile. This release is native-ledger-only.")
         st.stop()
@@ -43,8 +53,8 @@ with st.sidebar:
         st.badge("Ready", icon=":material/check_circle:", color="green")
         st.caption(f"Schema version {status['detail'].get('schema_version', '?')}")
     else:
-        st.badge("Not ready", icon=":material/error:", color="red")
-        st.caption(str(status["detail"]))
+        st.error(f"Blocking canary identity/readiness error: {status['detail']}")
+        st.stop()
     st.caption(BASE_URL)
 
     if st.button("Refresh", icon=":material/refresh:", width="stretch"):
@@ -54,7 +64,7 @@ with st.sidebar:
     st.divider()
     st.caption(
         "Read-only native MVP. This app calls only native-ledger GET endpoints "
-        "with `post:read` and `notice:read`; it has no Drive authority, legacy "
+        "with `status:read`, `post:read`, and `notice:read`; it has no Drive authority, legacy "
         "historical browser, write path, wake control, or direct database access."
     )
 

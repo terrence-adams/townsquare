@@ -1,0 +1,123 @@
+{
+    "schema_version": "1",
+    "domain": "ledger",
+    "application_id": 1414745159,
+    "user_version": 14,
+    "head": "14",
+    "history_sha256": "eaac585c5a1752a9679c96a0553d1692c0da14f462b9d3dda466395cfabc23c6",
+    "migrations": [
+        {
+            "ordinal": 1,
+            "id": "001",
+            "path": "registrar/migrations/001_initial.sql",
+            "sha256": "3eec0453fc3bfd046093b1bfe4b45b3e08680d04a26fd20131fe3c117a7feae2",
+            "resulting_schema_head": "1",
+            "cumulative_history_sha256": "d53f5efefb17b985ec4c612d9488136698584e6016ee988783c927887a64f6d6"
+        },
+        {
+            "ordinal": 2,
+            "id": "002",
+            "path": "registrar/migrations/002_verification_import.sql",
+            "sha256": "f1886ed83b0aaa2050dc7146f20742d5c90a862115f5dcd8e56a04f6b2222263",
+            "resulting_schema_head": "2",
+            "cumulative_history_sha256": "65d97514067aa3bb05a8e6a099254acd99f16fb4488e2117cf430deb58e010e0"
+        },
+        {
+            "ordinal": 3,
+            "id": "003",
+            "path": "registrar/migrations/003_import_observations.sql",
+            "sha256": "96b2c88a58e11220468a346d3e5028fa42ebd073d5eecf340532cf49049d4658",
+            "resulting_schema_head": "3",
+            "cumulative_history_sha256": "e15ae986e3ac269fda83f3fdab93631b2cebb5d45350548b9e07c0af3d6612ea"
+        },
+        {
+            "ordinal": 4,
+            "id": "004",
+            "path": "registrar/migrations/004_integrity.sql",
+            "sha256": "d196d7e9be5ec35474c71bb58359dcd840f5f8ea6374029530f0178e9270d71f",
+            "resulting_schema_head": "4",
+            "cumulative_history_sha256": "6597c7f11dd9b8e2504d1ba92e86fbb0b21d6069cce5216f97e905cd67163924"
+        },
+        {
+            "ordinal": 5,
+            "id": "005",
+            "path": "registrar/migrations/005_posts_nullable_forward.sql",
+            "sha256": "6fb40d8e35812c334bd5d2c29fb394731e98845441918f10f40828465f6df154",
+            "resulting_schema_head": "5",
+            "cumulative_history_sha256": "ba5c41eef7849135c63331a4d07215d4b2e3badef1f6119ec78e0471523a7870"
+        },
+        {
+            "ordinal": 6,
+            "id": "006",
+            "path": "registrar/migrations/006_repair_post_foreign_keys.sql",
+            "sha256": "067cc1533d4cd1573613d582139fea049d9cc86727381f1583e06321b0278813",
+            "resulting_schema_head": "6",
+            "cumulative_history_sha256": "3412b8cc4357ff62519afaf9051f5ff28837f6284398c8f489ee5f9dc9ddaf37"
+        },
+        {
+            "ordinal": 7,
+            "id": "007",
+            "path": "registrar/migrations/007_verifier_nonces.sql",
+            "sha256": "4a60436380b587c6925679618697af3adf78761fcebe413ca461be1e45d0f116",
+            "resulting_schema_head": "7",
+            "cumulative_history_sha256": "e95b16078d7da9f75c9b1aa1533e25ed27a87368a0b1bb16efb5ed4f9b3b5c94"
+        },
+        {
+            "ordinal": 8,
+            "id": "008",
+            "path": "registrar/migrations/008_opening_insert_guard.sql",
+            "sha256": "4ed39de98ba174387b39dcefe429c5e11befbd525514fb647a3f0ff362073a6e",
+            "resulting_schema_head": "8",
+            "cumulative_history_sha256": "b1f3fd767781e6d6c0b0b3256d1efd11f1f1368b29cbff5590b3c081258e154d"
+        },
+        {
+            "ordinal": 9,
+            "id": "009",
+            "path": "registrar/migrations/009_drive_created_at.sql",
+            "sha256": "9352832c04466bda8805fba40fb7ced8b122393b9265553ed1be5da6ac3dbcdc",
+            "resulting_schema_head": "9",
+            "cumulative_history_sha256": "0d7a0104e68c7013bcf0ac3cd0f46d3ca142e6fbcb848825bc1c26ec35e027d7"
+        },
+        {
+            "ordinal": 10,
+            "id": "010",
+            "path": "registrar/migrations/010_native_ledger.sql",
+            "sha256": "a4339eb8d33dc92252e4b996b168db09be8e296add916d12a0d6c43e9fcf7884",
+            "resulting_schema_head": "10",
+            "cumulative_history_sha256": "86b4518ae2b94dbe0d3452c4b2591f0f701a6e7ba110da85a11912b8b552aec3"
+        },
+        {
+            "ordinal": 11,
+            "id": "011",
+            "path": "registrar/migrations/011_context_controls.sql",
+            "sha256": "ccbce7e2bd4dad76027a19ee7a8b986236da5a36a29cb422e1548f5474fe56e1",
+            "resulting_schema_head": "11",
+            "cumulative_history_sha256": "716a0afeb508ba41e4a44ce1254421828738baab6a049388d6d09a4373322c28"
+        },
+        {
+            "ordinal": 12,
+            "id": "012",
+            "path": "registrar/migrations/012_governed_writes.sql",
+            "sha256": "22c12dae36337b9815ae74adb2d96be7e96a0da8468236c84d447fe525e8f295",
+            "resulting_schema_head": "12",
+            "cumulative_history_sha256": "b7483bde84fce9158774a29269c810d6f4a06c3e04f4f0457235014be10fed07"
+        },
+        {
+            "ordinal": 13,
+            "id": "013",
+            "path": "registrar/migrations/013_request_lifecycle_guard.sql",
+            "sha256": "8583f090e19a53f44b109b081fdacf4bd86233619be04dd2b8e38103bc5384d2",
+            "resulting_schema_head": "13",
+            "cumulative_history_sha256": "af53b4cd708ad041841c9bbb42b48a0a4f895d4f98d09bbe9ebf1142e26a462b"
+        },
+        {
+            "ordinal": 14,
+            "id": "014",
+            "path": "registrar/migrations/014_release_boundaries.sql",
+            "sha256": "83c3829b22bd0c5580d806551e9ebc6a92edd1e8030c571d6484c01c64b83cdf",
+            "resulting_schema_head": "14",
+            "cumulative_history_sha256": "eaac585c5a1752a9679c96a0553d1692c0da14f462b9d3dda466395cfabc23c6"
+        }
+    ],
+    "canonical_schema_sha256": "a8d60c268f88dc717991bab0c20f6a42e2fac84a8981e06e7f7f9cc0b5d529eb"
+}

@@ -19,3 +19,22 @@ report*.json
 inventory.json
 lsjson-*.json
 docs/townsquare-mvp-v0-design-20261006.md
+# R7 image contexts are the reviewed runtime closure only. Source QA,
+# governance, deployment, and generated evidence never enter a Docker context.
+ansible/
+crier/
+deploy/
+docs/
+evidence/
+poller/
+tests/
+tools/
+tracker/
+*.db
+*.db-*
+*.sqlite*
+*.log
+report*/
+R7-*.json
+sbom*.json
+release-manifest*.json

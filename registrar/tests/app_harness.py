@@ -15,14 +15,35 @@ as an implicit namespace package, and running from inside tests/ gives a
 spurious ModuleNotFoundError (noted in OPERATIONS.md).
 """
 from __future__ import annotations
-import json,os,sys,tempfile,unittest
+import hashlib,json,os,stat,sys,tempfile,unittest
 from pathlib import Path
 
 _ENV_KEYS=(
     "REGISTRAR_ENV", "REGISTRAR_DB", "REGISTRAR_CURSOR_KEY_FILE", "REGISTRAR_CURSOR_KEY_ID",
     "TOWNSQUARE_RECEIPT_HASH_KEY_FILE", "TOWNSQUARE_RECEIPT_HASH_KEY_ID",
-    "TOWNSQUARE_CONTEXT_MANIFEST", "TOWNSQUARE_GOVERNANCE_AUTHORITY",
+    "TOWNSQUARE_CONTEXT_MANIFEST", "TOWNSQUARE_LEDGER_CONTEXT_MANIFEST", "TOWNSQUARE_LEDGER_CONTEXT_MANIFEST_SHA256", "TOWNSQUARE_GOVERNANCE_AUTHORITY",
+    "TOWNSQUARE_R7_IDENTITY_FILE", "TOWNSQUARE_R7_IDENTITY_SHA256",
+    "TOWNSQUARE_RUNTIME_CLASS", "TOWNSQUARE_AUTHORITY_CLASS", "TOWNSQUARE_CANARY_LABEL",
+    "TOWNSQUARE_COMPOSE_PROJECT", "TOWNSQUARE_SOURCE_COMMIT", "TOWNSQUARE_SOURCE_TREE",
+    "TOWNSQUARE_R7_RELEASE_ID", "TOWNSQUARE_R7_INPUT_MANIFEST_SHA256",
+    "TOWNSQUARE_EMBEDDED_RUNTIME_CLASS", "TOWNSQUARE_EMBEDDED_AUTHORITY_CLASS",
+    "TOWNSQUARE_EMBEDDED_CANARY_LABEL", "TOWNSQUARE_EMBEDDED_COMPOSE_PROJECT",
+    "TOWNSQUARE_EMBEDDED_SOURCE_COMMIT", "TOWNSQUARE_EMBEDDED_SOURCE_TREE",
+    "TOWNSQUARE_EMBEDDED_R7_RELEASE_ID", "TOWNSQUARE_EMBEDDED_R7_INPUT_MANIFEST_SHA256",
+    "REGISTRY_READINESS_TOKEN_FILE", "REGISTRY_PEER_READINESS_TOKEN_FILE",
+    "TOWNSQUARE_CANARY_TEST_PUBLIC_KEY_FILE",
 )
+
+_TEST_IDENTITY={
+    "TOWNSQUARE_RUNTIME_CLASS":"CANARY",
+    "TOWNSQUARE_AUTHORITY_CLASS":"NON-AUTHORITATIVE",
+    "TOWNSQUARE_CANARY_LABEL":"TS-CANARY-NAS1-20261007-A",
+    "TOWNSQUARE_COMPOSE_PROJECT":"townsquare-canary-20261007-a",
+    "TOWNSQUARE_SOURCE_COMMIT":"a"*40,
+    "TOWNSQUARE_SOURCE_TREE":"b"*40,
+    "TOWNSQUARE_R7_RELEASE_ID":"TS-R7-"+"c"*64,
+    "TOWNSQUARE_R7_INPUT_MANIFEST_SHA256":"d"*64,
+}
 
 
 class FreshAppCase(unittest.TestCase):
@@ -46,6 +67,15 @@ class FreshAppCase(unittest.TestCase):
                 else: os.environ[k]=v
         self.addCleanup(restore)
         os.environ["REGISTRAR_ENV"]="development"
+        for name,value in _TEST_IDENTITY.items():
+            os.environ[name]=value
+            os.environ["TOWNSQUARE_EMBEDDED_"+name.removeprefix("TOWNSQUARE_")]=value
+        identity={"schema_version":"1",**{name.removeprefix("TOWNSQUARE_").lower():value for name,value in _TEST_IDENTITY.items()}}
+        identity_path=Path(self.tmp.name)/"r7-identity.json"; identity_raw=json.dumps(identity,sort_keys=True,separators=(",",":")).encode(); identity_path.write_bytes(identity_raw); os.chmod(identity_path,0o444)
+        os.environ["TOWNSQUARE_R7_IDENTITY_FILE"]=str(identity_path); os.environ["TOWNSQUARE_R7_IDENTITY_SHA256"]=hashlib.sha256(identity_raw).hexdigest()
+        r7_context={"schema_version":"1","profile_version":"r7-context-v1",**{key:value for key,value in identity.items() if key!="schema_version"},"service_ids":[{"role":"ledger","service_id":"townsquare-ledger-v0"},{"role":"registry","service_id":"townsquare-registry-v0"},{"role":"viewer","service_id":"townsquare-viewer-v0"},{"role":"backup","service_id":"townsquare-backup-v0"}],"ledger_contract_sha256":"1"*64,"registry_contract_sha256":"2"*64,"compatibility_matrix_sha256":"3"*64}
+        r7_context_path=Path(self.tmp.name)/"r7-context.json"; r7_context_path.write_text(json.dumps(r7_context,sort_keys=True,separators=(",",":")),encoding="utf-8"); os.chmod(r7_context_path,0o444)
+        os.environ["TOWNSQUARE_CONTEXT_MANIFEST"]=str(r7_context_path)
         os.environ["REGISTRAR_DB"]=str(Path(self.tmp.name)/"registrar.db")
         receipt_key=self._key_file(b"unit-test-http-receipt-hash-key-0123456789-abcdef")
         os.environ["TOWNSQUARE_RECEIPT_HASH_KEY_FILE"]=receipt_key
@@ -55,11 +85,14 @@ class FreshAppCase(unittest.TestCase):
         if cursor_key_id is None: os.environ.pop("REGISTRAR_CURSOR_KEY_ID",None)
         else: os.environ["REGISTRAR_CURSOR_KEY_ID"]=cursor_key_id
         if context_manifest is None:
-            os.environ.pop("TOWNSQUARE_CONTEXT_MANIFEST",None)
+            os.environ.pop("TOWNSQUARE_LEDGER_CONTEXT_MANIFEST",None)
+            os.environ.pop("TOWNSQUARE_LEDGER_CONTEXT_MANIFEST_SHA256",None)
         else:
             manifest_path=Path(self.tmp.name)/"context-manifest.json"
             manifest_path.write_text(json.dumps(context_manifest),encoding="utf-8")
-            os.environ["TOWNSQUARE_CONTEXT_MANIFEST"]=str(manifest_path)
+            raw=json.dumps(context_manifest,sort_keys=True,separators=(",",":")).encode(); manifest_path.write_bytes(raw); os.chmod(manifest_path,0o444)
+            os.environ["TOWNSQUARE_LEDGER_CONTEXT_MANIFEST"]=str(manifest_path)
+            os.environ["TOWNSQUARE_LEDGER_CONTEXT_MANIFEST_SHA256"]=hashlib.sha256(raw).hexdigest()
         if authority_proof is None:
             os.environ.pop("TOWNSQUARE_GOVERNANCE_AUTHORITY",None)
         else:

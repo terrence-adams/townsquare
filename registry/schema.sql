@@ -9,5 +9,17 @@ ALTER TABLE audit_outbox ADD COLUMN lease_until TEXT;
 CREATE TRIGGER journal_no_update BEFORE UPDATE ON journal BEGIN SELECT RAISE(ABORT,'journal is append-only'); END;
 CREATE TRIGGER journal_no_delete BEFORE DELETE ON journal BEGIN SELECT RAISE(ABORT,'journal is append-only'); END;
 CREATE TRIGGER audit_outbox_no_delete BEFORE DELETE ON audit_outbox BEGIN SELECT RAISE(ABORT,'outbox is append-only'); END;
+CREATE TRIGGER audit_outbox_delivered_immutable BEFORE UPDATE ON audit_outbox WHEN OLD.delivered_utc IS NOT NULL BEGIN SELECT RAISE(ABORT,'delivered outbox is immutable'); END;
+CREATE TRIGGER audit_outbox_transition_guard BEFORE UPDATE ON audit_outbox WHEN NOT (
+  (OLD.delivered_utc IS NULL AND OLD.lease_owner IS NULL AND OLD.lease_until IS NULL AND NEW.delivered_utc IS NULL AND NEW.lease_owner IS NOT NULL AND NEW.lease_until IS NOT NULL AND NEW.attempts=OLD.attempts AND NEW.last_error IS OLD.last_error)
+  OR
+  (OLD.delivered_utc IS NULL AND OLD.lease_owner IS NOT NULL AND OLD.lease_until IS NOT NULL AND NEW.delivered_utc IS NULL AND NEW.lease_owner IS NOT NULL AND NEW.lease_until IS NOT NULL AND NEW.attempts=OLD.attempts AND NEW.last_error IS OLD.last_error)
+  OR
+  (OLD.delivered_utc IS NULL AND OLD.lease_owner IS NOT NULL AND OLD.lease_until IS NOT NULL AND NEW.delivered_utc IS NOT NULL AND NEW.lease_owner IS NULL AND NEW.lease_until IS NULL AND NEW.attempts=OLD.attempts+1 AND NEW.last_error IS NULL)
+  OR
+  (OLD.delivered_utc IS NULL AND OLD.lease_owner IS NOT NULL AND OLD.lease_until IS NOT NULL AND NEW.delivered_utc IS NULL AND NEW.lease_owner IS NULL AND NEW.lease_until IS NULL AND NEW.attempts=OLD.attempts+1 AND NEW.last_error IS NOT NULL)
+) BEGIN SELECT RAISE(ABORT,'illegal outbox state transition'); END;
 CREATE TRIGGER audit_outbox_lease_guard BEFORE UPDATE OF lease_owner,lease_until ON audit_outbox WHEN NEW.delivered_utc IS NOT NULL AND (NEW.lease_owner IS NOT NULL OR NEW.lease_until IS NOT NULL) BEGIN SELECT RAISE(ABORT,'delivered outbox cannot be leased'); END;
 INSERT INTO registry_migrations VALUES(2,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+PRAGMA application_id=1414746695;
+PRAGMA user_version=2;

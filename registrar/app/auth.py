@@ -48,13 +48,24 @@ NATIVE_CAPABILITY_POLICIES={
         "writer-a":{"post:read","context:read","context:attest","request:open","request:work","request:resolve","request:correct"},
         "writer-b":{"post:read","context:read","context:attest","request:work","request:block","request:resolve","request:cancel","request:correct"},
         "reviewer":{"post:read","context:read","context:attest","request:accept"},
-        "viewer":{"post:read","notice:read"},
+        "viewer":{"post:read","notice:read","status:read"},
         "crier":{"post:read","notice:read"},
         "projector":{"post:read","notice:read"},
         "operator":{"post:read","notice:read","context:read","context:attest","content:restricted:read","operator:stop","request:cancel","request:archive"},
         "operator-resume":{"operator:resume"},
         "registry-audit":{"registry:audit:append"},
-    }
+    },
+    # Canary-only issuer policy.  It intentionally has no operator,
+    # operator-resume, archive, deployment, or adoption principal.
+    "townsquare-canary-v1":{
+        "viewer":{"post:read","notice:read","status:read"},
+        "registry-audit":{"registry:audit:append"},
+        # POC actors are host identities.  This preserves the operator's
+        # host-routing decision without claiming a false personal identity.
+        "venom":{"post:read","context:read","context:attest","request:open","request:work","request:block","request:resolve","request:accept","request:cancel","request:correct"},
+        "wolverine":{"post:read","context:read","context:attest","request:open","request:work","request:block","request:resolve","request:accept","request:cancel","request:correct"},
+        "bishop":{"post:read","context:read","context:attest","request:open","request:work","request:block","request:resolve","request:accept","request:cancel","request:correct"},
+    },
 }
 
 def create_native_credential(db,principal,*,policy_version="townsquare-mvp-v1",ttl_seconds=3600):

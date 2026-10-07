@@ -14,6 +14,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from registrar.app import db as db_module
@@ -141,21 +142,26 @@ class Schema009To014RehearsalTests(unittest.TestCase):
 
     def test_every_010_to_014_failure_is_atomic_and_a_clean_retry_succeeds(self):
         historical_hash = fixture.logical_sha256(self.db)
+        contract_rows = dict(db_module._contract_rows()[1])
+        real_apply = db_module._apply_migration
         for target in range(10, 15):
-            with self.subTest(failing_migration=target), tempfile.TemporaryDirectory() as tmp:
-                folder = Path(tmp)
+            with self.subTest(failing_migration=target):
                 if target > 10:
-                    pre = folder / "committed-prior-migrations"
-                    pre.mkdir()
-                    self._copy_migrations(pre, 10, target - 1)
-                    with patch.object(db_module, "MIGRATIONS", pre):
-                        migrate(self.db)
+                    self.db.execute("BEGIN EXCLUSIVE")
+                    for version in range(10, target):
+                        real_apply(self.db, version, contract_rows[version])
+                    self.db.commit()
                 if target == 14:
                     self._seed_pre014_registry_evidence()
-                self._copy_migrations(folder, target, target, broken=target)
                 expected_versions = list(range(1, target))
                 before_schema = schema_snapshot(self.db)
-                with patch.object(db_module, "MIGRATIONS", folder):
+
+                def fail_at_target(db, version, path):
+                    if version == target:
+                        raise sqlite3.OperationalError("injected migration failure")
+                    return real_apply(db, version, path)
+
+                with patch.object(db_module, "_apply_migration", fail_at_target):
                     with self.assertRaises(sqlite3.OperationalError):
                         migrate(self.db)
                 self.assertEqual(expected_versions, versions(self.db))
@@ -297,7 +303,18 @@ class Schema009To014RehearsalTests(unittest.TestCase):
             else:
                 os.environ["REGISTRY_DB"] = old_db
             lock.unlink(missing_ok=True)
-        registry_app = importlib.import_module("registry.app")
+        identity = SimpleNamespace(
+            runtime_class="CANARY", authority_class="NON-AUTHORITATIVE",
+            canary_label="TS-CANARY-NAS1-20261007-A",
+            compose_project="townsquare-canary-20261007-a",
+            source_commit="a" * 40, source_tree="b" * 40,
+            r7_release_id="TS-R7-" + "c" * 64,
+            r7_input_manifest_sha256="d" * 64,
+        )
+        with patch("shared.canary_identity.require_canary_identity", return_value=identity), patch(
+            "shared.canary_authority.load_r7_context", return_value="e" * 64
+        ):
+            registry_app = importlib.import_module("registry.app")
         canonical_environment = {
             "REGISTRY_SERVICE_ID": CANONICAL_COMPATIBILITY_TUPLE["registry_service"],
             "REGISTRY_SCHEMA_HEAD": CANONICAL_COMPATIBILITY_TUPLE["registry_schema"],

@@ -23,7 +23,7 @@ CREATE TABLE governance_resolution_audit(
   manifest_sha256 TEXT,
   authority_ref TEXT,
   authority_digest TEXT,
-  disposition TEXT NOT NULL CHECK(disposition IN ('EFFECTIVE','NOT_EFFECTIVE','UNKNOWN')),
+  disposition TEXT NOT NULL CHECK(disposition IN ('EFFECTIVE','NOT_EFFECTIVE','UNKNOWN','CANARY_TEST')),
   reason_code TEXT NOT NULL,
   evidence_json TEXT NOT NULL,
   resolved_at TEXT NOT NULL

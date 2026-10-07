@@ -250,7 +250,8 @@ class RegistrarTests(unittest.TestCase):
         folder=Path(self.tmp.name)/"migrations"; folder.mkdir(); (folder/"999_bad.sql").write_text("CREATE TABLE must_rollback(x);\nTHIS IS INVALID;\n")
         old=db_module.MIGRATIONS; db_module.MIGRATIONS=folder
         try:
-            with self.assertRaises(sqlite3.OperationalError): db_module.migrate(self.db)
+            with self.assertRaisesRegex(RuntimeError,"migration contract hash mismatch"):
+                db_module.migrate(self.db)
             self.assertIsNone(self.db.execute("SELECT 1 FROM sqlite_master WHERE name='must_rollback'").fetchone())
         finally: db_module.MIGRATIONS=old
     def test_local_prototype_gates_and_total_url_validation(self):
@@ -285,18 +286,15 @@ class RegistrarTests(unittest.TestCase):
 
     def test_migration_009_applies_forward_on_pre009_db_and_readiness_passes(self):
         """QA requirement: migration 009 applies forward on a COPY of a
-        pre-009 fixture DB (mirrors the existing
-        test_migration_failure_is_atomic_and_forward_nullable technique of
-        swapping db_module.MIGRATIONS to a partial folder)."""
+        pre-009 fixture DB, while the production migrator retains the exact
+        reviewed fourteen-row contract."""
         tmp2=tempfile.TemporaryDirectory()
         try:
             path2=str(Path(tmp2.name)/"pre009.db"); db2=connect(path2)
-            folder=Path(tmp2.name)/"migrations"; folder.mkdir()
-            for p in sorted(db_module.MIGRATIONS.glob("[0-9][0-9][0-9]_*.sql")):
-                if int(p.name[:3])<9: (folder/p.name).write_text(p.read_text())
-            old=db_module.MIGRATIONS; db_module.MIGRATIONS=folder
-            try: migrate(db2)
-            finally: db_module.MIGRATIONS=old
+            contract,rows=db_module._contract_rows()
+            db2.execute("BEGIN EXCLUSIVE")
+            for version,path in rows[:8]: db_module._apply_migration(db2,version,path)
+            db2.commit()
             cols_before=[r[1] for r in db2.execute("PRAGMA table_info(posts)")]
             self.assertNotIn("drive_created_at",cols_before)
             migrate(db2)  # forward, with the real (009-including) migrations folder

@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+# Platform launchers may retain Windows-native endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never transform packaged or database artifacts.
+*.db binary
+*.sqlite binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.png binary
+*.jpg binary
+*.jpeg binary
