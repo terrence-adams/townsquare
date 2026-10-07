@@ -539,7 +539,6 @@ class NativeLedger:
                 return result
             self._maybe_fail("after_idempotency_lookup")
             manifest = self._manifest()
-            self._assert_not_stopped()
             latest = self._latest_event(payload.get("thread_id")) if isinstance(payload.get("thread_id"), str) else None
             if latest is not None and revision != latest["event_id"]:
                 issued = self.db.execute(
@@ -553,10 +552,19 @@ class NativeLedger:
                 if str(payload.get("state", "")).upper() == "OPEN" and str(payload.get("purpose", "")).upper() != "CORRECTION":
                     _fail("invalid_transition", "a terminal or existing thread cannot be reopened")
                 _fail("conflict", "stale revision", requirements={"expected_revision": latest["event_id"]})
-            action_capability = self.required_action_capability(payload)
-            authority = self._resolve_authority(manifest, principal, action_capability, payload.get("thread_id"), idempotency_key)
             event = self._validate_event(principal, revision, payload)
+            # A correction is a durable, informational report, not a Request
+            # transition. Classify it only after principal, schema, content,
+            # target, and revision integrity have all been checked.
+            informational_correction = str(event.get("purpose", "")).upper() == "CORRECTION"
+            action_capability = self.required_action_capability(event)
+            if not informational_correction:
+                self._assert_not_stopped()
             receipt = self._validate_receipt(context_receipt, principal, action_capability, event["thread_id"], revision)
+            authority = self._resolve_authority(
+                manifest, principal, action_capability, event["thread_id"], idempotency_key,
+                allow_informational_append=informational_correction,
+            )
             event_id = str(uuid.uuid4())
             committed_at = now()
             content_bytes = event["body"].encode("utf-8")
@@ -582,7 +590,7 @@ class NativeLedger:
                 "principal": principal,
                 "represented_actor": principal,
                 "claimed_origin": "native-api",
-                "authority_scope": action_capability,
+                "authority_scope": "informational:correction" if informational_correction else action_capability,
                 "committed_at": committed_at,
             }
             commit_hash = _canonical_sha(envelope)
@@ -605,7 +613,7 @@ class NativeLedger:
                     event_id, event["thread_id"], ordinal, post_uid, predecessor_id, predecessor_hash,
                     event["kind"], event["state"], event.get("owner"), event.get("addressee"), event["sensitivity"],
                     metadata_json, metadata_hash, content_hash, len(content_bytes), principal, principal,
-                    "native-api", action_capability, committed_at, commit_hash,
+                    "native-api", envelope["authority_scope"], committed_at, commit_hash,
                 ),
             )
             ledger_seq = cursor.lastrowid
@@ -617,6 +625,8 @@ class NativeLedger:
                 "predecessor_commit_sha256": predecessor_hash, "commit_sha256": commit_hash,
                 "content_sha256": content_hash, "metadata_sha256": metadata_hash,
                 "state": event["state"], "notice_eligible": True,
+                "informational_append": informational_correction,
+                "effect_applied": not informational_correction,
             }
             self.db.execute(
                 "INSERT INTO native_requests VALUES (?,?,?,?,?,?,?,?,?)",
@@ -673,7 +683,10 @@ class NativeLedger:
             _fail("invalid_transition", "state is outside the controlled Request lifecycle")
         return capability
 
-    def _resolve_authority(self, manifest, principal, capability, thread_id, request_key, *, operation="post"):
+    def _resolve_authority(
+        self, manifest, principal, capability, thread_id, request_key, *, operation="post",
+        allow_informational_append=False,
+    ):
         authority = self._governance_authority
         reason = "effective"
         disposition = "EFFECTIVE"
@@ -746,9 +759,19 @@ class NativeLedger:
             ),
         )
         if disposition != "EFFECTIVE":
+            if allow_informational_append:
+                return {
+                    "authority_ref": authority_ref, "digest": authority_digest,
+                    "capabilities": capabilities,
+                }
             self.db.commit()
             _fail("context_required", f"governance authority resolution failed: {reason}")
         if capability not in set(granted):
+            if allow_informational_append:
+                return {
+                    "authority_ref": authority_ref, "digest": authority_digest,
+                    "capabilities": capabilities,
+                }
             # Resolution evidence is independently durable even when the
             # resolved authority does not grant this actor the requested
             # action.  No ordinary ledger mutation has happened yet.
@@ -790,6 +813,8 @@ class NativeLedger:
         if state == "CORRECTED":
             _fail("invalid_transition", "correction is a purpose, not a lifecycle state")
         if latest is None:
+            if purpose == "CORRECTION":
+                _fail("invalid_transition", "correction requires an existing same-thread target event")
             if revision != "new" or state != "OPEN":
                 _fail("conflict", "new thread requires revision=new and state=OPEN")
             if not isinstance(event.get("owner"), str) or not event["owner"]:
