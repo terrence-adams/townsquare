@@ -37,7 +37,7 @@ services:
     volumes:
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/data/ledger, target: /var/lib/townsquare}
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
-    tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"]
 
   ledger:
     <<: *hardened
@@ -76,7 +76,7 @@ services:
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/ledger-context-manifest.json, target: /run/config/ledger-context-manifest.json, read_only: true}
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-test-authority.pub, target: /run/config/canary-test-authority.pub, read_only: true}
-    tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"]
     ports: ["192.168.2.3:18790:8790"]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8790/health/internal/ready',timeout=2).read()"]
@@ -96,7 +96,7 @@ services:
     volumes:
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/data/registry, target: /var/lib/registry}
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
-    tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"]
 
   registry:
     <<: *hardened
@@ -129,7 +129,7 @@ services:
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/registry-to-ledger-readiness.registry, target: /run/secrets/registry-to-ledger-readiness, read_only: true}
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-test-authority.pub, target: /run/config/canary-test-authority.pub, read_only: true}
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
-    tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8789/health/internal/ready',timeout=2).read()"]
       interval: 30s
@@ -151,7 +151,7 @@ services:
     volumes:
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/viewer-native-credential, target: /run/secrets/viewer-native-credential, read_only: true}
       - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
-    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,mode=1777]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]
     ports: ["192.168.2.3:18502:8502"]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8502/_stcore/health',timeout=2).read()"]

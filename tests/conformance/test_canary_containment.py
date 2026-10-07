@@ -134,6 +134,7 @@ def rendered_compose_fixture():
         }
     services["ledger-migrate"]["command"] = ["python", "-m", "canary.preexec", "--", "python", "-c", "from registrar.app.db import connect,migrate; import os; d=connect(os.environ['REGISTRAR_DB']); migrate(d); d.close()"]
     services["registry-migrate"]["command"] = ["python", "-m", "canary.preexec", "--", "python", "/app/migrate.py"]
+    services["viewer"]["tmpfs"] = ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]
     services["ledger"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18790", "target": 8790}]
     services["viewer"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18502", "target": 8502}]
     return {"name": "townsquare-canary-20261007-a", "services": services, "networks": {"canary-internal": {"internal": True}}}
@@ -414,6 +415,21 @@ class StaticContainmentTests(unittest.TestCase):
         ):
             candidate=copy.deepcopy(baseline); mutate(candidate)
             with self.assertRaises(ComposeValidationError): validate(candidate, expected_identity=IDENTITY)
+
+    def test_rendered_compose_rejects_split_unbounded_and_wrong_size_tmpfs(self):
+        baseline = rendered_compose_fixture()
+        validate(baseline, expected_identity=IDENTITY)
+        mutations = (
+            ("ledger", ["/tmp:rw", "noexec", "nosuid", "size=32m", "mode=1777"]),
+            ("registry", ["/tmp:rw,noexec,nosuid,mode=1777"]),
+            ("viewer", ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"]),
+        )
+        for service, tmpfs in mutations:
+            with self.subTest(service=service, tmpfs=tmpfs):
+                candidate = copy.deepcopy(baseline)
+                candidate["services"][service]["tmpfs"] = tmpfs
+                with self.assertRaises(ComposeValidationError):
+                    validate(candidate, expected_identity=IDENTITY)
 
     def test_every_environment_field_is_required_exact_and_no_unknown_keys(self):
         baseline = rendered_compose_fixture()

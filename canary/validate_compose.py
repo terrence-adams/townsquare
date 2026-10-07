@@ -79,6 +79,13 @@ SERVICE_ENVIRONMENT = {
     },
 }
 UIDS = {"ledger-migrate": "10001:10001", "ledger": "10001:10001", "registry-migrate": "10003:10003", "registry": "10003:10003", "viewer": "10002:10002"}
+EXPECTED_TMPFS = {
+    "ledger-migrate": ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"],
+    "ledger": ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"],
+    "registry-migrate": ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"],
+    "registry": ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"],
+    "viewer": ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"],
+}
 def bind(source, target, read_only=False): return {"type": "bind", "source": str(ROOT / source), "target": target, "read_only": read_only}
 EXPECTED_MOUNTS = {
     "ledger-migrate": [bind("data/ledger", "/var/lib/townsquare"), bind("config/canary-context-manifest.json", "/run/config/canary-context-manifest.json", True)],
@@ -171,8 +178,8 @@ def validate(model: dict[str, object], *, expected_identity: Mapping[str, str]) 
             raise ComposeValidationError(f"service {name} UID is not exact")
         if raw.get("networks") not in ([NETWORK], {NETWORK: None}, {NETWORK: {}}):
             raise ComposeValidationError(f"service {name} is not confined to the sole internal network")
-        if not raw.get("tmpfs"):
-            raise ComposeValidationError(f"service {name} lacks bounded tmpfs")
+        if raw.get("tmpfs") != EXPECTED_TMPFS[name]:
+            raise ComposeValidationError(f"service {name} tmpfs contract is not exact")
         if raw.get("cap_drop") != ["ALL"] or "no-new-privileges:true" not in raw.get("security_opt", []):
             raise ComposeValidationError(f"service {name} lacks capability/no-new-privileges containment")
         mounts = raw.get("volumes", [])
