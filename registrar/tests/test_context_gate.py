@@ -1,7 +1,12 @@
 """MVP-CMP/GOV tests: documented context is a server-enforced precondition."""
 from __future__ import annotations
 
-from registrar.tests.mvp_fixture import NativeLedgerCase, OPENING
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
+from registrar.app.db import connect
+from registrar.app.native_ledger import NativeLedger
+from registrar.tests.mvp_fixture import MANIFEST, NativeLedgerCase, OPENING
 
 
 class ContextGateTests(NativeLedgerCase):
@@ -61,6 +66,40 @@ class ContextGateTests(NativeLedgerCase):
         self.assertIsNone(self.ledger.receipt_consumption(receipt))
         self.ledger.clear_failure(); self.post(receipt=receipt)
         self.assertIsNotNone(self.ledger.receipt_consumption(receipt))
+
+    def test_mvp_cmp_09_two_writers_cannot_claim_the_same_revision(self):
+        opening = self.post()
+        revision = opening["event_id"]
+        payload = {**OPENING, "state": "WORKING", "body": "one current revision, one successor"}
+        receipts = [self.receipt("writer-b", "request:work", "thread-alpha", revision) for _ in range(2)]
+        barrier = Barrier(2)
+
+        def attempt(index):
+            db = connect(self.db_path)
+            ledger = NativeLedger(
+                db,
+                context_manifest=MANIFEST,
+                governance_authority=self.authority_proof(MANIFEST),
+                authority_verifier=self.authority_verifier,
+                authority_public_key=self.authority_public_key,
+                authority_signature=self.authority_signature(self.authority_proof(MANIFEST)),
+            )
+            try:
+                barrier.wait(timeout=5)
+                result = ledger.post_event("writer-b", f"collision-{index}", receipts[index], revision, payload)
+                return "committed", result["event_id"]
+            except Exception as exc:
+                return "rejected", getattr(exc, "code", None)
+            finally:
+                db.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(attempt, range(2)))
+
+        self.assertEqual(1, sum(status == "committed" for status, _ in results), results)
+        self.assertEqual(["conflict"], [detail for status, detail in results if status == "rejected"], results)
+        events = [event for event in self.ledger.events_since(0) if event["thread_id"] == "thread-alpha"]
+        self.assertEqual([0, 1], [event["thread_ordinal"] for event in events])
 
     def test_mvp_gov_01_manifest_references_governance_without_defining_statement(self):
         bundle = self.bundle()
