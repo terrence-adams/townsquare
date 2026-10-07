@@ -43,6 +43,7 @@ services:
     <<: *hardened
     image: "townsquare-canary-ledger:${TOWNSQUARE_SOURCE_COMMIT:?required}"
     user: "10001:10001"
+    networks: [canary-internal, canary-ingress]
     depends_on:
       ledger-migrate: {condition: service_completed_successfully}
       registry-migrate: {condition: service_completed_successfully}
@@ -141,6 +142,7 @@ services:
     <<: *hardened
     image: "townsquare-canary-viewer:${TOWNSQUARE_SOURCE_COMMIT:?required}"
     user: "10002:10002"
+    networks: [canary-internal, canary-ingress]
     depends_on:
       ledger: {condition: service_healthy}
     environment:
@@ -164,3 +166,6 @@ networks:
   canary-internal:
     name: townsquare-canary-20261007-a-internal
     internal: true
+  canary-ingress:
+    name: townsquare-canary-20261007-a-ingress
+    internal: false

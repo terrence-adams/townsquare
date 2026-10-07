@@ -134,10 +134,16 @@ def rendered_compose_fixture():
         }
     services["ledger-migrate"]["command"] = ["python", "-m", "canary.preexec", "--", "python", "-c", "from registrar.app.db import connect,migrate; import os; d=connect(os.environ['REGISTRAR_DB']); migrate(d); d.close()"]
     services["registry-migrate"]["command"] = ["python", "-m", "canary.preexec", "--", "python", "/app/migrate.py"]
+    services["ledger"]["networks"] = {"canary-internal": None, "canary-ingress": None}
+    services["viewer"]["networks"] = {"canary-internal": None, "canary-ingress": None}
     services["viewer"]["tmpfs"] = ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]
     services["ledger"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18790", "target": 8790}]
     services["viewer"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18502", "target": 8502}]
-    return {"name": "townsquare-canary-20261007-a", "services": services, "networks": {"canary-internal": {"internal": True}}}
+    return {
+        "name": "townsquare-canary-20261007-a",
+        "services": services,
+        "networks": {"canary-internal": {"internal": True}, "canary-ingress": {"internal": False}},
+    }
 
 
 class CanaryIdentityTests(unittest.TestCase):
@@ -404,6 +410,16 @@ class StaticContainmentTests(unittest.TestCase):
         privileged = copy.deepcopy(model)
         privileged["services"]["registry"]["privileged"] = True
         with self.assertRaises(ComposeValidationError): validate(privileged, expected_identity=IDENTITY)
+        for mutate in (
+            lambda m: m["services"]["registry"].update(networks={"canary-internal": None, "canary-ingress": None}),
+            lambda m: m["services"]["ledger"].update(networks={"canary-internal": None}),
+            lambda m: m["networks"]["canary-internal"].update(internal=False),
+            lambda m: m["networks"]["canary-ingress"].update(internal=True),
+        ):
+            candidate = copy.deepcopy(model)
+            mutate(candidate)
+            with self.assertRaises(ComposeValidationError):
+                validate(candidate, expected_identity=IDENTITY)
 
     def test_rendered_compose_rejects_uid_and_cross_service_mount_mutations(self):
         baseline = rendered_compose_fixture()
@@ -543,7 +559,8 @@ class StaticContainmentTests(unittest.TestCase):
         registry = (ROOT / "registry/app.py").read_text(encoding="utf-8")
         self.assertIn("name: townsquare-canary-20261007-a", compose)
         self.assertEqual(1, compose.count("internal: true"))
-        self.assertNotIn("internal: false", compose)
+        self.assertEqual(1, compose.count("internal: false"))
+        self.assertIn("networks: [canary-internal, canary-ingress]", compose)
         self.assertIn('ports: ["192.168.2.3:18790:8790"]', compose)
         self.assertIn('ports: ["192.168.2.3:18502:8502"]', compose)
         for forbidden in ("privileged:", "cap_add:", "network_mode:", "extra_hosts:", "devices:", "docker.sock", "restart: unless-stopped"):

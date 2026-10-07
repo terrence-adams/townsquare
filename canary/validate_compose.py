@@ -12,7 +12,8 @@ from pathlib import PurePosixPath
 PROJECT = "townsquare-canary-20261007-a"
 ROOT = PurePosixPath("/volume1/Docker/townsquare-canary-20261007-a")
 SERVICES = {"ledger-migrate", "ledger", "registry-migrate", "registry", "viewer"}
-NETWORK = "canary-internal"
+INTERNAL_NETWORK = "canary-internal"
+INGRESS_NETWORK = "canary-ingress"
 IMAGE_REPOSITORIES = {
     "ledger-migrate": "townsquare-canary-ledger", "ledger": "townsquare-canary-ledger",
     "registry-migrate": "townsquare-canary-registry", "registry": "townsquare-canary-registry",
@@ -148,8 +149,13 @@ def validate(model: dict[str, object], *, expected_identity: Mapping[str, str]) 
     networks = model.get("networks")
     if not isinstance(services, dict) or set(services) != SERVICES:
         raise ComposeValidationError("Compose service set is not the five-service canary allowlist")
-    if not isinstance(networks, dict) or set(networks) != {NETWORK} or networks[NETWORK].get("internal") is not True:
-        raise ComposeValidationError("Compose must define exactly one internal network")
+    if (
+        not isinstance(networks, dict)
+        or set(networks) != {INTERNAL_NETWORK, INGRESS_NETWORK}
+        or networks[INTERNAL_NETWORK].get("internal") is not True
+        or networks[INGRESS_NETWORK].get("internal") is not False
+    ):
+        raise ComposeValidationError("Compose must define the exact internal and NAS ingress networks")
     if model.get("volumes"):
         raise ComposeValidationError("Docker named volumes are forbidden")
     expected_ports = {"ledger": {("192.168.2.3", 18790, 8790)}, "viewer": {("192.168.2.3", 18502, 8502)}}
@@ -176,8 +182,16 @@ def validate(model: dict[str, object], *, expected_identity: Mapping[str, str]) 
             raise ComposeValidationError(f"service {name} lacks restart/read-only/pull containment")
         if raw.get("user") != UIDS[name]:
             raise ComposeValidationError(f"service {name} UID is not exact")
-        if raw.get("networks") not in ([NETWORK], {NETWORK: None}, {NETWORK: {}}):
-            raise ComposeValidationError(f"service {name} is not confined to the sole internal network")
+        expected_networks = {INTERNAL_NETWORK, INGRESS_NETWORK} if name in {"ledger", "viewer"} else {INTERNAL_NETWORK}
+        actual_networks = raw.get("networks")
+        if isinstance(actual_networks, list):
+            actual_network_names = set(actual_networks) if all(isinstance(item, str) for item in actual_networks) else set()
+        elif isinstance(actual_networks, dict) and all(value in (None, {}) for value in actual_networks.values()):
+            actual_network_names = set(actual_networks)
+        else:
+            actual_network_names = set()
+        if actual_network_names != expected_networks:
+            raise ComposeValidationError(f"service {name} network attachment is not exact")
         if raw.get("tmpfs") != EXPECTED_TMPFS[name]:
             raise ComposeValidationError(f"service {name} tmpfs contract is not exact")
         if raw.get("cap_drop") != ["ALL"] or "no-new-privileges:true" not in raw.get("security_opt", []):
