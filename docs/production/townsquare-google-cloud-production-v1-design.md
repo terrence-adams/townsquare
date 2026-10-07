@@ -2,7 +2,7 @@
 
 **document_id:** TS-GCP-PROD-V1-DESIGN-20261006
 
-**version:** 0.1 proposed architecture
+**version:** 0.2 proposed architecture
 
 **status:** PROPOSED FUTURE PRODUCTION-V1 ARCHITECTURE — NOT DEPLOYMENT AUTHORIZATION, NOT CURRENT RELEASE EVIDENCE
 
@@ -61,18 +61,25 @@ These constraints make the first topology a controlled lift-and-harden release, 
 Use a hybrid topology:
 
 - **Stateful core:** one active Compute Engine Linux VM running the reviewed Docker Compose release by immutable image digest.
-- **Durable data:** one regional Persistent Disk for Ledger and a separate regional Persistent Disk for Registry, mounted only to the active VM. A zonal boot disk contains no authoritative data.
-- **Standby:** a tested instance template and recovery procedure can recreate the core VM in the paired zone and attach the regional disks after fencing the old VM. There is never more than one writable core.
+- **Durable data:** one regional Persistent Disk for Ledger and a separate regional Persistent Disk for Registry, mounted only to the active VM. Each disk has replicas in two zones in one region. This is a paired-zone, single-zonal-failure design—not regional disaster recovery. A zonal boot disk contains no authoritative data.
+- **Standby:** a tested instance template and recovery procedure can recreate the core VM in the healthy paired zone and force-attach the regional disks after fencing the old VM. There is never more than one writable core.
 - **Gemini gateway:** one stateless Cloud Run service with its own service identity. It has Vertex AI permission but no TownSquare ledger, database, registry, backup, or governed-write credential.
 - **Ingress:** a global external Application Load Balancer with Google-managed TLS and IAP in front of the VM backend. The VM has no external IP.
 
-Compute Engine is selected for the core because it preserves local block-device semantics, fixed filesystem permissions, one-writer SQLite, Compose networks, one-shot migrators, the backup container, and the current operational model. Persistent Disk is durable network block storage, and regional disks replicate across selected zones; snapshots supplement, but do not replace, application-level backups ([Persistent Disk](https://docs.cloud.google.com/compute/docs/disks/persistent-disks)).
+Compute Engine is selected for the core because it preserves local block-device semantics, fixed filesystem permissions, one-writer SQLite, Compose networks, one-shot migrators, the backup container, and the current operational model. Regional Persistent Disk synchronously replicates across two zones and supports recovery from up to one zonal failure; it does not protect against both replica zones or the region becoming unavailable ([Persistent Disk](https://docs.cloud.google.com/compute/docs/disks/persistent-disks), [regional-disk replication](https://docs.cloud.google.com/compute/docs/disks/about-regional-persistent-disk)). Snapshots supplement, but do not replace, application-level backups.
+
+### 4.2 Failure boundary
+
+- Monitor each Ledger and Registry disk's replication status and per-replica `replica_state`. An `OutOfSync` or unavailable replica, or a disk not reported fully replicated, makes the storage layer `DEGRADED` and pages the operator ([replica-state monitoring](https://docs.cloud.google.com/compute/docs/disks/monitor-regional-persistent-disk-replica-state)).
+- While a disk is `DEGRADED`, writes may be durably acknowledged by only one replica. Google documents RPO and RTO as undefined in that state; TownSquare therefore publishes no unconditional recovery target, increases application-backup urgency, and blocks recovery-readiness acceptance until full replication and a fresh attested backup are restored ([regional-disk failure behavior](https://docs.cloud.google.com/compute/docs/disks/repd-failover)).
+- Paired-zone recovery covers a single zonal failure only. Its measured objective applies only when both domain disks were fully replicated immediately before the failure and the healthy replicas remain available.
+- Production v1 makes no region-loss RPO or RTO commitment by default. The operator must either accept that limitation or authorize a separate secondary-region restore profile. The recommended optional profile copies encrypted, externally attested application backups and exact release artifacts to an operator-approved secondary region, then proves restore/reconciliation there; it is asynchronous restore, not automatic failover or a second writer.
 
 Cloud Run is selected only for the Gemini gateway because that component is stateless, has no local durable history, and benefits from a separate workload identity. Cloud Run is rejected for the stateful core because its container filesystem is disposable and its fit guidance expects applications not to require a local persistent filesystem and to tolerate multiple instances ([Cloud Run overview](https://docs.cloud.google.com/run/docs/overview/what-is-cloud-run), [Cloud Run fit criteria](https://docs.cloud.google.com/run/docs/fit-for-run), [container runtime contract](https://docs.cloud.google.com/run/docs/container-contract)). Cloud Storage/FUSE or NFS is not a substitute for SQLite block storage.
 
 GKE is rejected for production v1. GKE can operate stateful workloads using StatefulSets and persistent volumes, but it adds Kubernetes scheduling, upgrade, network policy, ingress, volume, and cluster operations without removing the current single-writer database limit ([GKE StatefulSets](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/statefulset), [GKE persistent volumes](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/persistent-volumes)). Reconsider GKE only when multiple independently scalable services, an external database, and an operating owner justify it.
 
-### 4.2 Migration boundary for a later topology
+### 4.3 Migration boundary for a later topology
 
 Cloud Run or horizontally scaled GKE may host the core only after all of the following are separately designed and accepted:
 
@@ -107,9 +114,9 @@ The proposed default is:
 - active VM zone: one `us-central1` zone selected after quota check;
 - standby/recovery zone: a second zone in `us-central1`;
 - Artifact Registry, KMS, Secret Manager replicas, logging buckets, disks, and Cloud Run gateway: regional in `us-central1` when supported;
-- encrypted backup/evidence bucket: an operator-approved US regional or dual-region location that meets the chosen recovery boundary.
+- encrypted backup/evidence bucket: an operator-approved location that meets the chosen recovery boundary; a second-region copy is created only if the operator adopts the secondary-region restore profile.
 
-This is a recommendation, not a residency decision. Before provisioning, the operator must choose either a strict single-region boundary or a US-only multi-region DR boundary, plus retention and legal/privacy requirements. Vertex model availability, security controls, at-rest residency, and ML-processing location must be verified for the exact model and feature set. A regional API endpoint alone does not prove residency; Google's location documentation explicitly warns that endpoint choice and residency are distinct ([Vertex locations](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/locations), [Vertex generative AI security controls](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/security-controls), [Google Cloud data residency list](https://cloud.google.com/terms/data-residency)).
+This is a recommendation, not a residency or region-loss decision. Before provisioning, the operator must choose the primary data/model location and either accept no v1 region-loss commitment or adopt an approved secondary-region restore profile with explicit RPO/RTO, retention, and legal/privacy requirements. Vertex model availability, security controls, at-rest residency, and ML-processing location must be verified for the exact model and feature set. A regional API endpoint alone does not prove residency; Google's location documentation explicitly warns that endpoint choice and residency are distinct ([Vertex locations](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/locations), [Vertex generative AI security controls](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/security-controls), [Google Cloud data residency list](https://cloud.google.com/terms/data-residency)).
 
 Production v1 uses no Search/Maps grounding, RAG Engine, Live session resumption, or provider file store. These features have different storage/processing behavior and require a separate review. The operator decides whether to disable Vertex's project-level in-memory data caching; the recommended privacy-first default is disabled until latency evidence justifies it ([Vertex AI zero data retention](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention)).
 
@@ -123,8 +130,10 @@ Production v1 uses no Search/Maps grounding, RAG Engine, Live session resumption
 6. Add Cloud Armor rate limiting and deny rules at the load balancer. Application request/token/cost budgets still apply behind it.
 7. Publish only the ingress proxy's private backend port. Ledger, Viewer, Registry, SQLite files, Docker socket, metrics internals, and migrators have no direct external listener.
 8. Restrict VM ingress to documented load-balancer health/proxy ranges and IAP administrative access. Enable firewall-rule logging so allow/deny matches are auditable ([VPC firewall logging](https://docs.cloud.google.com/firewall/docs/vpc-firewall-rules-logging-overview)).
-9. Egress is deny-by-default except DNS/NTP, approved Google APIs, Artifact Registry pulls, Cloud Logging/Monitoring, Secret Manager/KMS, backup upload, and the Cloud Run gateway. Any Cloud NAT route is logged and allowlisted; general container internet access is prohibited.
-10. The Cloud Run gateway accepts requests only from the production runtime identity with `roles/run.invoker` and a Google-signed ID token whose audience is the gateway URL; it uses internal ingress where the selected configuration supports the VM path and can call only the approved regional Vertex AI endpoint ([Cloud Run service-to-service authentication](https://docs.cloud.google.com/run/docs/authenticating/service-to-service)).
+9. Egress is deny-by-default except DNS/NTP and the exact private Google API routes required for Artifact Registry pulls, Logging/Monitoring, Secret Manager/KMS, backup upload, and controlled Vertex access. General container internet access is prohibited.
+10. Pin the gateway to Cloud Run `internal` ingress and disable its default `run.app` URL. Place a regional internal Application Load Balancer and serverless NEG in the same project and region as the gateway. The core VM invokes that internal address over the same-project VPC using its `roles/run.invoker` identity and a Google-signed ID token with the configured gateway audience ([Cloud Run ingress/default URL](https://docs.cloud.google.com/run/docs/securing/ingress), [internal load balancer for Cloud Run](https://docs.cloud.google.com/load-balancing/docs/l7-internal/setting-up-l7-internal-serverless), [service-to-service authentication](https://docs.cloud.google.com/run/docs/authenticating/service-to-service)). No public gateway endpoint or custom public domain is configured.
+11. Configure the gateway with Direct VPC egress, `all-traffic`, a dedicated subnet, and gateway network tags. Enable Private Google Access and route supported Google APIs through `restricted.googleapis.com`; deny other egress. The exact Vertex endpoint must be proven reachable through this controlled path before release. If the operator-selected Vertex location/endpoint cannot use that path, deployment stops until an approved Private Service Connect or equally bounded alternative is designed and tested—Cloud NAT is not silently added ([Direct VPC egress](https://docs.cloud.google.com/run/docs/configuring/vpc-direct-vpc), [Private Google Access](https://docs.cloud.google.com/vpc/docs/configure-private-google-access), [VPC Service Controls private connectivity](https://docs.cloud.google.com/vpc-service-controls/docs/set-up-private-connectivity)).
+12. Network controls constrain which service endpoints can be reached; they do not select a Gemini publisher model. The application/release allowlist separately enforces the exact model resource and generation configuration and records both on every attempt.
 
 The production Compose override replaces loopback host publishing with an ingress-proxy-only internal bind. It does not publish Registry. That override is a future production artifact and must not alter the NAS Compose profile.
 
@@ -137,14 +146,17 @@ Use dedicated, user-managed service accounts; do not use default service account
 | `ts-build` | read approved source; build; push to build registry; emit provenance/SBOM/scan | production secrets, disks, VM login, model invocation |
 | `ts-promote` | copy reviewed digests to production registry and update release declaration | builds, data access, model invocation, arbitrary IAM changes |
 | `ts-core-runtime` | pull exact images; read exact secret versions/config; write logs/metrics; upload encrypted backup objects | Vertex AI, build/push, KMS administration, broad Storage access |
-| `ts-gemini-gateway` | Cloud Run execution, invoke the exact approved Vertex project/location/model, write redacted logs/metrics | TownSquare credentials, disks, buckets, registry, ledger API, Secret Manager except gateway-only configuration |
+| `ts-gemini-gateway` | Cloud Run execution; call Vertex with `aiplatform.endpoints.predict`; write redacted logs/metrics | TownSquare credentials, disks, buckets, registry, ledger API, Secret Manager except gateway-only configuration |
 | `ts-backup-attestor` | read completed ciphertext metadata/manifests, recompute/validate checkpoint input, sign canonical checkpoint with an audit-project KMS asymmetric key, write signature/evidence | decryption, VM/disks, TownSquare writes, model invocation, deleting backup objects |
+| `ts-backup-verifier` | read completed backup evidence and the signer's public key; verify signatures/checkpoints during recovery and evidence evaluation | KMS sign/use-to-sign, private key material, source database, backup mutation/deletion, model invocation |
 | `ts-recovery` | operator-activated read of selected backup objects, attach/restore to new disks | normal runtime use, model invocation, delete backups |
 | operator groups | IAP access, release approval, recovery approval, audit viewing separated by duty | service-account keys and blanket Owner/Editor for routine work |
 
 Compute Engine permits only one attached service account. Therefore production v1 treats any shell or container escape on the core VM as access to the `ts-core-runtime` identity. Limit shell access, block container access to the metadata server unless explicitly needed, and keep that identity narrow. The Gemini gateway's separate Cloud Run identity is the mechanism that prevents the model adapter from inheriting core data permissions.
 
 Grant `cloud-platform` OAuth scope to the VM and enforce actual access with resource-level IAM roles, as Google recommends. Enable Data Access audit logs for Secret Manager, KMS, Storage, Artifact Registry, Vertex AI, and other supported sensitive services; these logs are not generally on by default ([Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit), [configure Data Access logs](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)).
+
+The gateway needs the `aiplatform.endpoints.predict` permission. Google's predefined `roles/aiplatform.user` includes it, but also includes other permissions ([Vertex AI roles and permissions](https://docs.cloud.google.com/iam/docs/roles-permissions/aiplatform)). The recommended least-privilege posture is an operator-reviewed custom project role containing `aiplatform.endpoints.predict` and only any additional permissions proven necessary by the pinned SDK call; the fallback is `roles/aiplatform.user` with its excess permissions documented and explicitly accepted. Custom-role support, organization policy, and the final IAM posture are operator decisions ([IAM custom roles](https://docs.cloud.google.com/iam/docs/creating-custom-roles)). IAM permits prediction against the authorized Vertex service; it does not by itself constrain the publisher model ID. The release manifest and gateway enforce and audit the exact publisher-model resource, location, adapter/config hash, and per-conversation pin.
 
 ## 9. Images, build, deployment, and IaC
 
@@ -254,7 +266,8 @@ Do not persist hidden chain-of-thought, internal reasoning text, debug prompts, 
 - Default request limits, finalized by the operator in the release manifest: one in-flight call per engagement; maximum 64,000 input tokens; 4,096 output tokens; 120-second total deadline; 30-second idle-stream deadline; and a maximum of one retry only when no response chunk or usage was observed and the error class is explicitly retryable.
 - A 429, policy block, authentication error, budget denial, or partial response is not automatically retried. User/operator retry creates a new attempt under the same engagement and preserves the prior attempt.
 - Enforce per-request, per-conversation, per-work-item, per-principal, hourly, and daily request/token/cost ceilings before the call. A versioned price table is required for cost estimates; unknown pricing fails closed for paid calls.
-- Configure Vertex quotas, Cloud Run max instances/concurrency, application circuit breakers, and billing alerts/spend caps where eligible. Billing controls can lag, so application budgets remain authoritative. Google notes that spend-cap enforcement is not instantaneous ([Cloud Billing spend caps](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps)).
+- Configure Vertex quotas, Cloud Run max instances/concurrency, application circuit breakers, and billing alerts. If the operator selects a Cloud Billing spend cap, it is monthly and scoped to one project plus one eligible service. Enforcement is not instantaneous, overage remains billable, in-flight work can finish, and persistent Compute/storage costs continue; it is not a whole-stack hard stop. The operator owns the monetary amount and eligible service selection ([Cloud Billing spend caps](https://docs.cloud.google.com/billing/docs/how-to/budgets-spend-caps)).
+- The gateway's application circuit breaker is independent of Cloud Billing. It fails closed before invocation when any per-request, conversation, work-item, principal, hourly, or daily token/request/cost ceiling is exhausted, remains effective when billing data or the spend-cap API is delayed/unavailable, records the denied attempt, and requires a separately authorized reset or budget-version change.
 
 ## 13. TownSquare, Vertical, and Wonderland integration
 
@@ -276,7 +289,9 @@ Wonderland reads a redacted projection containing source IDs/hashes, actor/model
 
 - Send structured application logs to Cloud Logging through the Ops Agent or container logging driver. Logs contain IDs, hashes, state, latency, counts, and allowlisted error classes—not posts, prompts, responses, tokens, secrets, or raw exceptions.
 - Enable Admin Activity, System Event, Policy Denied, and selected Data Access logs. Cloud Audit Logs records who did what, where, and when, and its audit entries are immutable ([Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit)).
-- Route security/release/audit logs to a restricted log bucket or audit project with an operator-approved retention period and no runtime delete permission.
+- Route security, release, IAM, backup, recovery, Vertex, and application audit logs through explicit sinks to a user-defined Cloud Logging bucket in `ts-audit-<id>`. The recommended starting option is a regional `us-central1` bucket, 400-day retention, CMEK, analytics enabled, and a locked bucket after the pilot proves the filters; the operator must decide the final archive location, retention, immutability/lock timing, CMEK, and authorized readers. User-defined buckets have a fixed location, configurable retention, log views, and an update lock; cross-project sinks are supported ([log routing](https://docs.cloud.google.com/logging/docs/routing/overview), [log buckets](https://docs.cloud.google.com/logging/docs/buckets), [regionalized logs](https://docs.cloud.google.com/logging/docs/regionalized-logs)).
+- Runtime identities have no archive read, retention-change, sink-change, lock, or delete permission. The sink writer can only route entries; named audit/recovery groups receive least-privilege access to approved log views. A separate administrator controls configuration and locking. If the operator requires a second immutable export, add a Cloud Storage sink with an approved regional location and retention policy; Bucket Lock is irreversible and is not enabled by this proposal ([Bucket Lock](https://docs.cloud.google.com/storage/docs/bucket-lock)).
+- A quarterly retrieval test runs a pinned query against the archive and captures bucket/location/retention/lock/IAM metadata, query text and hash, caller, time range, result count, selected record hashes, latency, and a signed export hash. Empty, unauthorized, wrong-region, mutable-retention, or non-reproducible results fail archive evidence.
 - Log and alert on IAP denial, firewall denial, IAM changes, key/secret access, image promotion, deployment, migration, backup/restore, model quota/budget denial, abnormal token use, policy receipt failure, and operator stop/resume.
 
 ### 14.2 Initial service objectives
@@ -290,8 +305,9 @@ These are proposed measurement targets, not contractual promises:
 | Core API latency | p95 reads <500 ms; p95 governed writes <1 s | excludes model calls and migrations |
 | Gemini engagement completion | 95% of eligible, non-policy-blocked calls finish within 120 s | daily and 30-day views; provider outage shown separately |
 | Registry audit delivery | 99% delivered within 60 s; none lost/duplicated | rolling 24 hours |
-| Recovery point | <=15 minutes for accepted application backups | verified from successful signed checkpoint |
-| Regional recovery time | <=4 hours | measured restore/failover drill |
+| Recovery-point age | operator-approved target; recommended design interval is 15-minute backup plus at most 5-minute attestation | measured only from latest valid attestation; target unavailable while required evidence or disk replication is degraded |
+| Paired-zone recovery | operator-approved target; recommended planning objective <=4 hours | single-zonal failure only; both domain disks fully replicated immediately before failure; no claim while degraded |
+| Region-loss recovery | none in baseline v1 | defined only if operator adopts and proves a secondary-region restore profile |
 
 Create service-level indicators and burn-rate alerts in Cloud Monitoring; Google Cloud supports SLO monitoring and alerting against service objectives ([Cloud Monitoring SLOs](https://docs.cloud.google.com/monitoring/slo-monitoring)). Alert destinations, escalation owners, and quiet hours are operator decisions. Missing telemetry is degraded, never green.
 
@@ -299,7 +315,7 @@ Create service-level indicators and burn-rate alerts in Cloud Monitoring; Google
 
 ### 15.1 Backup layers
 
-1. **Authoritative application backup:** every 15 minutes, run the existing online SQLite backup separately for Ledger and Registry, integrity/FK checks, row counts, domain watermark, encryption, and canonical manifest. Upload only completed encrypted artifacts and manifests. The audit-project attestor verifies object generation/checksums and canonical checkpoint input, signs with its KMS asymmetric key, and writes the signature/checkpoint to a separately controlled evidence location. A backup is `PENDING_ATTESTATION`, not recovery evidence, until that verification completes.
+1. **Authoritative application backup:** every 15 minutes, run the existing online SQLite backup separately for Ledger and Registry, integrity/FK checks, row counts, domain watermark, encryption, and canonical manifest. Upload only completed encrypted artifacts and manifests from `ts-prod-<id>`. The `ts-backup-attestor` identity in `ts-audit-<id>` verifies object generation/checksums and canonical checkpoint input, signs with its KMS asymmetric key, and writes the signature/checkpoint to a separately controlled evidence location. A backup is `PENDING_ATTESTATION`, not recovery evidence, until that verification completes. Attestation must complete within five minutes of the completed manifest upload: warn at two minutes; at five minutes mark the attempt `ATTESTATION_FAILED`, page the operator, retain the evidence, and trigger a fresh backup without promoting the failed attempt. Two consecutive failures or a latest-valid-attestation age beyond the operator-approved recovery target sets backup readiness `FAILED` and blocks pilot expansion, release acceptance, and destructive maintenance.
 2. **Disk recovery aid:** daily scheduled snapshots of each data disk, with retention and location pinned. A crash-consistent snapshot is not application evidence; restored SQLite still must pass integrity, schema, release, and audit checks. Application-consistent guest-flush snapshots may be added after scripts are tested ([snapshot schedules](https://docs.cloud.google.com/compute/docs/disks/scheduled-snapshots), [snapshot consistency](https://docs.cloud.google.com/compute/docs/disks/snapshot-best-practices)).
 3. **Release recovery:** retain exact images, SBOMs, provenance, Terraform plan/state history, Compose/config hashes, governing-source hashes, and restore tooling for every recoverable release.
 
@@ -314,11 +330,14 @@ Proposed starting policy, subject to operator/legal decision:
 
 Use uniform bucket-level access, public-access prevention, versioning/soft delete, lifecycle rules, and a retention policy. Do not lock Bucket Lock until the operator accepts the irreversible period; Google documents that locking cannot be reduced or removed ([Bucket Lock](https://docs.cloud.google.com/storage/docs/bucket-lock)). Runtime has object-create only where practical; a separate recovery identity reads; deletion belongs to a separately approved retention process.
 
+Signing and verification remain separate across projects. Only `ts-backup-attestor` can use the audit-project KMS key to sign. `ts-backup-verifier` and recovery/evaluator principals obtain the public key and evidence but cannot sign, mutate the source backup, read plaintext databases, or change the key. Acceptance includes cross-project positive verification and negative attempts by the signer to read/decrypt/delete source data and by the verifier/runtime to sign or alter evidence.
+
 ### 15.3 Restore and DR
 
 - Quarterly and before every production cutover, restore both domains into new empty disks/paths, verify ciphertext/signature/checkpoint before decryption, run SQLite integrity/FK checks, validate schema/release tuple, compare counts/hashes/watermarks, then replay Registry delivery through the production boundary.
-- A regional failover fences/stops the old VM, verifies there is no writer, attaches regional disks to a new VM in the paired zone, deploys the same digest/config, starts dark, and passes readiness before load-balancer traffic changes.
+- A paired-zone recovery for one zonal failure fences/stops the old VM, verifies there is no writer, checks which replica is current, force-attaches regional disks to a new VM in the healthy paired zone, deploys the same digest/config, starts dark, and passes readiness before load-balancer traffic changes. This is not regional failover.
 - If disks are unavailable/corrupt, restore selected application backups to new disks. Never restore over an active directory.
+- Region-loss restoration occurs only through an operator-approved secondary-region profile and attested application backups; baseline v1 has no region-loss commitment.
 - Ledger and Registry remain separate consistency domains; reconciliation uses recorded correlation points and outbox state, never a fabricated shared timestamp.
 - After any accepted cloud write, rollback never rewinds to the NAS database. Stop writes, preserve cloud state, and repair/migrate forward.
 
@@ -377,6 +396,8 @@ After exact operator approval, enable constrained governed writes. Complete the 
 | Gateway compromise | separate SA/project boundary, no ledger credential, no TownSquare callback, restricted egress | disable Cloud Run service/identity; core continues without Gemini |
 | Core VM/container escape | no external IP, narrow core SA, IAP/OS Login, metadata restrictions, hardened containers | operator stop; snapshot/backup; rebuild from clean image |
 | SQLite split brain | one active VM, disk fencing/lease, one writer and migrator | fail startup/readiness; operator reconciliation |
+| Regional-disk replica degradation | monitor replication status and both `replica_state` values; fresh attested application backups | declare `DEGRADED`; page; no unconditional RPO/RTO or readiness claim until fully replicated |
+| Region loss | explicit no-commitment baseline or separately accepted secondary-region restore profile | stop; restore only from attested copy under operator-approved profile |
 | Image/supply-chain compromise | digest pin, provenance, SBOM, scanning, immutable promotion | promotion/deploy denied; variance required |
 | Backup deletion/ransomware | create-only runtime, separate recovery identity, retention/versioning, external signed checkpoints | restore from retained copy; incident finding |
 | Data-region drift | Terraform policy, resource-location constraints, model/location gate | deployment or Gemini call denied |
@@ -396,8 +417,8 @@ Each criterion is evidence-passed or evidence-failed independently. Evidence pas
 | GCP-P1-005 | Exact release promoted | digest, SBOM, scan, provenance, source and config hashes match manifest | mutable tag, unresolved high/critical finding, provenance mismatch | Artifact Registry/Analysis/Cloud Build evidence | GSP | Operator |
 | GCP-P1-006 | Migrations run on fresh and restored domains | one migrator/domain; exact schema and peer tuple; idempotent rerun | partial migration or incompatible runtime starts | migration logs and conformance report | Jackie Chan | Operator |
 | GCP-P1-007 | Governed write suite runs | ordering, immutability, idempotency, context/policy receipt, authority and lifecycle pass | replay, wrong actor, stale context or self-accept succeeds | test report plus selected immutable events | Ronda Rousey | Operator |
-| GCP-P1-008 | Backup schedule and restore drill run | separate encrypted backups reach externally verified `ATTESTED` state, restore to empty disks, and reconcile; RPO measured <=15 min from the latest valid attestation | `PENDING_ATTESTATION` accepted as evidence, live-path overwrite, bad signature/hash, or shared watermark accepted | manifests, KMS/Minisign signatures and public verification, restore/replay transcript | Ronda Rousey | Operator |
-| GCP-P1-009 | Paired-zone recovery drill | old writer fenced; same release recovers within 4 hours; no duplicate/divergent event | two writers or unreconciled outbox | incident timeline, disk/VM/audit logs, hashes | Francis Ngannou | Operator |
+| GCP-P1-008 | Backup schedule and restore drill run | separate encrypted backups reach externally verified `ATTESTED` state within 5 minutes of completed upload, restore to empty disks, and reconcile; recovery-point age is measured against the operator-approved target | `PENDING_ATTESTATION` accepted, late attestation not failed/alerted, live-path overwrite, bad signature/hash, or shared watermark accepted | manifests, timestamps, alerts, KMS/Minisign signatures and public verification, restore/replay transcript | Ronda Rousey | Operator |
+| GCP-P1-009 | With both domain disks fully replicated, paired-zone recovery drill runs | old writer fenced; healthy replicas force-attach and same release recovers within the operator-approved target; no duplicate/divergent event | target claimed from degraded starting state, two writers, or unreconciled outbox | replica-state history, incident timeline, disk/VM/audit logs, hashes | Francis Ngannou | Operator |
 | GCP-P1-010 | Gemini gateway fake and capped live tests | ADC identity, exact model/config, budgets, timeouts, hashes, usage/finish/error audit all proven | API key, arbitrary model, unbounded retry/output, raw error/content log | gateway tests and one synthetic audit envelope | Ronda Rousey and GSP | Operator |
 | GCP-P1-011 | Malicious model output test | output is inert attributed proposal/finding; no tool/write/transition executes | model output changes state or invokes external target | negative test and TownSquare audit trail | GSP | Operator |
 | GCP-P1-012 | Context/policy/privacy tests | only manifest-selected/redacted context sent; policy receipt current; no hidden reasoning stored | unselected data, expired receipt, secret or thought text leaves boundary | fake-provider capture, redaction and storage scans | GSP | Operator |
@@ -407,20 +428,27 @@ Each criterion is evidence-passed or evidence-failed independently. Evidence pas
 | GCP-P1-016 | NAS migration rehearsal and final reconciliation | counts, IDs, hashes, sequences, lifecycle heads, receipts and outbox match; Drive absent from authority | unexplained delta or dual-writer window | signed reconciliation report | Jackie Chan | Operator |
 | GCP-P1-017 | Rollback drills before and after a write | pre-write traffic returns safely; post-write preserves cloud truth and repairs forward | cloud ledger overwritten from NAS/old backup | rollback transcript and final hashes | Ronda Rousey | Operator |
 | GCP-P1-018 | Governing and release manifests reviewed | exact Doctrine/ROE/governance, release, model and policy sources/hashes are current and scoped | inactive/template manifest treated as adopted | protected authority proof and manifest hashes | Jigoro Kano and GSP | Operator |
+| GCP-P1-019 | Inject one regional-disk replica degradation and evaluate region-loss scenario | status becomes `DEGRADED`, operator is paged, RPO/RTO/readiness claims are withheld; region-loss status matches the accepted baseline or restore profile | service remains green, unconditional target displayed, or regional disk represented as cross-region DR | replica metrics, alerts, status/API output, accepted region-loss decision | Francis Ngannou and Ronda Rousey | Operator |
+| GCP-P1-020 | Gateway network matrix runs from approved VM, internet, other project/VPC, and gateway egress | only same-project VPC VM path through regional internal load balancer reaches internal Cloud Run with valid identity; default URL is disabled; egress uses Direct VPC and approved Google API/Vertex path | public/default URL works, invalid identity reaches gateway, or arbitrary internet/model endpoint is reachable | Terraform plan, DNS/routes/firewall, Cloud Run settings, flow/audit logs, positive/negative probes | Tony Jaa and GSP | Operator |
+| GCP-P1-021 | Vertex IAM and model-allowlist matrix runs | gateway has `aiplatform.endpoints.predict` through the accepted custom role or documented `roles/aiplatform.user`; exact publisher model/config succeeds and is audited | excess role is unreviewed, alternate publisher model/config succeeds, or network reachability is treated as model authorization | IAM policy/role definition, denied/success audit logs, release manifest, attempt records | GSP | Operator |
+| GCP-P1-022 | Billing data is delayed/unavailable and application budgets are exhausted in test | independent circuit breaker denies new calls before Vertex, records denial, and requires authorized reset; fixed Compute/storage remains identified as accruing | billing spend cap is described as instant/whole-stack or delayed billing bypasses the application breaker | fake billing fault, invocation counter, denial event, billing configuration | Ronda Rousey and Tony Jaa | Operator |
+| GCP-P1-023 | Cross-project signer/verifier and latency matrix runs | attestor alone signs; verifier validates public evidence; alert at 2 minutes and failure at 5 minutes; two failures block readiness | signer reads/decrypts/deletes source, verifier/runtime signs/mutates, or late attempt becomes `ATTESTED` | IAM/KMS policies, denied audit logs, signed fixtures, timer/alert/readiness evidence | GSP and Ronda Rousey | Operator |
+| GCP-P1-024 | Archive sink receives synthetic security/release/audit records and quarterly retrieval drill runs | records reach operator-approved region/retention/lock/access destination and pinned query reproduces signed evidence | missing class, wrong region, runtime reads/changes archive, retention mutable contrary to policy, or query cannot reproduce evidence | sink/bucket/IAM metadata, received records, query/hash/count/export signature | GSP and Ronda Rousey | Operator |
 
 Applicability: all criteria apply to production v1. If a capability is deliberately removed—for example Gemini is disabled—the associated criterion remains `NOT APPLICABLE` only through an operator decision that also removes the capability from the accepted release; it is never silently skipped. Ronda operationalizes and executes criteria but cannot invent, relax, or reinterpret product requirements.
 
 ## 20. Blocking operator decisions
 
 1. Google Cloud organization/folder, project IDs, billing account, and responsible groups.
-2. `us-central1` or another approved primary region; strict single-region versus US-only DR boundary.
+2. primary data and model locations; accept no v1 region-loss commitment or approve a secondary-region restore profile with explicit region-loss RPO/RTO.
 3. Domain names, DNS control, IAP user/service principals, and public-versus-organization-only access.
-4. exact RPO, RTO, SLO, retention, log retention, Bucket Lock timing, and backup location.
-5. CMEK/key hierarchy, administrators, users, rotation, destruction protection, and recovery ownership.
-6. exact Vertex project/location/model resource, safety/generation configuration, caching setting, request/token/cost caps, and pilot cohort.
+4. paired-zone and backup RPO/RTO/SLO targets, storage capacity/performance/cost commitments, backup retention/location, and Bucket Lock timing.
+5. final IAM posture, including Vertex custom role versus accepted `roles/aiplatform.user`; CMEK/key hierarchy, administrators, users, rotation, destruction protection, and recovery ownership.
+6. exact Vertex project/location/publisher-model resource, safety/generation configuration, caching setting, request/token/cost caps, optional monthly eligible-service spend cap and amount, and pilot cohort.
 7. exact governing-source manifest and policy-receipt profile for production writes/model calls.
 8. exact release SHA, image/config/IaC/SBOM/provenance hashes, vulnerability disposition, migration evidence, and cutover moment.
 9. final NAS archival/read-only disposition after cloud acceptance.
+10. archive sink destination, region, log classes, retention, immutability/lock timing, CMEK, reader/administrator access, and retrieval/query evidence policy.
 
 ## 21. Alternative rejected
 
@@ -448,18 +476,29 @@ WORK ORDER
 All sources below were retrieved 2026-10-06. Product availability, model availability, prices, quotas, and terms must be rechecked at implementation and release review.
 
 - [Compute Engine Persistent Disk](https://docs.cloud.google.com/compute/docs/disks/persistent-disks)
+- [Regional Persistent Disk replication](https://docs.cloud.google.com/compute/docs/disks/about-regional-persistent-disk)
+- [Manage regional-disk failures](https://docs.cloud.google.com/compute/docs/disks/repd-failover)
+- [Monitor regional-disk replica state](https://docs.cloud.google.com/compute/docs/disks/monitor-regional-persistent-disk-replica-state)
 - [Cloud Run overview](https://docs.cloud.google.com/run/docs/overview/what-is-cloud-run)
 - [Cloud Run fit criteria](https://docs.cloud.google.com/run/docs/fit-for-run)
 - [Cloud Run container runtime contract](https://docs.cloud.google.com/run/docs/container-contract)
 - [Cloud Run service-to-service authentication](https://docs.cloud.google.com/run/docs/authenticating/service-to-service)
+- [Cloud Run ingress and default URL](https://docs.cloud.google.com/run/docs/securing/ingress)
+- [Cloud Run Direct VPC egress](https://docs.cloud.google.com/run/docs/configuring/vpc-direct-vpc)
+- [Regional internal Application Load Balancer with Cloud Run](https://docs.cloud.google.com/load-balancing/docs/l7-internal/setting-up-l7-internal-serverless)
+- [Configure Private Google Access](https://docs.cloud.google.com/vpc/docs/configure-private-google-access)
+- [VPC Service Controls private connectivity](https://docs.cloud.google.com/vpc-service-controls/docs/set-up-private-connectivity)
 - [GKE StatefulSets](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/statefulset)
 - [GKE persistent volumes](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/persistent-volumes)
 - [Vertex AI Gemini quickstart](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/start/quickstart)
 - [Google Gen AI SDK for Vertex AI](https://cloud.google.com/vertex-ai/generative-ai/docs/sdks/overview)
+- [Vertex AI generative model locations](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/locations)
 - [Vertex generative AI security controls](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/security-controls)
 - [Vertex AI zero data retention](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention)
 - [Google Cloud data residency list](https://cloud.google.com/terms/data-residency)
 - [IAM service-account best practices](https://docs.cloud.google.com/iam/docs/best-practices-service-accounts)
+- [Vertex AI roles and permissions](https://docs.cloud.google.com/iam/docs/roles-permissions/aiplatform)
+- [IAM custom roles](https://docs.cloud.google.com/iam/docs/creating-custom-roles)
 - [How Application Default Credentials works](https://docs.cloud.google.com/docs/authentication/application-default-credentials)
 - [Compute Engine service accounts](https://docs.cloud.google.com/compute/docs/access/service-accounts)
 - [IAP for Compute Engine](https://docs.cloud.google.com/iap/docs/enabling-compute-howto)
@@ -470,6 +509,9 @@ All sources below were retrieved 2026-10-06. Product availability, model availab
 - [Cloud KMS digital signatures](https://docs.cloud.google.com/kms/docs/create-validate-signatures)
 - [Cloud Audit Logs](https://docs.cloud.google.com/logging/docs/audit)
 - [Configure Data Access audit logs](https://docs.cloud.google.com/logging/docs/audit/configure-data-access)
+- [Cloud Logging routing and sinks](https://docs.cloud.google.com/logging/docs/routing/overview)
+- [Configure Cloud Logging buckets](https://docs.cloud.google.com/logging/docs/buckets)
+- [Regionalize Cloud Logging](https://docs.cloud.google.com/logging/docs/regionalized-logs)
 - [Terraform/IaC overview](https://docs.cloud.google.com/docs/terraform/iac-overview)
 - [Artifact Registry push/pull and immutable tags](https://docs.cloud.google.com/artifact-registry/docs/docker/pushing-and-pulling)
 - [Artifact Analysis container scanning](https://docs.cloud.google.com/artifact-analysis/docs/container-scanning-overview)
