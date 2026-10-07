@@ -7,16 +7,16 @@ Python base digest remain deliberately unfilled until review and checkpoint.
 
 ## Required order
 
-1. From a clean checkout of the reviewed commit, confirm that commit contains
-   `6114b4b37ae904576437f3d07922ee6949d7e8a6` and
-   `95209b6cab072c0d2c2c4f0f39bde8314ed2c764`; record the exact commit/tree.
+1. From a clean checkout of the reviewed commit, record and independently
+   verify its exact commit and tree object IDs. Do not derive either value from
+   a mutable branch name or from the runtime environment.
 2. Run the zero-write checks from the reviewed design. Any missing, stale, or
    ambiguous check is `BLOCKED_BEFORE_NAS_WRITE`. Do not inspect a legacy
    path/container as a workaround.
 3. Validate the source archive with `python -m canary.safe_archive ARCHIVE DEST --validate-only`.
    Create/extract only under `/volume1/docker/townsquare-canary-20261007-a`
    after the gate, then revalidate the root and every resolved mount.
-4. Build all three images from the exact source archive with the six identity
+4. Build all three images from the exact source archive with the nine identity
    build arguments, an already-cached `python@sha256:<reviewed-digest>` base,
    `--network=none`, and `--pull=false`. Tag them with the exact reviewed
    source commit. Record image IDs/config digests and labels; never invent a

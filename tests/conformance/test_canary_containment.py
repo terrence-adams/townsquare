@@ -374,6 +374,11 @@ class ArchiveTests(unittest.TestCase):
                 with tarfile.open(fileobj=self.archive(members), mode="r:") as archive:
                     with self.assertRaises(CanaryPathError): validated_members(archive)
 
+    def test_accepts_required_contract_tree(self):
+        info = tarfile.TarInfo("contracts/r7/ledger-migrations.json"); info.size = 2
+        with tarfile.open(fileobj=self.archive([(info, b"{}")]), mode="r:") as archive:
+            self.assertEqual(["contracts/r7/ledger-migrations.json"], [member.name for member in validated_members(archive)])
+
     def test_path_swap_symlink_fails_closed_when_platform_allows_symlinks(self):
         info = tarfile.TarInfo("shared/value.txt"); info.size = 1
         with tempfile.TemporaryDirectory() as temp:

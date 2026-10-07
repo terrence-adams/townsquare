@@ -11,7 +11,7 @@ from typing import Callable
 
 ALLOWED_TOP_LEVEL = {
     ".dockerignore", ".gitignore", "LICENSE", "README.md", "backup", "canary",
-    "docs", "registrar", "registry", "requirements", "shared", "tests", "tools", "viewer",
+    "contracts", "docs", "registrar", "registry", "requirements", "shared", "tests", "tools", "viewer",
 }
 REQUIRED_EMPTY = ("data/ledger", "data/registry", "backups", "evidence")
 
