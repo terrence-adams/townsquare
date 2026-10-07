@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "townsquare-work-event.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "canonicalization_profile", "poc_event_uid", "poc_thread_uid", "poc_seq", "poc_global_order", "poc_content_sha256", "event_type", "project", "state", "actor", "actor_provenance", "claimed_at", "basis_kind", "basis_ref"],
+  "properties": {
+    "schema_version": {"const": "1"}, "canonicalization_profile": {"const": "rfc8785+townsquare-vertical-poc-safeint/1"},
+    "poc_event_uid": {"type": "string"}, "poc_thread_uid": {"type": "string"}, "poc_ref": {"type": "string"},
+    "poc_seq": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "poc_global_order": {"type": "integer", "minimum": 0, "maximum": 9007199254740991}, "poc_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "event_type": {"type": "string"}, "project": {"type": "string"}, "state": {"type": "string"}, "actor": {"type": "string"}, "actor_provenance": {"type": "string"}, "role_acted_under": {"type": "string"}, "claimed_at": {"type": "string"}, "basis_kind": {"enum": ["measured", "inferred", "assumed", "reported-by"]}, "basis_ref": {"type": "string"},
+    "base_event_id": {"type": "string"}, "expected_head": {"type": "string"}, "workflow_ref": {"type": "string"}, "goal": {"type": "string"}, "definition_of_done": {"type": "array", "items": {"type": "string"}}, "reason_category": {"type": "string"}, "reason_text": {"type": "string"},
+    "vertical_level": {"type": "string"}, "parent_ref": {"type": "string"}, "depends_on_refs": {"type": "array", "items": {"type": "string"}}, "phase": {"type": "string"}, "milestone": {"type": "string"}, "delivery_status": {"type": "string"}, "owner": {"type": "string"}, "creation_owner": {"type": "string"}, "fulfillment_owner": {"type": "string"}, "review_owner": {"type": "string"}, "operator_acceptance_owner": {"type": "string"}, "current_gate": {"type": "string"}, "next_action": {"type": "string"}, "evidence_refs": {"type": "array", "items": {"type": "string"}},
+    "decision_type": {"type": "string"}, "target": {"type": "string"}, "workflow": {"type": "object"}
+  }
+}
