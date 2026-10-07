@@ -22,16 +22,69 @@ Reviewed repository inputs are the exact committed files under `docs/governance/
 
 ## Decision/amendment reconciliation index
 
-| Decision range | Disposition / destination | Status |
-|---|---|---|
-| D1–D3 | post/action boundary and record semantics → TS2-REC-02, TS2-GATE-01 | mapped; snapshot required |
-| D4–D15 | registry/charter/field concerns → external or object-profile inputs | UNVERIFIED; no absorption claim |
-| D16–D21 | headers, lifecycle, evidence → TS2-CLM-01, TS2-WRK-01/02, object profile | mapped; snapshot required |
-| D22–D26 | routing, work and reporting → TS2-WRK-01, TS2-REC-03 | mapped; snapshot required |
-| D27–D31a | unverified historical range | UNVERIFIED; no adoption review pass |
-| D32–D37 | gates, evidence, independent QA → TS2-GATE-01, TS2-WRK-02 | mapped; snapshot required |
-| D38–D47 | model/reporting/gate constraints → TS2-NOT-01, TS2-GATE-01 | mapped; snapshot required |
-| D48–D49 | addressing/registry input → TS2-WRK-01 and object profile | mapped; snapshot required |
-| S1–S8 | field/relay/input selections | retained as object/profile or unresolved input | snapshot required |
+Each row is intentionally individual. The historical register is not present locally, so a destination marked `UNVERIFIED` is not a retirement, exclusion, or claim of carry-forward. The snapshot evidence file identifies this as an adoption-review blocker.
 
-No row silently retires a decision. `UNVERIFIED` means “not asserted as carried”; it does not mean “discarded.” The reviewer must attach the register snapshot and replace each range with per-decision rows before any adoption decision.
+| Decision | Disposition / candidate destination | Evidence status |
+|---|---|---|
+| D1 | post/action boundary → TS2-GATE-01 | provisional map; snapshot required |
+| D2 | gate record precondition → TS2-GATE-01 | provisional map; snapshot required |
+| D3 | record change discipline → TS2-REC-02 | provisional map; snapshot required |
+| D4 | no asserted disposition | UNVERIFIED |
+| D5 | no asserted disposition | UNVERIFIED |
+| D6 | no asserted disposition | UNVERIFIED |
+| D7 | no asserted disposition | UNVERIFIED |
+| D8 | registry relationship input → TS2-OBJ-01 | provisional map; snapshot required |
+| D9 | no asserted disposition | UNVERIFIED |
+| D10 | no asserted disposition | UNVERIFIED |
+| D11 | no asserted disposition | UNVERIFIED |
+| D12 | no asserted disposition | UNVERIFIED |
+| D13 | no asserted disposition | UNVERIFIED |
+| D14 | no asserted disposition | UNVERIFIED |
+| D15 | field/object input → object/lifecycle v1.1 | provisional map; snapshot required |
+| D16 | claims/headers → TS2-CLM-01 | provisional map; snapshot required |
+| D17 | lifecycle/ownership → TS2-WRK-01/02 | provisional map; snapshot required |
+| D18 | record linkage → TS2-REC-03 | provisional map; snapshot required |
+| D19 | lifecycle/headers → TS2-CLM-01, object/lifecycle v1.1 | provisional map; snapshot required |
+| D20 | order/collision input → TS2-REC-03 | provisional map; snapshot required |
+| D21 | lifecycle input → object/lifecycle v1.1 | provisional map; snapshot required |
+| D22 | routing input → TS2-WRK-01 | provisional map; snapshot required |
+| D23 | work/record input → TS2-WRK-01, TS2-REC-03 | provisional map; snapshot required |
+| D24 | templates/input → object profile | provisional map; snapshot required |
+| D25 | routing input → TS2-WRK-01 | provisional map; snapshot required |
+| D26 | reporting input → TS2-REC-03 | provisional map; snapshot required |
+| D27 | no asserted disposition | UNVERIFIED |
+| D28 | no asserted disposition | UNVERIFIED |
+| D29 | no asserted disposition | UNVERIFIED |
+| D30 | record/control input → TS2-REC-02, TS2-GATE-01 | provisional map; snapshot required |
+| D31 | no asserted disposition | UNVERIFIED |
+| D31a | no asserted disposition | UNVERIFIED |
+| D32 | gate input → TS2-GATE-01 | provisional map; snapshot required |
+| D33 | record/provenance input → TS2-REC-03 | provisional map; snapshot required |
+| D34 | registry input → TS2-OBJ-01 | provisional map; snapshot required |
+| D34a | no asserted disposition | UNVERIFIED |
+| D34b | no asserted disposition | UNVERIFIED |
+| D35 | iteration input → TS2-CHG-01 | provisional map; snapshot required |
+| D36 | evidence input → TS2-CLM-01 | provisional map; snapshot required |
+| D37 | independent QA/closure → TS2-WRK-02 | provisional map; snapshot required |
+| D38 | reporting/gate input → TS2-GATE-01 | provisional map; snapshot required |
+| D39 | reporting/gate input → TS2-GATE-01 | provisional map; snapshot required |
+| D40 | reporting/gate input → TS2-GATE-01 | provisional map; snapshot required |
+| D41 | reporting/gate input → TS2-GATE-01 | provisional map; snapshot required |
+| D42 | reporting/gate input → TS2-GATE-01 | provisional map; snapshot required |
+| D43 | reporting/gate input → TS2-GATE-01 | provisional map; snapshot required |
+| D44 | evidence/gate input → TS2-GATE-01 | provisional map; snapshot required |
+| D45 | evidence/debate input → TS2-CLM-01 | provisional map; snapshot required |
+| D46 | evidence/debate input → TS2-CLM-01 | provisional map; snapshot required |
+| D47 | evidence input → TS2-CLM-01 | provisional map; snapshot required |
+| D48 | addressing/registry input → TS2-WRK-01, object/lifecycle v1.1 | provisional map; snapshot required |
+| D49 | addressing/registry input → TS2-WRK-01, object/lifecycle v1.1 | provisional map; snapshot required |
+| S1 | no asserted disposition | UNVERIFIED |
+| S2 | no asserted disposition | UNVERIFIED |
+| S3 | field/provenance input → TS2-CLM-01 | provisional map; snapshot required |
+| S4 | field/provenance input → TS2-CLM-01 | provisional map; snapshot required |
+| S5 | no asserted disposition | UNVERIFIED |
+| S6 | no asserted disposition | UNVERIFIED |
+| S7 | no asserted disposition | UNVERIFIED |
+| S8 | record change input → TS2-REC-02 | provisional map; snapshot required |
+
+No row silently retires a decision. The stale-input check requires an immutable register identity, sequence/watermark, exact digest, and retrieval time; absent or changed values invalidate every provisional row for adoption review.
