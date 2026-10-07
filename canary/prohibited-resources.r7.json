@@ -3,7 +3,7 @@
   "prohibited":{
     "exact_names":["fresh-canary-20261007-a-review-r6.zip"],
     "ids":["1c4b4d65f212e38f695dfa22d2c03b3f7dc4b117cc7d5861af822554748bcde2","1aaa0000000000000000000000000000000000000000000000000000000041a1a"],
-    "path_prefixes":["/volume1/docker/townsquare-mvp","/volume1/docker/townsquare-canary-20261007-a/legacy"],
+    "path_prefixes":["/volume1/Docker/townsquare-mvp","/volume1/Docker/townsquare-canary-20261007-a/legacy"],
     "endpoints":[],
     "image_prefixes":["townsquare-mvp:"],
     "container_names":["townsquare-mvp"],
@@ -16,7 +16,7 @@
     "image_names":["townsquare-canary-ledger","townsquare-canary-registry","townsquare-canary-viewer","townsquare-canary-backup"],
     "project":"townsquare-canary-20261007-a",
     "network":"townsquare-canary-20261007-a-internal",
-    "root":"/volume1/docker/townsquare-canary-20261007-a",
+    "root":"/volume1/Docker/townsquare-canary-20261007-a",
     "loopback_ports":[18502,18790]
   },
   "r6_provenance":[

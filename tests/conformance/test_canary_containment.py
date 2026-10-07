@@ -93,7 +93,7 @@ def rendered_compose_fixture():
         "viewer": {"TOWNSQUARE_VIEWER_PROFILE": "native-ledger-mvp", "REGISTRAR_BASE_URL": "http://ledger:8790", "HOME": "/tmp", "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json"},
     }
     def mount(source, target, readonly=False):
-        return {"type": "bind", "source": "/volume1/docker/townsquare-canary-20261007-a/" + source, "target": target, "read_only": readonly}
+        return {"type": "bind", "source": "/volume1/Docker/townsquare-canary-20261007-a/" + source, "target": target, "read_only": readonly}
     ledger_data = mount("data/ledger", "/var/lib/townsquare")
     registry_data = mount("data/registry", "/var/lib/registry")
     mounts = {
@@ -398,7 +398,7 @@ class StaticContainmentTests(unittest.TestCase):
         model = rendered_compose_fixture()
         validate(model, expected_identity=IDENTITY)
         escaped = copy.deepcopy(model)
-        escaped["services"]["ledger"]["volumes"][0]["source"] = "/volume1/docker/other"
+        escaped["services"]["ledger"]["volumes"][0]["source"] = "/volume1/Docker/other"
         with self.assertRaises(ComposeValidationError): validate(escaped, expected_identity=IDENTITY)
         privileged = copy.deepcopy(model)
         privileged["services"]["registry"]["privileged"] = True

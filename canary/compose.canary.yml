@@ -35,8 +35,8 @@ services:
       <<: *identity
       REGISTRAR_DB: /var/lib/townsquare/ledger.db
     volumes:
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/data/ledger, target: /var/lib/townsquare}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/data/ledger, target: /var/lib/townsquare}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
 
   ledger:
@@ -67,15 +67,15 @@ services:
       REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
       REGISTRY_READINESS_URL: http://registry:8789/health/ready
     volumes:
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/data/ledger, target: /var/lib/townsquare}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/ledger-token-pepper, target: /run/secrets/ledger-token-pepper, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/ledger-cursor-signing-key, target: /run/secrets/ledger-cursor-signing-key, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/ledger-receipt-hash-key, target: /run/secrets/ledger-receipt-hash-key, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/ledger-to-registry-readiness.ledger, target: /run/secrets/ledger-to-registry-readiness, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/registry-to-ledger-readiness.ledger, target: /run/secrets/registry-to-ledger-readiness, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/config/ledger-context-manifest.json, target: /run/config/ledger-context-manifest.json, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/config/canary-test-authority.pub, target: /run/config/canary-test-authority.pub, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/data/ledger, target: /var/lib/townsquare}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/ledger-token-pepper, target: /run/secrets/ledger-token-pepper, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/ledger-cursor-signing-key, target: /run/secrets/ledger-cursor-signing-key, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/ledger-receipt-hash-key, target: /run/secrets/ledger-receipt-hash-key, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/ledger-to-registry-readiness.ledger, target: /run/secrets/ledger-to-registry-readiness, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/registry-to-ledger-readiness.ledger, target: /run/secrets/registry-to-ledger-readiness, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/ledger-context-manifest.json, target: /run/config/ledger-context-manifest.json, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-test-authority.pub, target: /run/config/canary-test-authority.pub, read_only: true}
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
     ports: ["192.168.2.3:18790:8790"]
     healthcheck:
@@ -94,8 +94,8 @@ services:
       <<: *identity
       REGISTRY_DB: /var/lib/registry/registry.db
     volumes:
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/data/registry, target: /var/lib/registry}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/data/registry, target: /var/lib/registry}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
 
   registry:
@@ -122,13 +122,13 @@ services:
       REGISTRY_LEDGER_AUDIT_CONTRACT: registry-ledger-audit-v1
       TOWNSQUARE_CONTEXT_MANIFEST: /run/config/canary-context-manifest.json
     volumes:
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/data/registry, target: /var/lib/registry}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/registry-api-credential, target: /run/secrets/registry-api-credential, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/registry-audit-credential, target: /run/secrets/registry-audit-credential, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/ledger-to-registry-readiness.registry, target: /run/secrets/ledger-to-registry-readiness, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/registry-to-ledger-readiness.registry, target: /run/secrets/registry-to-ledger-readiness, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/config/canary-test-authority.pub, target: /run/config/canary-test-authority.pub, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/data/registry, target: /var/lib/registry}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/registry-api-credential, target: /run/secrets/registry-api-credential, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/registry-audit-credential, target: /run/secrets/registry-audit-credential, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/ledger-to-registry-readiness.registry, target: /run/secrets/ledger-to-registry-readiness, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/registry-to-ledger-readiness.registry, target: /run/secrets/registry-to-ledger-readiness, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-test-authority.pub, target: /run/config/canary-test-authority.pub, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8789/health/internal/ready',timeout=2).read()"]
@@ -149,8 +149,8 @@ services:
       REGISTRAR_BASE_URL: http://ledger:8790
       HOME: /tmp
     volumes:
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/secrets/viewer-native-credential, target: /run/secrets/viewer-native-credential, read_only: true}
-      - {type: bind, source: /volume1/docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/viewer-native-credential, target: /run/secrets/viewer-native-credential, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
     tmpfs: [/tmp:rw,noexec,nosuid,size=64m,mode=1777]
     ports: ["192.168.2.3:18502:8502"]
     healthcheck:

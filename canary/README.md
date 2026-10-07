@@ -14,7 +14,7 @@ Python base digest remain deliberately unfilled until review and checkpoint.
    ambiguous check is `BLOCKED_BEFORE_NAS_WRITE`. Do not inspect a legacy
    path/container as a workaround.
 3. Validate the source archive with `python -m canary.safe_archive ARCHIVE DEST --validate-only`.
-   Create/extract only under `/volume1/docker/townsquare-canary-20261007-a`
+   Create/extract only under `/volume1/Docker/townsquare-canary-20261007-a`
    after the gate, then revalidate the root and every resolved mount.
 4. Build all three images from the exact source archive with the nine identity
    build arguments, an already-cached `python@sha256:<reviewed-digest>` base,
@@ -40,15 +40,15 @@ Python base digest remain deliberately unfilled until review and checkpoint.
 
 ```sh
 docker compose --project-name townsquare-canary-20261007-a \
-  --project-directory /volume1/docker/townsquare-canary-20261007-a/compose \
-  --file /volume1/docker/townsquare-canary-20261007-a/compose/compose.canary.yml \
-  --env-file /volume1/docker/townsquare-canary-20261007-a/config/canary.env \
+  --project-directory /volume1/Docker/townsquare-canary-20261007-a/compose \
+  --file /volume1/Docker/townsquare-canary-20261007-a/compose/compose.canary.yml \
+  --env-file /volume1/Docker/townsquare-canary-20261007-a/config/canary.env \
   stop --timeout 30
 
 docker compose --project-name townsquare-canary-20261007-a \
-  --project-directory /volume1/docker/townsquare-canary-20261007-a/compose \
-  --file /volume1/docker/townsquare-canary-20261007-a/compose/compose.canary.yml \
-  --env-file /volume1/docker/townsquare-canary-20261007-a/config/canary.env \
+  --project-directory /volume1/Docker/townsquare-canary-20261007-a/compose \
+  --file /volume1/Docker/townsquare-canary-20261007-a/compose/compose.canary.yml \
+  --env-file /volume1/Docker/townsquare-canary-20261007-a/config/canary.env \
   ps --all
 ```
 

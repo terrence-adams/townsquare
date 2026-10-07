@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 
 
 PROJECT = "townsquare-canary-20261007-a"
-ROOT = PurePosixPath("/volume1/docker/townsquare-canary-20261007-a")
+ROOT = PurePosixPath("/volume1/Docker/townsquare-canary-20261007-a")
 SERVICES = {"ledger-migrate", "ledger", "registry-migrate", "registry", "viewer"}
 NETWORK = "canary-internal"
 IMAGE_REPOSITORIES = {
