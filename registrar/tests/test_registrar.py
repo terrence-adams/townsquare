@@ -254,6 +254,11 @@ class RegistrarTests(unittest.TestCase):
                 db_module.migrate(self.db)
             self.assertIsNone(self.db.execute("SELECT 1 FROM sqlite_master WHERE name='must_rollback'").fetchone())
         finally: db_module.MIGRATIONS=old
+    def test_migration_contract_hash_is_portable_across_line_endings(self):
+        lf=Path(self.tmp.name)/"migration-lf.sql"; crlf=Path(self.tmp.name)/"migration-crlf.sql"
+        lf.write_bytes(b"CREATE TABLE portable(x);\n")
+        crlf.write_bytes(b"CREATE TABLE portable(x);\r\n")
+        self.assertEqual(db_module._sha(lf),db_module._sha(crlf))
     def test_local_prototype_gates_and_total_url_validation(self):
         with self.assertRaises(RuntimeError): ensure_runtime_mode("production")
         self.assertFalse(verification_enabled(None)); self.assertTrue(verification_enabled("1"))

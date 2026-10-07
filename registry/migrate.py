@@ -6,7 +6,9 @@ DB=Path(os.environ['REGISTRY_DB']); LOCK=DB.with_suffix('.migration.lock')
 ROOT=Path(__file__).resolve().parents[1]; SCHEMA=Path(__file__).with_name('schema.sql')
 CONTRACT=ROOT/'contracts'/'r7'/'registry-schema.json'
 APPLICATION_ID=1414746695; USER_VERSION=2
-def _sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+def _sha(path):
+ data=path.read_bytes().replace(b'\r\n',b'\n').replace(b'\r',b'\n')
+ return hashlib.sha256(data).hexdigest()
 def _statements(path):
  statements=[]; current=''
  for line in path.read_text(encoding='utf-8').splitlines(True):

@@ -34,6 +34,14 @@ class RegistryV2ReleaseContracts(unittest.TestCase):
         db.execute("INSERT INTO audit_outbox(event_id) VALUES('pending-v1')")
         db.commit()
 
+    def test_registry_contract_hash_is_portable_across_line_endings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); lf=root/"schema-lf.sql"; crlf=root/"schema-crlf.sql"
+            lf.write_bytes(b"CREATE TABLE portable(x);\n")
+            crlf.write_bytes(b"CREATE TABLE portable(x);\r\n")
+            with self.registry_migrator(root/"unused.db") as migrator:
+                self.assertEqual(migrator._sha(lf),migrator._sha(crlf))
+
     @contextmanager
     def registry_migrator(self, db_path):
         """Load the CLI's callable migration boundary against a disposable DB."""

@@ -27,7 +27,10 @@ def session(path):
     try: yield db
     finally: db.close()
 
-def _sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+def _sha(path):
+    """Hash reviewed text with platform-independent newline bytes."""
+    data=path.read_bytes().replace(b"\r\n",b"\n").replace(b"\r",b"\n")
+    return hashlib.sha256(data).hexdigest()
 def _contract_rows():
     try: contract=json.loads(CONTRACT.read_text(encoding="utf-8"))
     except Exception as exc: raise RuntimeError("Ledger migration contract is unavailable") from exc
