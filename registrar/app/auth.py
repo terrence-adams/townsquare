@@ -6,7 +6,15 @@ try:
 except ImportError:  # startup reports the missing deployment dependency
     PasswordHasher=None
 
+def _validate_scope(scope):
+    if not isinstance(scope,str) or not scope or any(char.isspace() for char in scope):
+        raise Forbidden("invalid scope")
+    return scope
+
 def create_token(db,principal,scopes):
+    if isinstance(scopes,str): raise Forbidden("invalid scope")
+    try: scopes=[_validate_scope(scope) for scope in scopes]
+    except TypeError as exc: raise Forbidden("invalid scope") from exc
     if PasswordHasher is None: raise RuntimeError("argon2-cffi is required")
     token_id=secrets.token_urlsafe(9); secret=secrets.token_urlsafe(32)
     db.execute("INSERT INTO tokens VALUES (?,?,?,?,?,NULL,NULL)",(token_id,principal,PasswordHasher().hash(secret)," ".join(sorted(set(scopes))),now()))
@@ -85,17 +93,13 @@ def main():
     from .db import connect,verify_schema
     ap=argparse.ArgumentParser(); ap.add_argument("--db",required=True); ap.add_argument("--principal",required=True)
     ap.add_argument("--namespace",action="append",default=[]); ap.add_argument("--board",action="append",default=[])
-    # WS3 item 7: `action="append"` APPENDS to `default`, so the old
-    # default=["post:write"] meant every minted token silently carried the
-    # writer scope regardless of what --scope was actually requested on the
-    # command line -- the exact scope Decision 1's decoupling invariant
-    # ("no post:write token exists until adoption") requires stay closed.
-    # default=[] matches the (correct) pattern --namespace/--board already
-    # use one line above; the explicit post-parse fallback below restores
-    # the convenience default ONLY when --scope was truly never passed at
-    # all, instead of silently unioning it into every invocation.
-    ap.add_argument("--scope",action="append",default=[]); args=ap.parse_args()
-    if not args.scope: args.scope=["post:write"]
+    def scope(value):
+        try: return _validate_scope(value)
+        except Forbidden:
+            raise argparse.ArgumentTypeError("--scope must be a non-empty capability")
+    # Minting is fail-closed: a caller must deliberately name every capability.
+    # In particular, omission must never create a post:write credential.
+    ap.add_argument("--scope",action="append",required=True,type=scope); args=ap.parse_args()
     db=connect(args.db)
     try:
         verify_schema(db)

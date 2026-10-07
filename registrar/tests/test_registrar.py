@@ -389,35 +389,26 @@ class RegistrarTests(unittest.TestCase):
         finally:
             tmp3.cleanup(); auth.PasswordHasher=old
 
-    def test_auth_bootstrap_omitted_scope_still_defaults_to_post_write(self):
-        """The convenience default must survive for the truly-unset case --
-        this is a post-parse fallback, not a removal of the default."""
-        class FakeHasher:
-            def hash(self,value): return "hash:"+value
-            def verify(self,digest,value):
-                if digest!="hash:"+value: raise ValueError()
-        old=auth.PasswordHasher; auth.PasswordHasher=FakeHasher
+    def test_auth_bootstrap_omitted_or_empty_scope_fails_before_database_or_token(self):
+        """A bootstrap caller must deliberately request a non-empty scope.
+
+        Omission and empty values are parser failures before opening the DB,
+        so neither variant can mint a legacy implicit post:write credential.
+        """
+        import sys
         tmp4=tempfile.TemporaryDirectory()
+        old_argv=sys.argv
         try:
-            import sys,gc
-            dbpath=str(Path(tmp4.name)/"auth2.db")
-            prepared=connect(dbpath)
-            try:
-                migrate(prepared)
-                schema_before=[row[0] for row in prepared.execute("SELECT version FROM schema_migrations ORDER BY version")]
-            finally: prepared.close()
-            old_argv=sys.argv
-            sys.argv=["auth","--db",dbpath,"--principal","legacy-bot"]
-            try: auth.main()
-            finally: sys.argv=old_argv
-            gc.collect()
-            db4=connect(dbpath)
-            self.assertEqual(schema_before, [row[0] for row in db4.execute("SELECT version FROM schema_migrations ORDER BY version")])
-            scopes=set(db4.execute("SELECT scopes FROM tokens WHERE principal_id='legacy-bot'").fetchone()[0].split())
-            self.assertEqual({"post:write"},scopes)
-            db4.close(); gc.collect()
+            for suffix, scope_args in (("omitted", []), ("empty", ["--scope", ""]), ("blank", ["--scope", "   "])):
+                dbpath=Path(tmp4.name)/f"auth-{suffix}.db"
+                sys.argv=["auth","--db",str(dbpath),"--principal","legacy-bot",*scope_args]
+                with self.subTest(scope=suffix), self.assertRaises(SystemExit) as raised:
+                    auth.main()
+                self.assertEqual(2,raised.exception.code)
+                self.assertFalse(dbpath.exists())
         finally:
-            tmp4.cleanup(); auth.PasswordHasher=old
+            sys.argv=old_argv
+            tmp4.cleanup()
 
     # --- WS4 (jackie-chan, 2026-09-22): GET /v1/posts stable-cursor pagination ---
     # AC26: "Stable-cursor tests show no duplicate/reordered rows and reject
