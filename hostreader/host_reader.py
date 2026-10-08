@@ -658,7 +658,7 @@ def client_commit(repo: Path | None = None) -> str:
     return value if completed.returncode == 0 and value else "unknown"
 
 
-def evidence_record(config: Config, result: PollResult, state: dict[str, Any]) -> dict[str, Any]:
+def evidence_record(config: Config, result: PollResult, state: dict[str, Any], *, note: str | None = None) -> dict[str, Any]:
     """Build a SANITIZED live-read record.
 
     Identifiers, endpoints, HTTP results and counts only. No credentials (there
@@ -679,6 +679,7 @@ def evidence_record(config: Config, result: PollResult, state: dict[str, Any]) -
     return {
         "schema": EVIDENCE_SCHEMA,
         "runtime_boundary": "CANARY / NON-AUTHORITATIVE; read-only host client; no write, claim, wake, or authenticated identity",
+        "note": note,
         "generated_at": now_iso(),
         "host": os.uname().nodename,
         "client_commit": client_commit(),
@@ -747,6 +748,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="discard the local cursor and inbox and start a new one")
     parser.add_argument("--evidence", default=os.environ.get("TS_READER_EVIDENCE"),
                         help="write a sanitized live-read evidence JSON file to this path")
+    parser.add_argument("--evidence-note", default=None,
+                        help="one line recorded in the evidence file saying what this run was")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -804,7 +807,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.evidence:
         try:
             atomic_write(Path(args.evidence).expanduser(),
-                         json.dumps(evidence_record(config, result, state), indent=2, sort_keys=True) + "\n")
+                         json.dumps(evidence_record(config, result, state, note=args.evidence_note),
+                                    indent=2, sort_keys=True) + "\n")
         except OSError as exc:
             print(f"host reader: could not write evidence: {exc}", file=sys.stderr)
             return EXIT_LOCAL_ERROR

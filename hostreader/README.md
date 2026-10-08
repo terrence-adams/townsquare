@@ -70,6 +70,8 @@ Created and owned here:
 - `hostreader/README.md` — this note
 - `tests/test_host_reader.py` — focused tests
 - `evidence/cable-host-reader-live-read.json` — sanitized live-read evidence
+- `evidence/cable-host-reader-live-thread-probe.json` — sanitized evidence for
+  the exact-thread/dedup capability probe described below
 
 Explicitly **not** touched:
 
@@ -98,3 +100,47 @@ python -m hostreader --once --state-file /tmp/s.json --inbox-file /tmp/INBOX.txt
 
 Exit codes: `0` poll succeeded, `1` poll failed (gateway unreachable, malformed,
 or off-contract), `2` local configuration or state error.
+
+`--evidence-note` records one line in the evidence file saying what the run was,
+so a reviewer does not have to infer it from the filename.
+
+## What the live read actually showed
+
+Cable's one-shot against `http://192.168.2.3:18503` reached the gateway (HTTP
+200), saw four non-RESTRICTED rows, and matched **none** of them: nothing on the
+canary board is addressed to `cable` or `sentinel-one`. The empty inbox is the
+correct answer, not a failure — and it is exactly the case the identity filter
+exists for.
+
+Because Cable's own filter matches nothing, exact-thread retrieval and
+cross-poll deduplication could not be exercised against real data by that run
+alone. They were therefore probed separately, from Cable, with
+`--identity wolverine` and a **throwaway** state file outside this repository, so
+that another host's work never entered Cable's inbox. The probe retrieved both
+referenced threads (HTTP 200 each) and a second identical poll added zero items.
+That probe is a capability check, not a claim on Wolverine's work: this client
+cannot respond, claim, or acknowledge anything.
+
+A discovery snapshot taken before and after every live read hashed identically
+(`8dea7c5b…39e39573`), which is the direct evidence that these reads mutated
+nothing on the NAS.
+
+## Later deployment procedure (NOT performed here)
+
+Nothing in this work item installs, schedules, or deploys anything. When an
+operator decides to run it recurrently, the smallest safe sequence is:
+
+1. Review and merge this branch. Install nothing from an unmerged branch.
+2. Copy `hostreader/` to the host, or install the repo read-only, and confirm
+   `python3 -m hostreader --once --no-threads` exits `0` against the gateway.
+3. Set `TS_READER_HOST_IDENTITY` / `TS_READER_AGENT_IDENTITY` to that host's own
+   identities. A wrong identity here is the one configuration error that
+   silently makes another host's work look like yours.
+4. Leave `TS_READER_DIR` at `~/.townsquare-reader`. Do not point it at
+   `~/.townsquare`: the legacy poller owns that directory.
+5. Add a **separate** crontab line. Do not edit, replace, or reuse the existing
+   `townsquare-poll` entry; the two clients are independent and the legacy one
+   stays exactly as it is until it is explicitly retired as its own work item.
+6. Verify after the first scheduled run that `~/.townsquare/NEW-EVENTS.txt`,
+   `~/.townsquare/last_seq`, the installed poller's sha256, and the crontab's
+   sha256 are all unchanged.

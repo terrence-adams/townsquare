@@ -570,6 +570,12 @@ class EvidenceTests(TempConfigCase):
         for forbidden in ("excerpt", "Authorization", "Bearer", "OPERATOR-MANDATED", "content"):
             self.assertNotIn(forbidden, serialized)
 
+    def test_evidence_note_is_recorded_verbatim(self):
+        state = empty_state()
+        result = poll_once(self.config, state, opener=FakeGateway(threads=self.all_threads()))
+        self.assertEqual(evidence_record(self.config, result, state, note="probe")["note"], "probe")
+        self.assertIsNone(evidence_record(self.config, result, state)["note"])
+
     def test_evidence_records_a_failed_poll_honestly(self):
         state = empty_state()
         result = poll_once(self.config, state, opener=FakeGateway(discovery_error=http_error(503)))
