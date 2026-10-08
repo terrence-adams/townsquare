@@ -24,6 +24,26 @@ All `*_sha256` values are lowercase hexadecimal SHA-256 digests. Canonical JSON 
 
 The persisted permit binding is validated by `canary/schemas/action-permit-poc-v1.schema.json`. Its top-level `schema` value is `townsquare-action-permit-poc-v1`. Every stored or compared binding uses the complete schema object; validation never drops unknown fields because the schema is closed with `additionalProperties: false` throughout.
 
+## Permit authority story
+
+The runtime permit authority is the typed Vertical CANARY story, not this CONTRACT story. Every permit binding uses these exact constants:
+
+| Field | Required value |
+| --- | --- |
+| `story_key` | `IRON-CURTAIN-PERMIT-POC-CANARY` |
+| `thread_id` | `01a11b47-a6b6-71f1-9348-0d1e9ed21c5d` |
+| opening `event_id` | `01a11b47-a6b7-7372-b52f-2d2002ed2081` |
+| opening `content_sha256` | `9a1cbf7ddff351494331f9da521863fa37d232093c7fe1043bd73541b3645f87` |
+| `source_status` | `WORKING` |
+
+`source_snapshot_sha256` is SHA-256 over the exact retained UTF-8 bytes returned by authoritative Vertical story retrieval. The bytes are hashed before any parsing or reserialization. `source_snapshot_ref` is the content-addressed URN `urn:ynm:vertical-story-snapshot:v1:sha256:<source_snapshot_sha256>`. An evidence manifest maps that URN to the retained immutable file.
+
+The retained snapshot must contain, or unambiguously resolve, the selected story and thread, opening event and content hash, current lifecycle state, current Vertical version or head event, satisfied REVIEW dependency, retrieval time, and source provenance. Issuance validates all four representations together: the digest suffix in the URN, the separately stored `source_snapshot_sha256`, the SHA-256 of the retained exact bytes, and the fields parsed from those bytes. Any disagreement fails closed. JSON Schema validates each represented field but cannot express this cross-field and external-byte agreement; service logic is normative for that check.
+
+Issuance requires the retained snapshot to show the CANARY story in `WORKING`. The CANARY story may enter `WORKING` only after REVIEW acceptance and Helio's checkpoint. It is currently `OPEN`, so no valid live permit fixture exists. A synthetic `WORKING` object can validate the schema for contract testing, but it is not authority to issue a live permit.
+
+The pinned snapshot is a retained point-in-time fixture for this non-authoritative proof. It is not live Vertical verification. Git commit and tree hashes identify build or contract provenance only and must never be used as Vertical authority snapshots. This clarification is part of the approved design and does not amend the work order.
+
 ## Issuance: `POST /v1/action-permits`
 
 The caller supplies its normal bearer authorization and the same proposed event body, `Idempotency-Key`, and `If-Match` value that it will later send to `/v1/events`. It also supplies the compact `decision_record`, the typed Vertical story fixture, the existing signed canary proof, and the complete retrieved governance bundle acknowledgements. The endpoint derives the actor and action capability server-side. A caller-provided actor or action never overrides those values.
@@ -43,7 +63,7 @@ Before issuing, the service must:
 3. validate `Idempotency-Key` and `If-Match`, then calculate their exact bindings;
 4. validate the decision-record shape and hash;
 5. verify the signed canary proof, its signature, expiry, nonce, actor, action, target, payload context, audience, and service;
-6. resolve the pinned typed `VERTICAL_STORY` fixture and verify its story key, thread and event identifiers, content hash, and source snapshot hash;
+6. resolve the pinned typed `VERTICAL_STORY` CANARY fixture and verify its story key, thread and opening event identifiers, opening content hash, `WORKING` state, current version, retrieval time, and exact-byte source snapshot binding;
 7. verify complete retrieval of the current governance bundle and bind its manifest, bundle, Charter, and required-item aggregate hashes; and
 8. create the opaque 120-second bearer, persist its HMAC-SHA-256 under the distinct domain `townsquare-action-permit-poc-v1\0`, and append exactly one `action_permit_issued` audit record containing the schema binding.
 

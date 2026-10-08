@@ -77,14 +77,18 @@
         "kind": {"const": "VERTICAL_STORY"},
         "vertical_story": {
           "type": "object",
+          "$comment": "Service logic must verify that the snapshot URN digest suffix, source_snapshot_sha256, SHA-256 of the retained exact UTF-8 bytes, and fields parsed from those bytes all agree; JSON Schema cannot express that cross-field and external-byte invariant.",
           "additionalProperties": false,
-          "required": ["story_key", "thread_id", "event_id", "content_sha256", "source_snapshot_ref", "source_snapshot_sha256"],
+          "required": ["story_key", "thread_id", "event_id", "content_sha256", "source_status", "source_version", "retrieved_at", "source_snapshot_ref", "source_snapshot_sha256"],
           "properties": {
-            "story_key": {"const": "IRON-CURTAIN-PERMIT-POC-CONTRACT"},
-            "thread_id": {"const": "01a11b47-a33e-766f-8276-55bced454714"},
-            "event_id": {"$ref": "#/$defs/nonempty"},
-            "content_sha256": {"$ref": "#/$defs/sha256"},
-            "source_snapshot_ref": {"$ref": "#/$defs/nonempty"},
+            "story_key": {"const": "IRON-CURTAIN-PERMIT-POC-CANARY"},
+            "thread_id": {"const": "01a11b47-a6b6-71f1-9348-0d1e9ed21c5d"},
+            "event_id": {"const": "01a11b47-a6b7-7372-b52f-2d2002ed2081"},
+            "content_sha256": {"const": "9a1cbf7ddff351494331f9da521863fa37d232093c7fe1043bd73541b3645f87"},
+            "source_status": {"const": "WORKING"},
+            "source_version": {"$ref": "#/$defs/nonempty"},
+            "retrieved_at": {"type": "string", "format": "date-time"},
+            "source_snapshot_ref": {"type": "string", "pattern": "^urn:ynm:vertical-story-snapshot:v1:sha256:[0-9a-f]{64}$"},
             "source_snapshot_sha256": {"$ref": "#/$defs/sha256"}
           }
         },
