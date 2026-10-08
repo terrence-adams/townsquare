@@ -1,0 +1,26 @@
+{
+  "schema": "townsquare-host-reader-live-read-v2",
+  "story_ref": "VR-20261008-townsquare-181",
+  "boundary": "CANARY / NON-AUTHORITATIVE; read-only; GET only",
+  "generated_at": "2026-10-08T09:09:23Z",
+  "client_commit": "3a3da968b9359ebaaa8f2459460d50ef98f8bbef",
+  "gateway_base_url": "http://192.168.2.3:18503",
+  "configured_identities": [
+    "cable",
+    "sentinel-one"
+  ],
+  "poll_ok": true,
+  "error": null,
+  "visible_rows": 4,
+  "matched_rows": 0,
+  "rows_skipped_incomplete": 0,
+  "matched_work": [],
+  "requests": [
+    {
+      "method": "GET",
+      "url": "http://192.168.2.3:18503/v1/native/discovery",
+      "http_status": 200
+    }
+  ],
+  "mutating_requests": 0
+}
