@@ -6,6 +6,7 @@
 """Focused tests for the read-only host reader. The gateway is never contacted."""
 import io
 import json
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -150,7 +151,8 @@ class HostReaderTest(unittest.TestCase):
 
     def test_state_and_inbox_written_atomically_with_private_mode(self):
         self.run_poll(Gateway({"open_work": []}))
-        self.assertEqual(oct(self.state.stat().st_mode & 0o777), "0o600")
+        if os.name == "posix":
+            self.assertEqual(oct(self.state.stat().st_mode & 0o777), "0o600")
         self.assertFalse(list(self.state.parent.glob("*.tmp")))
 
     def test_evidence_is_sanitized_and_get_only(self):
