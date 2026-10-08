@@ -212,9 +212,9 @@ def request(path, method="GET", headers=None):
     req = urllib.request.Request(base + path, method=method, headers=headers or {})
     try:
         with urllib.request.urlopen(req, timeout=10) as response:
-            return response.status, dict(response.headers), response.read()
+            return response.status, {key.lower(): value for key, value in response.headers.items()}, response.read()
     except urllib.error.HTTPError as exc:
-        return exc.code, dict(exc.headers), exc.read()
+        return exc.code, {key.lower(): value for key, value in exc.headers.items()}, exc.read()
 before = count()
 checks = {}
 for name, path, expected in (
@@ -223,7 +223,7 @@ for name, path, expected in (
     ("invalid_thread", "/v1/native/threads/bad!id", 404),
 ):
     status, headers, body = request(path); assert status == expected, (name, status, body[:200]); checks[name] = status
-    assert headers.get("Cache-Control") == "no-store"
+    assert headers.get("cache-control") == "no-store"
 status, _, body = request("/health/live", method="POST"); assert status == 405, (status, body); checks["write_rejected"] = status
 status, _, body = request("/health/live?x=1"); assert status == 400, (status, body); checks["query_rejected"] = status
 status, _, body = request("/health/live", headers={"Authorization":"Bearer client"}); assert status == 400, (status, body); checks["client_auth_rejected"] = status
@@ -235,7 +235,7 @@ for values in discovery.get("boards", {}).values(): candidates.extend(values)
 candidates = [value for value in candidates if isinstance(value, str)]
 assert candidates, "discovery returned no readable thread for exact-read acceptance"
 thread_id = candidates[0]
-status, headers, raw = request("/v1/native/threads/" + thread_id); assert status == 200, (status, raw[:200]); assert json.loads(raw).get("thread_id") == thread_id; assert headers.get("Cache-Control") == "no-store"
+status, headers, raw = request("/v1/native/threads/" + thread_id); assert status == 200, (status, raw[:200]); assert json.loads(raw).get("thread_id") == thread_id; assert headers.get("cache-control") == "no-store"
 checks["exact_thread"] = status
 after = count(); assert before == after, (before, after)
 result = {"status":"PASS", "gateway":base, "thread_id":thread_id, "ledger_events_before":before, "ledger_events_after":after, "checks":checks}
