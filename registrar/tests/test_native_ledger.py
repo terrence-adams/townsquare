@@ -9,6 +9,9 @@ from registrar.tests.mvp_fixture import NativeLedgerCase, OPENING
 
 
 class NativeLedgerTests(NativeLedgerCase):
+    def test_unknown_exact_thread_has_specific_not_found_code(self):
+        self.assert_code("not_found", self.ledger.get_thread, "missing", principal="viewer")
+
     def test_authority_fixture_uses_detached_canonical_signature_and_rejects_tamper(self):
         proof = self.authority_proof()
         payload = self.canonical_authority_payload(proof)

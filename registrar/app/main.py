@@ -158,7 +158,7 @@ def invoke_native(fn):
     """Map the native-ledger machine codes without changing legacy errors."""
     try: return fn()
     except NativeLedgerError as exc:
-        status={"forbidden":403,"context_required":428,"conflict":409,"invalid":400,"invalid_transition":409,"stopped":423,"unavailable":503}.get(exc.code,400)
+        status={"forbidden":403,"not_found":404,"context_required":428,"conflict":409,"invalid":400,"invalid_transition":409,"stopped":423,"unavailable":503}.get(exc.code,400)
         detail={"code":exc.code,"message":str(exc)}
         if exc.requirements is not None: detail["requirements"]=exc.requirements
         raise HTTPException(status,detail) from exc

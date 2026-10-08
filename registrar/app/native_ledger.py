@@ -1110,7 +1110,7 @@ class NativeLedger:
                WHERE e.thread_id=? ORDER BY e.thread_ordinal""", (thread_id,)
         ).fetchall()
         if not rows:
-            _fail("invalid", "unknown thread")
+            _fail("not_found", "unknown thread")
         if any(row["sensitivity"] == "RESTRICTED" for row in rows) and "content:restricted:read" not in capabilities:
             _fail("forbidden", "restricted content capability required")
         events = []

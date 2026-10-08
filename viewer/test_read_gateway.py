@@ -6,7 +6,11 @@ import unittest
 from io import BytesIO
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 
+from fastapi.testclient import TestClient
+
+from registrar.tests.app_harness import FreshAppCase
 from viewer import read_gateway as gateway
 
 
@@ -34,6 +38,26 @@ class FakeOpener:
         if callable(result):
             result = result()
         return result
+
+
+class RegistrarOpener:
+    """Adapt urllib requests to the real in-process Registrar HTTP app."""
+
+    def __init__(self, client):
+        self.client = client
+        self.calls = []
+
+    def open(self, request, timeout):
+        parsed = urlsplit(request.full_url)
+        response = self.client.get(
+            parsed.path + ("?" + parsed.query if parsed.query else ""),
+            headers=dict(request.header_items()),
+        )
+        self.calls.append((request, timeout, response.status_code, response.json()))
+        body = BytesIO(response.content)
+        if response.status_code >= 400:
+            raise HTTPError(request.full_url, response.status_code, "upstream status", response.headers, body)
+        return FakeResponse(response.content, response.status_code)
 
 
 def response(payload, status=200):
@@ -149,6 +173,7 @@ class ReadGatewayTests(unittest.TestCase):
         restricted = call(gateway.THREAD_PREFIX + "restricted")
         forbidden = call(gateway.THREAD_PREFIX + "forbidden")
         self.assertEqual(404, restricted[0])
+        self.assertEqual(404, forbidden[0])
         self.assertEqual(restricted[2], forbidden[2])
         self.assertNotIn("never", json.dumps(restricted[2]))
         self.assertEqual(3, len(opener.calls))
@@ -187,6 +212,55 @@ class ReadGatewayTests(unittest.TestCase):
                 rendered = json.dumps(body)
                 self.assertNotIn(secret, rendered)
                 self.assertNotIn("mounted-secret", rendered)
+
+    def test_exact_thread_dependency_failure_remains_sanitized_503(self):
+        url = gateway.LEDGER_ORIGIN + gateway.THREAD_PREFIX + "missing?include_archived=true"
+        private_detail = "dependency-private-detail"
+        cases = {
+            "bad-request": HTTPError(url, 400, private_detail, {}, None),
+            "server": HTTPError(url, 500, private_detail, {}, None),
+            "network": URLError(private_detail),
+        }
+        for name, result in cases.items():
+            with self.subTest(name=name):
+                opener = FakeOpener({url: result})
+                with patch.object(gateway, "_OPENER", opener):
+                    status, _, body = call(gateway.THREAD_PREFIX + "missing")
+                self.assertEqual(503, status)
+                self.assertEqual({"detail": {"code": "unavailable", "message": "read gateway dependency unavailable"}}, body)
+                self.assertNotIn(private_detail, json.dumps(body))
+
+
+class RegistrarToReadGatewayIntegrationTests(FreshAppCase):
+    def credential(self, principal):
+        from registrar.app.auth import create_native_credential
+        from registrar.app.db import connect
+
+        db = connect(self.main_module.DB_PATH)
+        try:
+            return create_native_credential(db, principal)
+        finally:
+            db.close()
+
+    def gateway_call(self, token, thread_id):
+        opener = RegistrarOpener(self.client)
+        with patch.object(gateway, "_token", return_value=token), patch.object(gateway, "_OPENER", opener):
+            public = call(gateway.THREAD_PREFIX + thread_id)
+        return public, opener.calls[0]
+
+    def test_actual_registrar_missing_and_forbidden_responses_normalize_to_identical_404(self):
+        self.main_module = self._boot()
+        self.client = TestClient(self.main_module.app)
+
+        missing, missing_upstream = self.gateway_call(self.credential("viewer"), "definitely-missing")
+        forbidden, forbidden_upstream = self.gateway_call(self.credential("operator-resume"), "definitely-missing")
+
+        self.assertEqual(404, missing_upstream[2])
+        self.assertEqual("not_found", missing_upstream[3]["detail"]["code"])
+        self.assertEqual(403, forbidden_upstream[2])
+        self.assertEqual(404, missing[0])
+        self.assertEqual(404, forbidden[0])
+        self.assertEqual(missing[2], forbidden[2])
 
 
 if __name__ == "__main__":
