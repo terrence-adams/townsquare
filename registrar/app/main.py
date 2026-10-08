@@ -80,7 +80,7 @@ async def operational_error(request,exc):
     if "locked" in message or "busy" in message: return JSONResponse({"detail":str(exc)},status_code=503)
     raise exc
 
-def get_db():
+async def get_db():
     """One SQLite connection per request, closed in `session`'s `finally`.
     SQLite in WAL mode is built for many connections to one file, not one
     connection across many threads -- and FastAPI dispatches every sync
@@ -90,14 +90,18 @@ def get_db():
     Two invariants a future reader should not "tidy away", both ruled on in
     jackie-chan's review of the design note:
 
+    - This remains an async generator. Its synchronous setup/teardown sections
+      run serially on the application event loop, while each sync route body
+      runs on an AnyIO worker. On Windows/CPython 3.14.6, making this a sync
+      generator let unrelated worker threads race SQLite connection open and
+      close; repeated trials then stalled for ~122 seconds in whichever first
+      SQLite operation `connect()` issued. Async setup/teardown removed that
+      lifecycle race without sharing a connection between requests.
     - `connect()` keeps `check_same_thread=False`, and tightening it to the
-      default would be a regression, not defense in depth. A sync
-      yield-dependency's setup, the route body, and its teardown are three
-      separate `run_in_threadpool` calls, and AnyIO guarantees no thread
-      affinity between them -- so one request's connection may legitimately
-      be opened on thread A, queried on thread B and closed on thread C.
-      Sequential handoff, never simultaneous use; the guard would only fire
-      false positives on it.
+      default would be a regression, not defense in depth. One request's
+      connection is opened and closed on the event-loop thread but queried by
+      its sync route on a worker thread. That is sequential handoff, never
+      simultaneous use; the guard would only fire false positives on it.
     - No WAL pin. Per-request open/close means SQLite checkpoints and tears
       down `-wal`/`-shm` during idle gaps; that is cheap at this scale, and a
       process-lifetime connection held open purely to pin the WAL file would

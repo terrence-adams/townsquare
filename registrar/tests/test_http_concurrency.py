@@ -75,41 +75,16 @@ here now, on top of `d9eb5a0`:
 Run pytest from the parent of registrar/ (the repo root), matching every
 other file in this suite -- see the note in app_harness.py.
 
-**Known environment quirk, documented rather than hidden (same convention
-app_harness.py already uses for the Windows open-file-lock note) --
-ronda-rousey, 2026-09-22:** on this dev box (Windows, CPython 3.14.6),
-individual `GET /v1/posts` requests under genuine multi-thread concurrency
-occasionally (observed roughly 1-in-3 trials at 4-6 concurrent readers, not
-tied to a specific reader count) take approximately 122 seconds to complete
-instead of the usual <0.1s, before returning a normal 200 with fully correct
-data. Reproduced two independent ways: via bare and `with`-block `TestClient`,
-and via a real `uvicorn.Server` hit with `httpx.Client` over a real loopback
-socket (which instead raises `httpx.ReadTimeout` at whatever client timeout
-is configured, since there is no TestClient-style indefinite wait on a real
-transport) -- so this is not an artifact of TestClient's in-process ASGI
-portal specifically. It does NOT reproduce in isolated stress tests of either
-SQLite write contention alone or argon2 verification alone (both stay
-sub-second under the same 6-way thread concurrency), so it is not simply
-"SQLite is slow" or "argon2 is slow" -- something in the full FastAPI +
-Starlette + anyio + per-request-`get_db` + argon2 stack, under genuine
-OS-thread concurrency, occasionally stalls for a strikingly consistent
-~122.0-122.1s (reproduced to within tens of milliseconds across unrelated
-runs, which reads as a fixed timeout-and-recover somewhere in the stack, not
-random scheduling jitter) and then always recovers and returns correct data.
-Never once, across dozens of trials at 4/5/6 concurrent readers, did this
-produce wrong data, a dropped request, or a permanent hang -- only latency.
-Reported as a distinct, NOT-yet-root-caused finding (see ronda-rousey's QA
-report, 2026-09-22) rather than silently engineered around: it is explicitly
-out of scope for this file to fix or fully diagnose, since it does not bear
-on the connection-concurrency defect/fix this test category exists to
-regression-test, and per ip-man's own Risk #7 (design doc), a local dev-box
-timing anomaly is not evidence about NAS (Python 3.12, Linux container)
-behavior either way. Parameters below are sized modestly so a typical run
-stays fast, while accepting -- per Addendum A3's own framing, "concurrency
-tests run thread pools over repeated trials: slow" -- that an occasional run
-may take several minutes rather than seconds. No assertion below is weakened
-or skipped on account of this; a trial that stalls and then returns correct
-data still passes, exactly as it should.
+**Resolved liveness regression (2026-10-08):** the former Windows/CPython
+3.14.6 ~122-second concurrent-read stall was captured with all-thread stack
+dumps in `db.connect()`. Removing individual PRAGMAs merely moved the blocked
+stack to the next first database operation, and an idle WAL connection did
+not help. The cause was the sync yield-dependency scheduling connection setup
+and teardown onto unrelated AnyIO worker threads. `get_db` is now an async
+generator: connection lifecycle runs serially on the application event loop,
+while each request still owns its connection and each sync route still runs
+on a worker. Keep this full HTTP concurrency test unweakened: it is the
+regression guard for both exact results and request liveness.
 """
 from __future__ import annotations
 
@@ -136,9 +111,8 @@ class HttpConcurrentPaginationTests(FreshAppCase):
     (20 trials x 5 concurrent readers, ip-man's design note). Post-fix, every
     trial must be exactly correct -- this is not a flaky-tolerance test, a
     single bad trial is a real regression back to shared-connection
-    corruption, not noise to average away. (Latency is a different matter --
-    see the environment-quirk note in the module docstring; a slow-but-
-    correct trial is not a regression.)"""
+    corruption, not noise to average away. The module-level resolved-finding
+    note also makes a renewed multi-minute latency stall a regression."""
 
     NUM_POSTS = 24           # multiple pages per walk at PAGE_LIMIT below
     PAGE_LIMIT = 6            # ceil(24/6) = 4 pages/walk -- forces real cursor traffic, not a single-page happy path
@@ -471,6 +445,9 @@ class NoModuleLevelConnectionTripwireTests(FreshAppCase):
 
     def test_main_module_does_not_import_connect(self):
         self.assertFalse(hasattr(self.main_module, "connect"), "registrar.app.main has a `connect` attribute -- main.py must only ever open a connection through db.py's `session()`, which always closes in a `finally`; importing `connect` directly reopens the possibility of an unclosed or module-scoped connection (Addendum B2)")
+
+    def test_request_database_dependency_is_an_async_generator(self):
+        self.assertTrue(inspect.isasyncgenfunction(self.main_module.get_db), "get_db must remain an async generator so SQLite connection setup/teardown stays serialized on the event loop; a sync yield-dependency recreates the measured Windows/CPython 3.14.6 ~122-second concurrent request stall")
 
     def test_boot_verifies_schema_without_running_ddl(self):
         self.assertTrue(hasattr(self.main_module, "_verify_schema_at_boot"))
