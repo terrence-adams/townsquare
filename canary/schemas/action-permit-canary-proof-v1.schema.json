@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "action-permit-canary-proof-v1.schema.json",
+  "title": "TownSquare action-permit CANARY detached-signature preimage",
+  "type": "object",
+  "$comment": "Service logic constructs the expected object, compares every field, verifies exact canonical bytes and detached signature statelessly, and reserves the nonce only inside the issuance transaction. JSON Schema cannot prove cross-field equality, digest-to-bytes agreement, trusted-manifest custody, time arithmetic, or nonce atomicity.",
+  "additionalProperties": false,
+  "required": ["schema", "authority_class", "canary", "audience", "issuer", "actor", "action", "target", "payload", "mutation", "authority", "governance", "decision_record_sha256", "issued_at", "expires_at", "nonce"],
+  "properties": {
+    "schema": {"const": "townsquare-action-permit-canary-proof-v1"},
+    "authority_class": {"const": "CANARY_TEST"},
+    "canary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["label", "compose_project", "source_commit", "source_tree", "r7_release_id", "r7_input_manifest_sha256", "r7_context_sha256"],
+      "properties": {
+        "label": {"$ref": "#/$defs/nonempty"},
+        "compose_project": {"$ref": "#/$defs/nonempty"},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "source_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "r7_release_id": {"type": "string", "pattern": "^TS-R7-[0-9a-f]{64}$"},
+        "r7_input_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "r7_context_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "audience": {
+      "type": "object", "additionalProperties": false, "required": ["api", "service_id", "endpoint"],
+      "properties": {"api": {"const": "townsquare-canary-ledger-api"}, "service_id": {"const": "townsquare-ledger-v0"}, "endpoint": {"const": "/v1/action-permits"}}
+    },
+    "issuer": {
+      "type": "object", "additionalProperties": false, "required": ["issuer_id", "key_id"],
+      "properties": {"issuer_id": {"$ref": "#/$defs/nonempty"}, "key_id": {"$ref": "#/$defs/nonempty"}}
+    },
+    "actor": {
+      "type": "object", "additionalProperties": false, "required": ["authenticated_principal", "credential_id"],
+      "properties": {"authenticated_principal": {"$ref": "#/$defs/nonempty"}, "credential_id": {"$ref": "#/$defs/nonempty"}}
+    },
+    "action": {"$ref": "#/$defs/action"},
+    "target": {"$ref": "#/$defs/target"},
+    "payload": {"$ref": "#/$defs/payload"},
+    "mutation": {"$ref": "#/$defs/mutation"},
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "evidence_manifest_id", "evidence_manifest_file_sha256", "source_snapshot_ref", "source_snapshot_sha256", "source_version"],
+      "properties": {
+        "kind": {"const": "VERTICAL_STORY"},
+        "evidence_manifest_id": {"$ref": "#/$defs/nonempty"},
+        "evidence_manifest_file_sha256": {"$ref": "#/$defs/sha256"},
+        "source_snapshot_ref": {"type": "string", "pattern": "^urn:ynm:vertical-story-snapshot:v1:sha256:[0-9a-f]{64}$"},
+        "source_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "source_version": {"$ref": "#/$defs/nonempty"}
+      }
+    },
+    "governance": {"$ref": "#/$defs/governance"},
+    "decision_record_sha256": {"$ref": "#/$defs/sha256"},
+    "issued_at": {"$ref": "#/$defs/timestamp"},
+    "expires_at": {"$ref": "#/$defs/timestamp"},
+    "nonce": {"type": "string", "minLength": 24, "maxLength": 256, "pattern": "^[A-Za-z0-9._:/-]+$"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"},
+    "nonempty": {"type": "string", "minLength": 1, "maxLength": 512},
+    "action": {"type": "object", "additionalProperties": false, "required": ["capability"], "properties": {"capability": {"type": "string", "pattern": "^request:[a-z][a-z0-9_-]{0,63}$"}}},
+    "target": {"type": "object", "additionalProperties": false, "required": ["thread_id", "expected_revision"], "properties": {"thread_id": {"type": "string", "minLength": 1, "maxLength": 200}, "expected_revision": {"type": "string", "minLength": 1, "maxLength": 200}}},
+    "payload": {"type": "object", "additionalProperties": false, "required": ["canonicalization_profile", "canonical_payload_sha256"], "properties": {"canonicalization_profile": {"const": "townsquare-json-v1"}, "canonical_payload_sha256": {"$ref": "#/$defs/sha256"}}},
+    "mutation": {"type": "object", "additionalProperties": false, "required": ["operation", "idempotency_key_sha256"], "properties": {"operation": {"const": "post"}, "idempotency_key_sha256": {"$ref": "#/$defs/sha256"}}},
+    "governance": {
+      "type": "object", "additionalProperties": false, "required": ["manifest_id", "manifest_sha256", "bundle_id", "bundle_sha256", "charter_version", "required_items_sha256"],
+      "properties": {"manifest_id": {"$ref": "#/$defs/nonempty"}, "manifest_sha256": {"$ref": "#/$defs/sha256"}, "bundle_id": {"$ref": "#/$defs/nonempty"}, "bundle_sha256": {"$ref": "#/$defs/sha256"}, "charter_version": {"$ref": "#/$defs/nonempty"}, "required_items_sha256": {"$ref": "#/$defs/sha256"}}
+    }
+  }
+}
