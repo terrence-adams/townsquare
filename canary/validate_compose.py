@@ -11,17 +11,18 @@ from pathlib import PurePosixPath
 
 PROJECT = "townsquare-canary-20261007-a"
 ROOT = PurePosixPath("/volume1/Docker/townsquare-canary-20261007-a")
-SERVICES = {"ledger-migrate", "ledger", "registry-migrate", "registry", "viewer"}
+SERVICES = {"ledger-migrate", "ledger", "registry-migrate", "registry", "viewer", "read-gateway"}
 INTERNAL_NETWORK = "canary-internal"
 INGRESS_NETWORK = "canary-ingress"
 IMAGE_REPOSITORIES = {
     "ledger-migrate": "townsquare-canary-ledger", "ledger": "townsquare-canary-ledger",
     "registry-migrate": "townsquare-canary-registry", "registry": "townsquare-canary-registry",
-    "viewer": "townsquare-canary-viewer",
+    "viewer": "townsquare-canary-viewer", "read-gateway": "townsquare-canary-viewer",
 }
 COMMANDS = {
     "ledger-migrate": ["python", "-m", "canary.preexec", "--", "python", "-c", "from registrar.app.db import connect,migrate; import os; d=connect(os.environ['REGISTRAR_DB']); migrate(d); d.close()"],
     "registry-migrate": ["python", "-m", "canary.preexec", "--", "python", "/app/migrate.py"],
+    "read-gateway": ["python", "-m", "canary.preexec", "--", "uvicorn", "read_gateway:app", "--host", "0.0.0.0", "--port", "8503", "--no-server-header"],
 }
 FIXED_IDENTITY = {
     "TOWNSQUARE_RUNTIME_CLASS": "CANARY",
@@ -78,14 +79,19 @@ SERVICE_ENVIRONMENT = {
         "HOME": "/tmp",
         "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json",
     },
+    "read-gateway": {
+        "HOME": "/tmp",
+        "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json",
+    },
 }
-UIDS = {"ledger-migrate": "10001:10001", "ledger": "10001:10001", "registry-migrate": "10003:10003", "registry": "10003:10003", "viewer": "10002:10002"}
+UIDS = {"ledger-migrate": "10001:10001", "ledger": "10001:10001", "registry-migrate": "10003:10003", "registry": "10003:10003", "viewer": "10002:10002", "read-gateway": "10002:10002"}
 EXPECTED_TMPFS = {
     "ledger-migrate": ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"],
     "ledger": ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"],
     "registry-migrate": ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"],
     "registry": ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"],
     "viewer": ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"],
+    "read-gateway": ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"],
 }
 def bind(source, target, read_only=False): return {"type": "bind", "source": str(ROOT / source), "target": target, "read_only": read_only}
 EXPECTED_MOUNTS = {
@@ -94,6 +100,7 @@ EXPECTED_MOUNTS = {
     "registry-migrate": [bind("data/registry", "/var/lib/registry"), bind("config/canary-context-manifest.json", "/run/config/canary-context-manifest.json", True)],
     "registry": [bind("data/registry", "/var/lib/registry"), bind("secrets/registry-api-credential", "/run/secrets/registry-api-credential", True), bind("secrets/registry-audit-credential", "/run/secrets/registry-audit-credential", True), bind("secrets/ledger-to-registry-readiness.registry", "/run/secrets/ledger-to-registry-readiness", True), bind("secrets/registry-to-ledger-readiness.registry", "/run/secrets/registry-to-ledger-readiness", True), bind("config/canary-test-authority.pub", "/run/config/canary-test-authority.pub", True), bind("config/canary-context-manifest.json", "/run/config/canary-context-manifest.json", True)],
     "viewer": [bind("secrets/viewer-native-credential", "/run/secrets/viewer-native-credential", True), bind("config/canary-context-manifest.json", "/run/config/canary-context-manifest.json", True)],
+    "read-gateway": [bind("secrets/viewer-native-credential", "/run/secrets/viewer-native-credential", True), bind("config/canary-context-manifest.json", "/run/config/canary-context-manifest.json", True)],
 }
 FORBIDDEN_KEYS = {
     "privileged", "cap_add", "devices", "network_mode", "extra_hosts", "dns",
@@ -148,7 +155,7 @@ def validate(model: dict[str, object], *, expected_identity: Mapping[str, str]) 
     services = model.get("services")
     networks = model.get("networks")
     if not isinstance(services, dict) or set(services) != SERVICES:
-        raise ComposeValidationError("Compose service set is not the five-service canary allowlist")
+        raise ComposeValidationError("Compose service set is not the six-service canary allowlist")
     if (
         not isinstance(networks, dict)
         or set(networks) != {INTERNAL_NETWORK, INGRESS_NETWORK}
@@ -158,7 +165,7 @@ def validate(model: dict[str, object], *, expected_identity: Mapping[str, str]) 
         raise ComposeValidationError("Compose must define the exact internal and NAS ingress networks")
     if model.get("volumes"):
         raise ComposeValidationError("Docker named volumes are forbidden")
-    expected_ports = {"ledger": {("192.168.2.3", 18790, 8790)}, "viewer": {("192.168.2.3", 18502, 8502)}}
+    expected_ports = {"ledger": {("192.168.2.3", 18790, 8790)}, "viewer": {("192.168.2.3", 18502, 8502)}, "read-gateway": {("192.168.2.3", 18503, 8503)}}
     for name, raw in services.items():
         if not isinstance(raw, dict):
             raise ComposeValidationError(f"service {name} is not an object")
@@ -177,12 +184,12 @@ def validate(model: dict[str, object], *, expected_identity: Mapping[str, str]) 
         if name in {"ledger", "registry", "viewer"} and "command" in raw:
             raise ComposeValidationError(f"steady service {name} command override is forbidden")
         if name in COMMANDS and raw.get("command") != COMMANDS[name]:
-            raise ComposeValidationError(f"migrator {name} command is not exact")
+            raise ComposeValidationError(f"service {name} command is not exact")
         if raw.get("restart") != "no" or raw.get("read_only") is not True or raw.get("pull_policy") != "never":
             raise ComposeValidationError(f"service {name} lacks restart/read-only/pull containment")
         if raw.get("user") != UIDS[name]:
             raise ComposeValidationError(f"service {name} UID is not exact")
-        expected_networks = {INTERNAL_NETWORK, INGRESS_NETWORK} if name in {"ledger", "viewer"} else {INTERNAL_NETWORK}
+        expected_networks = {INTERNAL_NETWORK, INGRESS_NETWORK} if name in {"ledger", "viewer", "read-gateway"} else {INTERNAL_NETWORK}
         actual_networks = raw.get("networks")
         if isinstance(actual_networks, list):
             actual_network_names = set(actual_networks) if all(isinstance(item, str) for item in actual_networks) else set()
@@ -209,7 +216,7 @@ def validate(model: dict[str, object], *, expected_identity: Mapping[str, str]) 
             actual_ports.add((port.get("host_ip"), int(port.get("published")), int(port.get("target"))))
         if actual_ports != expected_ports.get(name, set()):
             raise ComposeValidationError(f"service {name} port mapping is not the exact NAS LAN allowlist")
-        if name not in {"ledger", "viewer"} and raw.get("ports"):
+        if name not in {"ledger", "viewer", "read-gateway"} and raw.get("ports"):
             raise ComposeValidationError(f"service {name} must not publish a host port")
 
 

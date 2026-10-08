@@ -91,6 +91,7 @@ def rendered_compose_fixture():
             "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json",
         },
         "viewer": {"TOWNSQUARE_VIEWER_PROFILE": "native-ledger-mvp", "REGISTRAR_BASE_URL": "http://ledger:8790", "HOME": "/tmp", "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json"},
+        "read-gateway": {"HOME": "/tmp", "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json"},
     }
     def mount(source, target, readonly=False):
         return {"type": "bind", "source": "/volume1/Docker/townsquare-canary-20261007-a/" + source, "target": target, "read_only": readonly}
@@ -116,6 +117,7 @@ def rendered_compose_fixture():
             mount("config/canary-test-authority.pub", "/run/config/canary-test-authority.pub", True),
             mount("config/canary-context-manifest.json", "/run/config/canary-context-manifest.json", True)],
         "viewer": [mount("secrets/viewer-native-credential", "/run/secrets/viewer-native-credential", True), mount("config/canary-context-manifest.json", "/run/config/canary-context-manifest.json", True)],
+        "read-gateway": [mount("secrets/viewer-native-credential", "/run/secrets/viewer-native-credential", True), mount("config/canary-context-manifest.json", "/run/config/canary-context-manifest.json", True)],
     }
     services = {}
     for name, uid, image in (
@@ -124,6 +126,7 @@ def rendered_compose_fixture():
         ("registry-migrate", "10003:10003", "townsquare-canary-registry"),
         ("registry", "10003:10003", "townsquare-canary-registry"),
         ("viewer", "10002:10002", "townsquare-canary-viewer"),
+        ("read-gateway", "10002:10002", "townsquare-canary-viewer"),
     ):
         services[name] = {
             "environment": {**IDENTITY, **environment[name]}, "user": uid,
@@ -134,11 +137,14 @@ def rendered_compose_fixture():
         }
     services["ledger-migrate"]["command"] = ["python", "-m", "canary.preexec", "--", "python", "-c", "from registrar.app.db import connect,migrate; import os; d=connect(os.environ['REGISTRAR_DB']); migrate(d); d.close()"]
     services["registry-migrate"]["command"] = ["python", "-m", "canary.preexec", "--", "python", "/app/migrate.py"]
+    services["read-gateway"]["command"] = ["python", "-m", "canary.preexec", "--", "uvicorn", "read_gateway:app", "--host", "0.0.0.0", "--port", "8503", "--no-server-header"]
     services["ledger"]["networks"] = {"canary-internal": None, "canary-ingress": None}
     services["viewer"]["networks"] = {"canary-internal": None, "canary-ingress": None}
+    services["read-gateway"]["networks"] = {"canary-internal": None, "canary-ingress": None}
     services["viewer"]["tmpfs"] = ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]
     services["ledger"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18790", "target": 8790}]
     services["viewer"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18502", "target": 8502}]
+    services["read-gateway"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18503", "target": 8503}]
     return {
         "name": "townsquare-canary-20261007-a",
         "services": services,
@@ -439,6 +445,7 @@ class StaticContainmentTests(unittest.TestCase):
             ("ledger", ["/tmp:rw", "noexec", "nosuid", "size=32m", "mode=1777"]),
             ("registry", ["/tmp:rw,noexec,nosuid,mode=1777"]),
             ("viewer", ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"]),
+            ("read-gateway", ["/tmp:rw,noexec,nosuid,size=64m,mode=1777"]),
         )
         for service, tmpfs in mutations:
             with self.subTest(service=service, tmpfs=tmpfs):
@@ -494,7 +501,7 @@ class StaticContainmentTests(unittest.TestCase):
     def test_image_build_entrypoint_and_command_contracts_for_every_service(self):
         baseline = rendered_compose_fixture()
         for name, raw in baseline["services"].items():
-            wrong_repository = "townsquare-canary-viewer" if name != "viewer" else "townsquare-canary-ledger"
+            wrong_repository = "townsquare-canary-ledger" if name in {"viewer", "read-gateway"} else "townsquare-canary-viewer"
             for key, value in (
                 ("image", raw["image"].split(":")[0] + ":" + "c" * 40),
                 ("image", wrong_repository + ":" + "a" * 40),
@@ -511,6 +518,11 @@ class StaticContainmentTests(unittest.TestCase):
                 if command is None: candidate["services"][name].pop("command")
                 else: candidate["services"][name]["command"] = command
                 with self.assertRaises(ComposeValidationError): validate(candidate, expected_identity=IDENTITY)
+        for command in (None, ["uvicorn", "read_gateway:app"], baseline["services"]["read-gateway"]["command"][:-1]):
+            candidate = copy.deepcopy(baseline)
+            if command is None: candidate["services"]["read-gateway"].pop("command")
+            else: candidate["services"]["read-gateway"]["command"] = command
+            with self.assertRaises(ComposeValidationError): validate(candidate, expected_identity=IDENTITY)
 
     def test_cli_requires_independent_identity_file_and_rejects_bad_identity_files(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -563,6 +575,7 @@ class StaticContainmentTests(unittest.TestCase):
         self.assertIn("networks: [canary-internal, canary-ingress]", compose)
         self.assertIn('ports: ["192.168.2.3:18790:8790"]', compose)
         self.assertIn('ports: ["192.168.2.3:18502:8502"]', compose)
+        self.assertIn('ports: ["192.168.2.3:18503:8503"]', compose)
         for forbidden in ("privileged:", "cap_add:", "network_mode:", "extra_hosts:", "devices:", "docker.sock", "restart: unless-stopped"):
             self.assertNotIn(forbidden, compose)
         self.assertIn("REGISTRY_AUDIT_DELIVERY_MODE: manual", compose)
@@ -573,7 +586,7 @@ class StaticContainmentTests(unittest.TestCase):
     def test_consumer_secret_mount_matrix_and_identity_only_env_file(self):
         compose = (ROOT / "canary/compose.canary.yml").read_text(encoding="utf-8")
         boundaries = {}
-        names = ["ledger-migrate", "ledger", "registry-migrate", "registry", "viewer"]
+        names = ["ledger-migrate", "ledger", "registry-migrate", "registry", "viewer", "read-gateway"]
         for index, name in enumerate(names):
             start = compose.index(f"  {name}:\n")
             later = [compose.find(f"  {other}:\n", start + 1) for other in names[index + 1:]]
@@ -582,8 +595,10 @@ class StaticContainmentTests(unittest.TestCase):
         self.assertNotIn("/secrets/", boundaries["ledger-migrate"])
         self.assertNotIn("/secrets/", boundaries["registry-migrate"])
         self.assertEqual(2, boundaries["viewer"].count("/secrets/viewer-native-credential"))
+        self.assertEqual(2, boundaries["read-gateway"].count("/secrets/viewer-native-credential"))
         for forbidden in ("token-pepper", "cursor-signing", "receipt-hash", "registry-api", "registry-audit", "readiness"):
             self.assertNotIn(forbidden, boundaries["viewer"])
+            self.assertNotIn(forbidden, boundaries["read-gateway"])
         for required in ("ledger-token-pepper", "ledger-cursor-signing-key", "ledger-receipt-hash-key", "ledger-to-registry-readiness.ledger", "registry-to-ledger-readiness.ledger"):
             self.assertIn(required, boundaries["ledger"])
         self.assertNotIn("viewer-native-credential", boundaries["ledger"])

@@ -162,6 +162,29 @@ services:
       retries: 3
       start_period: 45s
 
+  read-gateway:
+    <<: *hardened
+    image: "townsquare-canary-viewer:${TOWNSQUARE_SOURCE_COMMIT:?required}"
+    user: "10002:10002"
+    command: ["python", "-m", "canary.preexec", "--", "uvicorn", "read_gateway:app", "--host", "0.0.0.0", "--port", "8503", "--no-server-header"]
+    networks: [canary-internal, canary-ingress]
+    depends_on:
+      ledger: {condition: service_healthy}
+    environment:
+      <<: *identity
+      HOME: /tmp
+    volumes:
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/secrets/viewer-native-credential, target: /run/secrets/viewer-native-credential, read_only: true}
+      - {type: bind, source: /volume1/Docker/townsquare-canary-20261007-a/config/canary-context-manifest.json, target: /run/config/canary-context-manifest.json, read_only: true}
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=32m,mode=1777"]
+    ports: ["192.168.2.3:18503:8503"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8503/health/ready',timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
 networks:
   canary-internal:
     name: townsquare-canary-20261007-a-internal

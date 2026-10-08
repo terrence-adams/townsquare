@@ -36,10 +36,10 @@ WORKDIR /app
 COPY --chown=root:root r7-identity.json /opt/townsquare/release/r7-identity.json
 COPY --chown=root:root viewer/.streamlit /app/.streamlit
 COPY --chown=root:root viewer/app_pages /app/app_pages
-COPY --chown=root:root viewer/registrar_client.py viewer/views.py viewer/streamlit_app.py /app/
+COPY --chown=root:root viewer/registrar_client.py viewer/read_gateway.py viewer/views.py viewer/streamlit_app.py /app/
 COPY --chown=root:root shared /app/shared
 COPY --chown=root:root canary/__init__.py canary/preexec.py /app/canary/
 RUN chmod 0444 /opt/townsquare/release/r7-identity.json && find /app /opt/townsquare -type f -exec chmod a-w {} +
 USER 10002:10002
-EXPOSE 8502
+EXPOSE 8502 8503
 CMD ["python","-m","canary.preexec","--","streamlit","run","streamlit_app.py"]

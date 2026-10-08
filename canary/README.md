@@ -52,5 +52,5 @@ docker compose --project-name townsquare-canary-20261007-a \
   ps --all
 ```
 
-Verify the NAS LAN listeners on ports `18790` and `18502` are closed. Do not
+Verify the NAS LAN listeners on ports `18790`, `18502`, and `18503` are closed. Do not
 run `down`, remove, prune, rename, archive, restore, or delete.

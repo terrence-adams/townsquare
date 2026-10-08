@@ -17,7 +17,7 @@
     "project":"townsquare-canary-20261007-a",
     "network":"townsquare-canary-20261007-a-internal",
     "root":"/volume1/Docker/townsquare-canary-20261007-a",
-    "loopback_ports":[18502,18790]
+    "loopback_ports":[18502,18503,18790]
   },
   "r6_provenance":[
     {"locator":"source-provenance/fresh-canary-20261007-a-review-r6.zip","sha256":"8c0f517033b08da5816404a55f50f1dcfae35f811ede9743e584e8bb590bd2c9","use":"source-provenance-only"},
