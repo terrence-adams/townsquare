@@ -128,9 +128,13 @@ class HostReaderTest(unittest.TestCase):
 
     def test_transient_thread_failure_retries_without_second_entry(self):
         discovery = {"open_work": [row("T-1", "e1", "cable")]}
-        self.assertTrue(self.run_poll(Gateway(discovery, {"T-1": b"not json"}))["ok"])
+        result = self.run_poll(Gateway(discovery, {"T-1": b"not json"}))
+        self.assertFalse(result["ok"])
+        self.assertIn("UNKNOWN", self.inbox.read_text())
         self.assertIsNone(load_state(self.state)["items"][0]["detail"])
-        self.assertEqual(self.run_poll(Gateway(discovery, {"T-1": {"events": [{}]}}))["added"], [])
+        result = self.run_poll(Gateway(discovery, {"T-1": {"events": [{}]}}))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["added"], [])
         items = load_state(self.state)["items"]
         self.assertEqual((len(items), items[0]["detail"]), (1, "ok (1 events)"))
 
@@ -155,6 +159,7 @@ class HostReaderTest(unittest.TestCase):
         text = json.dumps(record)
         self.assertNotIn("SECRET", text)
         self.assertNotIn(str(self.state), text)
+        self.assertEqual(record["story_ref"], "VR-20261008-townsquare-181")
         self.assertEqual(record["mutating_requests"], 0)
         self.assertEqual({r["method"] for r in record["requests"]}, {"GET"})
 

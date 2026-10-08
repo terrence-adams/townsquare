@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from urllib.parse import quote
 DISCOVERY_PATH = "/v1/native/discovery"
 THREAD_PREFIX = "/v1/native/threads/"
 STATE_SCHEMA = "townsquare-host-reader-state-v1"
+STORY_REF = "VR-20261008-townsquare-181"
 EVIDENCE_SCHEMA = "townsquare-host-reader-live-read-v2"
 # Mirrors the read gateway's thread-id grammar; checked before building a URL.
 THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
@@ -60,6 +62,8 @@ def get_json(url, timeout, opener=urllib.request.urlopen):
             status = int(response.status)
             raw = response.read()
     except Exception as exc:  # HTTPError, URLError, timeout, reset
+        if isinstance(exc, urllib.error.HTTPError):
+            exc.close()
         raise ReaderError(f"gateway unreachable or refused: {type(exc).__name__}: {exc}",
                           getattr(exc, "code", None)) from None
     if not 200 <= status < 300:
@@ -155,6 +159,7 @@ def poll(base_url, identities, state_file, inbox_file, timeout=10.0, opener=urll
     """One poll. Returns a result dict; raises LocalStateError/OSError for local faults."""
     state = load_state(state_file)
     base = base_url.rstrip("/")
+    thread_errors = []
     requests, result = [], {"ok": False, "error": None, "visible": 0, "matched": [], "added": [], "skipped": 0}
 
     def get(url):
@@ -181,14 +186,20 @@ def poll(base_url, identities, state_file, inbox_file, timeout=10.0, opener=urll
                 state["seen_event_ids"].append(row["event_id"])
                 state["items"].append({**row, "first_seen_at": now_iso(), "detail": None})
                 result["added"].append(row["event_id"])
-        for item in state["items"]:  # exact-thread GET; a transient failure retries next poll
+        for item in state["items"]:  # exact-thread GET; a failed read keeps the item and retries next poll
             if item["detail"] is None:
                 try:
                     events = get(thread_url(base, item["thread_id"])).get("events")
-                    item["detail"] = f"ok ({len(events)} events)" if isinstance(events, list) else None
+                    if not isinstance(events, list):
+                        raise ReaderError(f"thread {item['thread_id']} response had no events list")
+                    item["detail"] = f"ok ({len(events)} events)"
                 except ReaderError as exc:
                     if exc.status == 404:
                         item["detail"] = "not_found"
+                    else:
+                        thread_errors.append(f"thread {item['thread_id']}: {exc}")
+        if thread_errors:
+            raise ReaderError("; ".join(thread_errors))
         result["ok"] = True
         state["last_poll"] = {"at": now_iso(), "ok": True, "error": None}
     except ReaderError as exc:
@@ -205,6 +216,7 @@ def evidence_record(result, base_url, identities, client_commit):
     """Identifiers, endpoints and HTTP results only: no content, headers or paths."""
     return {
         "schema": EVIDENCE_SCHEMA,
+        "story_ref": STORY_REF,
         "boundary": "CANARY / NON-AUTHORITATIVE; read-only; GET only",
         "generated_at": now_iso(),
         "client_commit": client_commit,
