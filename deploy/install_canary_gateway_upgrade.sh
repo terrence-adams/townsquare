@@ -36,7 +36,7 @@ rollback() {
 trap rollback EXIT HUP INT TERM
 
 test -x "$PYTHON"
-test -x "$DOCKER"
+"$DOCKER" --version >/dev/null
 test -f "$BUNDLE"
 test "$(sha256sum "$BUNDLE" | awk '{print $1}')" = "$EXPECTED_BUNDLE_SHA256"
 test "$(sha256sum "$0" | awk '{print $1}')" = "$EXPECTED_INSTALLER_SHA256"
