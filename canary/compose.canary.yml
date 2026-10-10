@@ -64,7 +64,7 @@ services:
       TOWNSQUARE_REGISTRY_AUDIT_CONTRACT: registry-ledger-audit-v1
       REGISTRY_INTEGRATION_ENABLED: "true"
       REGISTRY_SERVICE_ID: townsquare-registry-v0
-      REGISTRY_SCHEMA_HEAD: "2"
+      REGISTRY_SCHEMA_HEAD: "4"
       REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
       REGISTRY_READINESS_URL: http://registry:8789/health/ready
     volumes:
@@ -117,7 +117,7 @@ services:
       REGISTRY_AUDIT_DELIVERY_MODE: manual
       REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
       REGISTRY_SERVICE_ID: townsquare-registry-v0
-      REGISTRY_SCHEMA_HEAD: "2"
+      REGISTRY_SCHEMA_HEAD: "4"
       REGISTRY_LEDGER_SERVICE_ID: townsquare-ledger-v0
       REGISTRY_LEDGER_SCHEMA_HEAD: "14"
       REGISTRY_LEDGER_AUDIT_CONTRACT: registry-ledger-audit-v1

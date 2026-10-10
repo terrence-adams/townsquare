@@ -4,7 +4,7 @@ It deliberately uses only stdlib.  Ledger publication is asynchronous and
 idempotent through the outbox; this service has no foreign key or transaction
 against the Ledger database.
 """
-import hashlib,json,os,sqlite3,sys,time,uuid
+import hashlib,json,os,re,sqlite3,sys,time,uuid
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from shared.canary_authority import CanaryAuthorityError,CanaryProofVerifier,FileNonceStore,canonical_bytes,decode_proof,decode_signature,load_r7_context
@@ -27,10 +27,10 @@ LEDGER_READINESS_TOKEN_FILE=os.environ.get("LEDGER_READINESS_TOKEN_FILE","/run/s
 CANARY_NONCE_DIRECTORY=os.environ.get("REGISTRY_CANARY_NONCE_DIRECTORY","/var/lib/registry/canary-nonces")
 def connect():
  d=sqlite3.connect(DB,timeout=5,isolation_level=None); d.row_factory=sqlite3.Row; d.execute("PRAGMA foreign_keys=ON"); d.execute("PRAGMA journal_mode=WAL"); d.execute("PRAGMA synchronous=FULL"); d.execute("PRAGMA busy_timeout=5000")
- if d.execute("PRAGMA application_id").fetchone()[0] != 1414746695 or d.execute("PRAGMA user_version").fetchone()[0] != 2:
+ if d.execute("PRAGMA application_id").fetchone()[0] != 1414746695 or d.execute("PRAGMA user_version").fetchone()[0] != 4:
   d.close(); raise RuntimeError('Registry application_id/user_version mismatch')
  return d
-SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
+SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=4; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
 def compatible():
  if os.environ.get('REGISTRY_SERVICE_ID',SERVICE_ID)!=SERVICE_ID:return False
  if os.environ.get('REGISTRY_SCHEMA_HEAD',str(SCHEMA_VERSION))!=str(SCHEMA_VERSION):return False
@@ -107,6 +107,70 @@ def require_canary_test_proof(headers,body,action,object_id):
   audience='townsquare-canary-registry-api',service_id=SERVICE_ID,action=action,object_id=object_id,
   context_sha256=hashlib.sha256(canonical_bytes(body)).hexdigest(),
  )
+_PROVIDER=re.compile(r'^[a-z0-9._-]{1,64}$')
+_SESSION_STATES={'STARTING','ACTIVE','IDLE','ENDED','LOST'}
+def _utc(): return time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
+def _canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'))
+def _nonempty_string(value,limit=512):
+ return isinstance(value,str) and 0<len(value)<=limit
+def _provider_session_id(value):
+ return _nonempty_string(value) and all(0x20 <= ord(char) <= 0x7e for char in value)
+def _optional_string(value,limit=512):
+ return value is None or _nonempty_string(value,limit)
+def _redacted_session(row):
+ return {name:row[name] for name in ('session_uuid','agent_id','provider','seat_or_host','runtime','model','status','started_utc','last_seen_utc','ended_utc','work_ref','revision','updated_utc')}
+def _session_request_valid(body,action):
+ if not isinstance(body,dict): return False
+ if action=='register':
+  if not _nonempty_string(body.get('agent_id'),128) or not isinstance(body.get('provider'),str) or not _PROVIDER.fullmatch(body['provider']): return False
+  if not _provider_session_id(body.get('provider_session_id')) or body.get('initial_status') not in ('STARTING','ACTIVE'): return False
+  return all(_optional_string(body.get(name)) for name in ('seat_or_host','runtime','model','work_ref'))
+ if action=='heartbeat': return body.get('status') in ('ACTIVE','IDLE') and set(body) <= {'status','session_uuid'}
+ return body.get('terminal_status') in ('ENDED','LOST') and set(body) <= {'terminal_status','session_uuid'}
+def _session_outbox_body(row,action,when):
+ return {'kind':'session_lifecycle','session_uuid':row['session_uuid'],'agent_id':row['agent_id'],'provider':row['provider'],'status':row['status'],'work_ref':row['work_ref'],'action':action,'committed_utc':when}
+def mutate_session(db,principal,key,body,action):
+ """Apply one S1 lifecycle mutation in the Registry's existing transaction boundary."""
+ if not _session_request_valid(body,action): return 400,{'detail':'invalid session lifecycle request'}
+ request_hash=hashlib.sha256(_canonical(body).encode()).hexdigest()
+ db.execute('BEGIN IMMEDIATE')
+ old=db.execute('SELECT * FROM requests WHERE principal=? AND idem_key=?',(principal,key)).fetchone()
+ if old:
+  if old['request_hash']!=request_hash: db.rollback(); return 409,{'detail':'idempotency key reused with different request'}
+  db.rollback(); return old['response_status'],json.loads(old['response_json'])
+ try:
+  now=_utc()
+  if action=='register':
+   agent=db.execute('SELECT active FROM agents WHERE agent_id=?',(body['agent_id'],)).fetchone()
+   if not agent or not agent['active']: db.rollback(); return 409,{'detail':'session registration conflict'}
+   if db.execute('SELECT 1 FROM sessions WHERE provider=? AND provider_session_id=?',(body['provider'],body['provider_session_id'])).fetchone(): db.rollback(); return 409,{'detail':'session registration conflict'}
+   session_uuid=str(uuid.uuid4()); status=body['initial_status']
+   db.execute('INSERT INTO sessions(session_uuid,agent_id,provider,provider_session_id,seat_or_host,runtime,model,status,started_utc,last_seen_utc,ended_utc,work_ref,revision,updated_utc) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(session_uuid,body['agent_id'],body['provider'],body['provider_session_id'],body.get('seat_or_host'),body.get('runtime'),body.get('model'),status,now,now,None,body.get('work_ref'),1,now))
+   row=db.execute('SELECT * FROM sessions WHERE session_uuid=?',(session_uuid,)).fetchone()
+  else:
+   session_uuid=body.get('session_uuid')
+   row=db.execute('SELECT * FROM sessions WHERE session_uuid=?',(session_uuid,)).fetchone()
+   if not row or row['status'] in ('ENDED','LOST'): db.rollback(); return 409,{'detail':'session lifecycle conflict'}
+   if action=='heartbeat':
+    wanted=body['status']; allowed=(row['status']=='STARTING' and wanted=='ACTIVE') or (row['status']=='ACTIVE' and wanted in ('ACTIVE','IDLE')) or (row['status']=='IDLE' and wanted in ('ACTIVE','IDLE'))
+    if not allowed: db.rollback(); return 409,{'detail':'session lifecycle conflict'}
+    db.execute('UPDATE sessions SET status=?,last_seen_utc=?,revision=revision+1,updated_utc=? WHERE session_uuid=?',(wanted,now,now,session_uuid))
+   else:
+    wanted=body['terminal_status']; action='mark_lost' if wanted=='LOST' else 'terminate'
+    db.execute('UPDATE sessions SET status=?,last_seen_utc=?,ended_utc=?,revision=revision+1,updated_utc=? WHERE session_uuid=?',(wanted,now,now,now,session_uuid))
+   row=db.execute('SELECT * FROM sessions WHERE session_uuid=?',(session_uuid,)).fetchone()
+  event_id=str(uuid.uuid4()); audit_id=str(uuid.uuid4())
+  private_body=dict(_redacted_session(row)); private_body['provider_session_id']=body.get('provider_session_id',row['provider_session_id'])
+  db.execute('INSERT INTO session_journal(event_id,session_uuid,agent_id,action,body_json,committed_utc) VALUES(?,?,?,?,?,?)',(event_id,row['session_uuid'],row['agent_id'],action,_canonical(private_body),now))
+  audit_body=_session_outbox_body(row,action,now)
+  db.execute('INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES(?,?,?,?,?)',(audit_id,row['agent_id'],'session_'+action,_canonical(audit_body),now))
+  db.execute('INSERT INTO audit_outbox(event_id) VALUES(?)',(audit_id,))
+  response={'event_id':event_id,**_redacted_session(row),'action':action}
+  response_status=201 if action=='register' else 200
+  db.execute('INSERT INTO requests(principal,idem_key,request_hash,response_json,response_status) VALUES(?,?,?,?,?)',(principal,key,request_hash,_canonical(response),response_status))
+  db.commit(); return response_status,response
+ except Exception:
+  db.rollback(); raise
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
  def reply(self,status,value):
@@ -133,12 +197,31 @@ class Handler(BaseHTTPRequestHandler):
    return self.reply(503,{"ok":False})
   self.reply(404,{"detail":"not found"})
  def do_POST(self):
-  if self.path!="/v1/agents":return self.reply(404,{"detail":"not found"})
+  session_match=re.fullmatch(r'/v1/sessions/([0-9a-f-]{36})/(heartbeat|terminate)',self.path)
+  if self.path!="/v1/agents" and not session_match and self.path!='/v1/sessions':return self.reply(404,{"detail":"not found"})
   if self.headers.get("Authorization")!="Bearer "+token():return self.reply(401,{"detail":"unauthorized"})
   key=self.headers.get("Idempotency-Key"); principal=self.headers.get("X-Registry-Principal")
   if not key or not principal:return self.reply(400,{"detail":"Idempotency-Key and X-Registry-Principal required"})
   try: body=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))))
   except Exception:return self.reply(400,{"detail":"invalid json"})
+  if self.path=='/v1/sessions':
+   try: require_canary_test_proof(self.headers,body,'registry:session:register',body.get('agent_id',''))
+   except CanaryAuthorityError as e:return self.reply(403,{"detail":str(e)})
+   d=connect()
+   try:
+    status,out=mutate_session(d,principal,key,body,'register'); return self.reply(status,out)
+   except Exception:return self.reply(503,{"detail":"session lifecycle unavailable"})
+   finally:d.close()
+  if session_match:
+   session_uuid,action=session_match.groups()
+   try: require_canary_test_proof(self.headers,body,'registry:session:'+action,session_uuid)
+   except CanaryAuthorityError as e:return self.reply(403,{"detail":str(e)})
+   body=dict(body);body['session_uuid']=session_uuid
+   d=connect()
+   try:
+    status,out=mutate_session(d,principal,key,body,action); return self.reply(status,out)
+   except Exception:return self.reply(503,{"detail":"session lifecycle unavailable"})
+   finally:d.close()
   agent=body.get("agent_id"); action=body.get("action")
   if not isinstance(agent,str) or action not in ("register","retire"):return self.reply(400,{"detail":"agent_id and action required"})
   try:require_canary_test_proof(self.headers,body,'registry:'+action,agent)
@@ -151,7 +234,7 @@ class Handler(BaseHTTPRequestHandler):
     d.rollback();return self.reply(200,json.loads(old['response_json']))
    current=d.execute("SELECT revision FROM agents WHERE agent_id=?",(agent,)).fetchone(); rev=(current['revision'] if current else 0)+1; event=str(uuid.uuid4());now=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
    d.execute("INSERT INTO agents VALUES(?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET body_json=excluded.body_json,revision=excluded.revision,active=excluded.active,updated_utc=excluded.updated_utc",(agent,canonical,rev,int(action=="register"),now))
-   d.execute("INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES(?,?,?,?,?)",(event,agent,action,canonical,now));d.execute("INSERT INTO audit_outbox(event_id) VALUES(?)",(event,)); out={"event_id":event,"agent_id":agent,"revision":rev,"action":action};d.execute("INSERT INTO requests VALUES(?,?,?,?)",(principal,key,h,json.dumps(out,sort_keys=True)));d.commit();self.reply(201,out)
+   d.execute("INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc) VALUES(?,?,?,?,?)",(event,agent,action,canonical,now));d.execute("INSERT INTO audit_outbox(event_id) VALUES(?)",(event,)); out={"event_id":event,"agent_id":agent,"revision":rev,"action":action};d.execute("INSERT INTO requests(principal,idem_key,request_hash,response_json) VALUES(?,?,?,?)",(principal,key,h,json.dumps(out,sort_keys=True)));d.commit();self.reply(201,out)
   except Exception as e:d.rollback();self.reply(503,{"detail":str(e)})
   finally:d.close()
 def main():
