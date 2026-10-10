@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import secrets
 import sqlite3
 import sys
 import tempfile
@@ -52,6 +53,7 @@ class SessionRegistryS1Tests(unittest.TestCase):
         cls.app = load_app()
 
     def setUp(self):
+        self.locator = secrets.token_urlsafe(48)
         self.db = sqlite3.connect(":memory:")
         self.db.row_factory = sqlite3.Row
         self.db.executescript((ROOT / "registry" / "schema.sql").read_text(encoding="utf-8"))
@@ -63,16 +65,16 @@ class SessionRegistryS1Tests(unittest.TestCase):
         self.db.close()
 
     def register(self, key="register-1", **extra):
-        body = {"agent_id": "active-agent", "provider": "vendor", "provider_session_id": "private-locator", "initial_status": "STARTING", "work_ref": "VR-test"}
+        body = {"agent_id": "active-agent", "provider": "vendor", "provider_session_id": self.locator, "initial_status": "STARTING", "work_ref": "VR-test"}
         body.update(extra)
         return self.app.mutate_session(self.db, "caller", key, body, "register")
 
     def counts(self):
         return tuple(self.db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in ("sessions", "session_journal", "audit_outbox"))
 
-    def register_in_state(self, state, key, locator):
+    def register_in_state(self, state, key):
         initial = "ACTIVE" if state == "ACTIVE" else "STARTING"
-        _, registered = self.register(key, provider_session_id=locator, initial_status=initial)
+        _, registered = self.register(key, provider_session_id=secrets.token_urlsafe(48), initial_status=initial)
         if state == "IDLE":
             status, registered = self.app.mutate_session(self.db, "caller", f"{key}-to-active", {"session_uuid": registered["session_uuid"], "status": "ACTIVE"}, "heartbeat")
             self.assertEqual(200, status)
@@ -92,10 +94,10 @@ class SessionRegistryS1Tests(unittest.TestCase):
         self.assertNotIn("provider_session_id", response)
         self.assertEqual((1, 1, 1), self.counts())
         audit_body = self.db.execute("SELECT body_json FROM journal WHERE action='session_register'").fetchone()[0]
-        self.assertNotIn("private-locator", audit_body)
+        self.assertFalse(self.locator in audit_body, "generated locator leaked into the audit journal")
 
     def test_registration_rejects_non_printable_or_oversized_private_locator_without_writes(self):
-        for locator in ("private\nlocator", "x" * 513):
+        for locator in (secrets.token_urlsafe(24) + "\n", secrets.token_urlsafe(385)):
             status, _ = self.register(provider_session_id=locator)
             self.assertEqual(400, status)
             self.assertEqual((0, 0, 0), self.counts())
@@ -132,7 +134,7 @@ class SessionRegistryS1Tests(unittest.TestCase):
             ("IDLE", "heartbeat", "ACTIVE", "ACTIVE"),
         )
         for index, (initial, action, requested, expected) in enumerate(cases):
-            registered = self.register_in_state(initial, f"register-{index}", f"locator-{index}")
+            registered = self.register_in_state(initial, f"register-{index}")
             body = {"session_uuid": registered["session_uuid"], "status": requested}
             status, response = self.app.mutate_session(self.db, "caller", f"transition-{index}", body, action)
             self.assertEqual(200, status)
@@ -144,7 +146,7 @@ class SessionRegistryS1Tests(unittest.TestCase):
         for index, initial in enumerate(("STARTING", "ACTIVE", "IDLE")):
             for terminal in ("ENDED", "LOST"):
                 key = f"{initial}-{terminal}"
-                registered = self.register_in_state(initial, f"register-{key}", f"locator-{key}")
+                registered = self.register_in_state(initial, f"register-{key}")
                 status, terminal_response = self.app.mutate_session(self.db, "caller", f"terminate-{key}", {"session_uuid": registered["session_uuid"], "terminal_status": terminal}, "terminate")
                 self.assertEqual(200, status)
                 self.assertEqual(terminal, terminal_response["status"])

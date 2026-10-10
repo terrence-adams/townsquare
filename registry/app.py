@@ -4,9 +4,10 @@ It deliberately uses only stdlib.  Ledger publication is asynchronous and
 idempotent through the outbox; this service has no foreign key or transaction
 against the Ledger database.
 """
-import hashlib,json,os,re,sqlite3,sys,time,uuid
+import hashlib,hmac,json,os,re,sqlite3,sys,time,uuid
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 from shared.canary_authority import CanaryAuthorityError,CanaryProofVerifier,FileNonceStore,canonical_bytes,decode_proof,decode_signature,load_r7_context
 from shared.canary_identity import compatible_identity,require_canary_identity
 from shared.registry_outbox import acknowledge_delivery
@@ -42,6 +43,7 @@ def compatible():
   d=connect(); row=d.execute('SELECT max(version) FROM registry_migrations').fetchone(); d.close(); return row and row[0]==SCHEMA_VERSION
  except Exception:return False
 def token(): return Path(TOKEN_FILE).read_text(encoding="utf-8").strip()
+def operator_token(): return os.environ.get('REGISTRY_OPERATOR_TOKEN','')
 def ledger_audit_token():
  value=Path(LEDGER_AUDIT_TOKEN_FILE).read_text(encoding="utf-8").strip()
  if not value: raise RuntimeError('registry audit credential is empty')
@@ -119,6 +121,12 @@ def _optional_string(value,limit=512):
  return value is None or _nonempty_string(value,limit)
 def _redacted_session(row):
  return {name:row[name] for name in ('session_uuid','agent_id','provider','seat_or_host','runtime','model','status','started_utc','last_seen_utc','ended_utc','work_ref','revision','updated_utc')}
+def _redacted_history(row):
+ body=json.loads(row['body_json']); body.pop('provider_session_id',None)
+ return {'seq':row['seq'],'event_id':row['event_id'],'session_uuid':row['session_uuid'],'agent_id':row['agent_id'],'action':row['action'],'body':body,'committed_utc':row['committed_utc']}
+def _operator_authorized(headers):
+ configured=operator_token(); provided=headers.get('X-Registry-Operator-Token','')
+ return bool(configured) and hmac.compare_digest(provided.encode(),configured.encode())
 def _session_request_valid(body,action):
  if not isinstance(body,dict): return False
  if action=='register':
@@ -173,8 +181,8 @@ def mutate_session(db,principal,key,body,action):
   db.rollback(); raise
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*args):pass
- def reply(self,status,value):
-  data=json.dumps(value,sort_keys=True).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+ def reply(self,status,value,no_store=False):
+  data=json.dumps(value,sort_keys=True).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store') if no_store else None;self.end_headers();self.wfile.write(data)
  def do_GET(self):
   if self.path=="/health/live":return self.reply(200,{"ok":True})
   if self.path=="/health/ready":
@@ -195,6 +203,24 @@ class Handler(BaseHTTPRequestHandler):
    if self.client_address[0] not in ('127.0.0.1','::1'): return self.reply(404,{"detail":"not found"})
    if compatible() and peer_ready().get('compatible'): return self.reply(200,{"ok":True})
    return self.reply(503,{"ok":False})
+  session_match=re.fullmatch(r'/v1/sessions/([0-9a-f-]{36})(?:/(history|provider-locator))?',urlsplit(self.path).path)
+  if session_match:
+   if self.headers.get('Authorization')!='Bearer '+token(): return self.reply(401,{'detail':'unauthorized'})
+   session_uuid,view=session_match.groups(); sensitive=view=='provider-locator'
+   if sensitive and not _operator_authorized(self.headers): return self.reply(404,{'detail':'not found'},True)
+   d=None
+   try:
+    d=connect()
+    row=d.execute('SELECT * FROM sessions WHERE session_uuid=?',(session_uuid,)).fetchone()
+    if not row:return self.reply(404,{'detail':'not found'},sensitive)
+    if sensitive:return self.reply(200,{'session_uuid':row['session_uuid'],'provider':row['provider'],'provider_session_id':row['provider_session_id']},True)
+    if view=='history':
+     events=[_redacted_history(event) for event in d.execute('SELECT * FROM session_journal WHERE session_uuid=? ORDER BY seq',(session_uuid,))]
+     return self.reply(200,{'session_uuid':session_uuid,'events':events})
+    return self.reply(200,_redacted_session(row))
+   except Exception:return self.reply(503,{'detail':'session lookup unavailable'},sensitive)
+   finally:
+    if d:d.close()
   self.reply(404,{"detail":"not found"})
  def do_POST(self):
   session_match=re.fullmatch(r'/v1/sessions/([0-9a-f-]{36})/(heartbeat|terminate)',self.path)
