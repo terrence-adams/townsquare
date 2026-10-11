@@ -163,6 +163,8 @@ services:
     environment:
       <<: *registry-r7-environment
       REGISTRY_DB: /var/lib/registry/registry.db
+      TOWNSQUARE_RELEASE_START_UUID: "${TOWNSQUARE_RELEASE_START_UUID:?set fresh shared Registry release-start UUID}"
+      REGISTRY_AUDIT_INTERVAL_SECONDS: "30"
       REGISTRY_TOKEN_FILE: /run/secrets/registry_api_token
       REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
       REGISTRY_SERVICE_ID: townsquare-registry-v0
@@ -209,6 +211,7 @@ services:
     environment:
       <<: *registry-r7-environment
       REGISTRY_DB: /var/lib/registry/registry.db
+      TOWNSQUARE_RELEASE_START_UUID: "${TOWNSQUARE_RELEASE_START_UUID:?set fresh shared Registry release-start UUID}"
       REGISTRY_AUDIT_INTERVAL_SECONDS: "30"
       REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
       REGISTRY_SERVICE_ID: townsquare-registry-v0

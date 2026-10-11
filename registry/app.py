@@ -32,7 +32,7 @@ def connect():
  if d.execute("PRAGMA application_id").fetchone()[0] != 1414746695 or d.execute("PRAGMA user_version").fetchone()[0] != DATABASE_SCHEMA_VERSION:
   d.close(); raise RuntimeError('Registry application_id/user_version mismatch')
  return d
-SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; DATABASE_SCHEMA_VERSION=9; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
+SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; DATABASE_SCHEMA_VERSION=10; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
 AUDIT_INTERVAL_ENV='REGISTRY_AUDIT_INTERVAL_SECONDS';AUDIT_RELEASE_INTERVAL_SECONDS=30;AUDIT_CYCLE_LIMIT=100;AUDIT_LEASE_SECONDS=30
 AUDIT_ROLES=(
  ('ledger_audit','REGISTRY_LEDGER_AUDIT_TOKEN_FILE','REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION'),
@@ -44,10 +44,16 @@ _AUDIT_CREDENTIAL_RE=re.compile(rb'[A-Za-z0-9_-]{43}')
 _AUDIT_SHA256_RE=re.compile(r'[0-9a-f]{64}')
 _AUDIT_GIT_RE=re.compile(r'[0-9a-f]{40}')
 _AUDIT_RELEASE_RE=re.compile(r'TS-R7-[0-9a-f]{64}')
+_AUDIT_UUID4_RE=re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
 def _audit_utc(epoch=None):return time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(time.time() if epoch is None else epoch))
 class AuditConfigurationError(RuntimeError):
- def __init__(self,code,mask,static_fingerprint=None,role=None,revision=None,persistable=False):
-  super().__init__(code);self.code=code;self.mask=tuple(sorted(set(mask)));self.static_fingerprint=static_fingerprint;self.role=role;self.revision=revision;self.persistable=persistable
+ def __init__(self,code,mask,static_fingerprint=None,role=None,revision=None,persistable=False,full_fingerprint=None,verifier=None,canonical_path=None,static_context_fingerprint=None,epoch=None):
+  super().__init__(code);self.code=code;self.mask=tuple(sorted(set(mask)));self.static_fingerprint=static_fingerprint;self.role=role;self.revision=revision;self.persistable=persistable;self.full_fingerprint=full_fingerprint;self.verifier=verifier;self.canonical_path=canonical_path;self.static_context_fingerprint=static_context_fingerprint;self.epoch=epoch
+ def configuration(self):
+  binding={'role':self.role,'canonical_path':self.canonical_path,'revision':self.revision,'verifier':self.verifier} if self.role else None
+  return {'static_fingerprint':self.static_fingerprint,'full_fingerprint':self.full_fingerprint,'full':{'credential_bindings':[binding] if binding else []},'credential_contexts':{self.role:self.static_context_fingerprint} if self.role else {},'epoch':self.epoch}
+class AuditEpochError(RuntimeError):
+ def __init__(self,code):super().__init__(code);self.code=code
 def _audit_string(value,field,pattern=None):
  if not isinstance(value,str) or not value or value!=value.strip() or not unicodedata.is_normalized('NFC',value) or any(ord(c)<32 or 127<=ord(c)<=159 for c in value) or (pattern and not pattern.fullmatch(value)):raise AuditConfigurationError('CONFIGURATION_INVALID',(field,))
  return value
@@ -127,18 +133,53 @@ def _audit_static_config(environ=None):
  static={'schema':'townsquare-registry-audit-static-config-v1','identity':identity,'registry':registry,'peer_expected':peer,'transport':transport,'credential_bindings':bindings}
  return static,_domain_fingerprint('townsquare-registry-audit-static-config-fingerprint-v1',static)
 def _credential_verifier(role,salt,decoded):return hashlib.sha256(b'townsquare-registry-audit-credential-verifier-v1\0'+role.encode()+b'\0'+salt+b'\0'+decoded).hexdigest()
-def _prepare_audit_configuration(environ=None,reader=None,db_factory=None,salt_source=secrets.token_bytes):
+def _credential_context_fingerprint(static,role):
+ normalized=json.loads(_jcs(static))
+ for binding in normalized['credential_bindings']:
+  if binding['role']==role:binding['declared_revision']=None
+ return _domain_fingerprint('townsquare-registry-audit-credential-static-context-v1',normalized)
+def _accepted_context(static):
+ identity=static['identity'];registry=static['registry'];peer=static['peer_expected']
+ return {'accepted_context_schema_version':1,'r7_release_id':identity['r7_release_id'],'r7_input_manifest_sha256':identity['r7_input_manifest_sha256'],'r7_identity_sha256':identity['r7_identity_sha256'],'r7_context_sha256':R7_CONTEXT_SHA256,'source_commit':identity['source_commit'],'source_tree':identity['source_tree'],'runtime_class':identity['runtime_class'],'authority_class':identity['authority_class'],'canary_label':identity['canary_label'],'compose_project':identity['compose_project'],'registry_service_id':registry['service_id'],'registry_api_schema_head':registry['api_schema_head'],'registry_database_schema_version':registry['database_schema_version'],'registry_audit_contract_version':registry['audit_contract_version'],'ledger_service_id':peer['service_id'],'ledger_schema_head':peer['schema_head'],'ledger_audit_contract_version':peer['audit_contract_version']}
+def _claim_durable_context(db,static,release_start_uuid,runtime):
+ expected=_accepted_context(static);attempt_started=time.time();now=_audit_utc(attempt_started);db.execute('BEGIN IMMEDIATE')
+ try:
+  rows=db.execute('SELECT * FROM audit_accepted_context').fetchall()
+  if not rows:
+   columns=('singleton',*expected);db.execute('INSERT INTO audit_accepted_context('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+')',(1,*expected.values()))
+  elif len(rows)!=1 or any(rows[0][name]!=value for name,value in expected.items()):raise AuditEpochError('IMMUTABLE_CONTEXT_MISMATCH')
+  epoch=db.execute('SELECT * FROM audit_boot_epoch WHERE singleton=1').fetchone()
+  claimed=runtime.get('epoch')
+  if claimed:
+   if claimed['release_start_uuid']!=release_start_uuid or not epoch or epoch['release_start_uuid']!=release_start_uuid or epoch['boot_epoch_revision']!=claimed['boot_epoch_revision'] or epoch['epoch_state']!='ACTIVE':raise AuditEpochError('BOOT_EPOCH_LOST')
+   db.commit();return claimed
+  if db.execute('SELECT 1 FROM audit_boot_epoch_history WHERE release_start_uuid=?',(release_start_uuid,)).fetchone():raise AuditEpochError('BOOT_EPOCH_REPLAY')
+  stale=_audit_utc(time.time()-90)
+  if epoch['epoch_state']=='ACTIVE' and epoch['heartbeat_utc'] and epoch['heartbeat_utc']>stale:raise AuditEpochError('BOOT_EPOCH_CAS_CONFLICT' if epoch['heartbeat_utc']>=_audit_utc(attempt_started-1) else 'BOOT_EPOCH_ACTIVE_CONFLICT')
+  observed=(epoch['release_start_uuid'],epoch['boot_epoch_revision'],epoch['epoch_state'],epoch['heartbeat_utc']);revision=epoch['boot_epoch_revision']+1
+  db.execute('INSERT INTO audit_boot_epoch_history VALUES(?,?,?)',(release_start_uuid,revision,now))
+  changed=db.execute('UPDATE audit_boot_epoch SET release_start_uuid=?,boot_epoch_revision=?,epoch_state=\'ACTIVE\',heartbeat_utc=? WHERE singleton=1 AND release_start_uuid IS ? AND boot_epoch_revision=? AND epoch_state=? AND heartbeat_utc IS ?',(release_start_uuid,revision,now,*observed)).rowcount
+  if changed!=1:raise AuditEpochError('BOOT_EPOCH_CAS_CONFLICT')
+  claim={'release_start_uuid':release_start_uuid,'boot_epoch_revision':revision};db.commit();runtime['epoch']=claim;return claim
+ except Exception:db.rollback();raise
+def _prepare_audit_configuration(environ=None,reader=None,db_factory=None,salt_source=secrets.token_bytes,runtime=None):
  values=os.environ if environ is None else environ;reader=(lambda path:Path(path).read_bytes()) if reader is None else reader;db_factory=connect if db_factory is None else db_factory
- static,static_fingerprint=_audit_static_config(values);decoded={}
+ release_start_uuid=values.get('TOWNSQUARE_RELEASE_START_UUID')
+ if not isinstance(release_start_uuid,str) or not _AUDIT_UUID4_RE.fullmatch(release_start_uuid):raise AuditConfigurationError('CONFIGURATION_INVALID',('release_start_uuid',))
+ runtime={} if runtime is None else runtime;static,static_fingerprint=_audit_static_config(values);decoded={};contexts={binding['role']:_credential_context_fingerprint(static,binding['role']) for binding in static['credential_bindings']}
  for binding in static['credential_bindings']:
   role=binding['role']
   try:decoded[role]=validate_audit_credential(reader(binding['canonical_path']))
-  except (OSError,AuditConfigurationError):raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,binding['declared_revision']) from None
- if hmac.compare_digest(decoded['ledger_readiness_outbound'],decoded['registry_peer_readiness_inbound']):raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.ledger_readiness_outbound','credential_bindings.registry_peer_readiness_inbound'),static_fingerprint)
+  except (OSError,AuditConfigurationError):
+   claimed=runtime.get('epoch');raise AuditConfigurationError('CREDENTIAL_INVALID' if claimed else 'AUDIT_BOOTSTRAP_CREDENTIAL_REJECTED',('credential_bindings.'+role,),static_fingerprint if claimed else None,role,binding['declared_revision'],bool(claimed),canonical_path=binding['canonical_path'],static_context_fingerprint=contexts[role],epoch=claimed) from None
+ if hmac.compare_digest(decoded['ledger_readiness_outbound'],decoded['registry_peer_readiness_inbound']):
+  role='registry_peer_readiness_inbound';binding=next(item for item in static['credential_bindings'] if item['role']==role);claimed=runtime.get('epoch');raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint if claimed else None,role,binding['declared_revision'],bool(claimed),canonical_path=binding['canonical_path'],static_context_fingerprint=contexts[role],epoch=claimed)
  if any(binding['declared_revision'] is None for binding in static['credential_bindings']):
-  role=next(binding['role'] for binding in static['credential_bindings'] if binding['declared_revision'] is None);raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,None)
- db=db_factory();full_bindings=[];candidates={}
+  binding=next(binding for binding in static['credential_bindings'] if binding['declared_revision'] is None);role=binding['role'];claimed=runtime.get('epoch');raise AuditConfigurationError('CREDENTIAL_INVALID' if claimed else 'AUDIT_BOOTSTRAP_CREDENTIAL_REJECTED',('credential_bindings.'+role,),static_fingerprint if claimed else None,role,None,bool(claimed),canonical_path=binding['canonical_path'],static_context_fingerprint=contexts[role],epoch=claimed)
+ db=db_factory();full_bindings=[];candidates={};accepted={}
  try:
+  epoch=_claim_durable_context(db,static,release_start_uuid,runtime)
+  db.execute('BEGIN IMMEDIATE')
   for binding in static['credential_bindings']:
    role=binding['role'];row=db.execute('SELECT * FROM audit_credential_bindings WHERE role=?',(role,)).fetchone()
    if row is None:
@@ -147,18 +188,16 @@ def _prepare_audit_configuration(environ=None,reader=None,db_factory=None,salt_s
     db.execute('INSERT INTO audit_credential_bindings(role,salt) VALUES(?,?)',(role,salt));accepted_revision=None;accepted_verifier=None
    else:salt=row['salt'];accepted_revision=row['accepted_revision'];accepted_verifier=row['verifier']
    verifier=_credential_verifier(role,salt,decoded[role]);revision=binding['declared_revision']
-   failed=db.execute("SELECT declared_revision FROM audit_failure_latches WHERE latch_key=?",('credential:'+role,)).fetchone()
-   if failed and failed['declared_revision'] is not None and revision<=failed['declared_revision']:raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,revision,True)
-   if accepted_revision is not None and (revision<accepted_revision or (revision==accepted_revision and not hmac.compare_digest(verifier,accepted_verifier))):raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,revision,True)
-   candidate=accepted_revision is None or revision>accepted_revision
-   if candidate and accepted_verifier is not None and hmac.compare_digest(verifier,accepted_verifier):raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,revision,True)
-   full_bindings.append({'role':role,'canonical_path':binding['canonical_path'],'revision':revision,'verifier':verifier});candidates[role]=candidate
+   full_bindings.append({'role':role,'canonical_path':binding['canonical_path'],'revision':revision,'verifier':verifier});accepted[role]={'revision':accepted_revision,'verifier':accepted_verifier};candidates[role]=accepted_revision is None or revision>accepted_revision
+  full={'schema':'townsquare-registry-audit-config-v1','identity':static['identity'],'registry':static['registry'],'peer_expected':static['peer_expected'],'transport':static['transport'],'credential_bindings':full_bindings};fingerprint=_domain_fingerprint('townsquare-registry-audit-config-fingerprint-v1',full)
+  for binding in full_bindings:
+   role=binding['role'];revision=binding['revision'];verifier=binding['verifier'];prior=accepted[role];highwater=db.execute('SELECT highest_failed_revision FROM audit_credential_failure_highwater WHERE role=?',(role,)).fetchone()
+   invalid=(highwater is not None and revision<=highwater['highest_failed_revision']) or (prior['revision'] is not None and (revision<prior['revision'] or revision==prior['revision'] and not hmac.compare_digest(verifier,prior['verifier']))) or (candidates[role] and prior['verifier'] is not None and hmac.compare_digest(verifier,prior['verifier']))
+   if invalid:raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,revision,True,fingerprint,verifier,binding['canonical_path'],contexts[role],epoch)
   db.commit()
  except Exception:db.rollback();raise
  finally:db.close()
- full={'schema':'townsquare-registry-audit-config-v1','identity':static['identity'],'registry':static['registry'],'peer_expected':static['peer_expected'],'transport':static['transport'],'credential_bindings':full_bindings}
- fingerprint=_domain_fingerprint('townsquare-registry-audit-config-fingerprint-v1',full)
- return {'static':static,'static_fingerprint':static_fingerprint,'full':full,'full_fingerprint':fingerprint,'decoded':decoded,'candidates':candidates}
+ return {'static':static,'static_fingerprint':static_fingerprint,'full':full,'full_fingerprint':fingerprint,'decoded':decoded,'candidates':candidates,'credential_contexts':contexts,'epoch':epoch}
 def compatible():
  if os.environ.get('REGISTRY_SERVICE_ID',SERVICE_ID)!=SERVICE_ID:return False
  if os.environ.get('REGISTRY_SCHEMA_HEAD',str(SCHEMA_VERSION))!=str(SCHEMA_VERSION):return False
@@ -247,10 +286,32 @@ def _field_value(configuration,path):
 def _field_fingerprint(configuration,mask):
  value={path:_field_value(configuration,path) for path in sorted(set(mask))}
  return _domain_fingerprint('townsquare-registry-audit-failure-fields-v1',value)
+def _credential_recovery(db,row,configuration,proof,role,mask):
+ expected_proof='event_accept' if role=='ledger_audit' else 'peer_identity';binding=_binding(configuration,role)
+ if proof!=expected_proof or mask!=(f'credential_bindings.{role}',) or not binding:return False
+ accepted=db.execute('SELECT accepted_revision,verifier FROM audit_credential_bindings WHERE role=?',(role,)).fetchone();failed=db.execute('SELECT * FROM audit_credential_failure_highwater WHERE role=?',(role,)).fetchone()
+ if not accepted or accepted['accepted_revision'] is None:return False
+ context=configuration.get('credential_contexts',{}).get(role)
+ highest=max(accepted['accepted_revision'],failed['highest_failed_revision'] if failed else 0);static_match=bool(failed and binding['canonical_path']==failed['canonical_path'] and context==failed['static_context_fingerprint'])
+ if row['full_fingerprint'] is None:
+  normalized=json.loads(_jcs(configuration['static']))
+  for candidate in normalized['credential_bindings']:
+   if candidate['role']==role:candidate['declared_revision']=row['declared_revision']
+  static_match=_domain_fingerprint('townsquare-registry-audit-static-config-fingerprint-v1',normalized)==row['static_fingerprint'] and row['failed_verifier'] is None and row['failed_canonical_path'] is None and row['static_context_fingerprint'] is None
+  durable_match=True;failed_verifier=None
+ else:
+  durable_match=bool(failed and row['declared_revision']==failed['highest_failed_revision'] and row['failed_verifier']==failed['failed_verifier'] and row['failed_canonical_path']==failed['canonical_path'] and row['static_context_fingerprint']==failed['static_context_fingerprint'] and row['static_fingerprint']==failed['static_fingerprint'] and row['full_fingerprint']==failed['full_fingerprint']);failed_verifier=failed['failed_verifier'] if failed else None
+ return bool(static_match and durable_match and binding['revision']>highest and not hmac.compare_digest(binding['verifier'],accepted['verifier']) and (failed_verifier is None or not hmac.compare_digest(binding['verifier'],failed_verifier)) and configuration.get('full_fingerprint')!=row['full_fingerprint'])
 def _record_latch(db,key,code,configuration,mask,event_id=None,role=None,revision=None):
  if code not in AUDIT_PERMANENT_CODES:raise RuntimeError('invalid permanent audit failure code')
- mask=tuple(sorted(set(mask)));now=_audit_utc();static=configuration.get('static_fingerprint') if configuration else hashlib.sha256(('static:'+code).encode()).hexdigest();full=configuration.get('full_fingerprint') if configuration else None;binding=_binding(configuration or {},role) if role else None;verifier=binding.get('verifier') if binding else None;fields=_field_fingerprint(configuration or {},mask)
- db.execute("INSERT INTO audit_failure_latches(latch_key,event_id,failure_code,static_fingerprint,full_fingerprint,failure_field_mask_json,credential_role,declared_revision,created_utc,updated_utc,failed_verifier,failure_field_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(latch_key) DO UPDATE SET event_id=excluded.event_id,failure_code=excluded.failure_code,static_fingerprint=excluded.static_fingerprint,full_fingerprint=excluded.full_fingerprint,failure_field_mask_json=excluded.failure_field_mask_json,credential_role=excluded.credential_role,declared_revision=excluded.declared_revision,updated_utc=excluded.updated_utc,failed_verifier=excluded.failed_verifier,failure_field_fingerprint=excluded.failure_field_fingerprint",(key,event_id,code,static,full,_jcs(list(mask)),role,revision,now,now,verifier,fields))
+ mask=tuple(sorted(set(mask)));now=_audit_utc();static=configuration.get('static_fingerprint') if configuration else hashlib.sha256(('static:'+code).encode()).hexdigest();full=configuration.get('full_fingerprint') if configuration else None;binding=_binding(configuration or {},role) if role else None;verifier=binding.get('verifier') if binding else None;fields=_field_fingerprint(configuration or {},mask);context=(configuration or {}).get('credential_contexts',{}).get(role) if role else None
+ credential_masks={(f'credential_bindings.{role}',), (f'credential_bindings.{role}','transport.readiness_url')} if role else set()
+ credential_failure=role and revision and context and binding and code in ('CREDENTIAL_INVALID','REMOTE_REJECTED') and mask in credential_masks
+ if credential_failure:
+  durable_path=binding['canonical_path'] if full and verifier else None;durable_context=context if full and verifier else None
+  db.execute("INSERT INTO audit_credential_failure_highwater(role,highest_failed_revision,failed_verifier,static_fingerprint,full_fingerprint,canonical_path,static_context_fingerprint,failure_code,updated_utc) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(role) DO UPDATE SET highest_failed_revision=MAX(highest_failed_revision,excluded.highest_failed_revision),failed_verifier=CASE WHEN excluded.highest_failed_revision>=highest_failed_revision THEN excluded.failed_verifier ELSE failed_verifier END,static_fingerprint=CASE WHEN excluded.highest_failed_revision>=highest_failed_revision THEN excluded.static_fingerprint ELSE static_fingerprint END,full_fingerprint=CASE WHEN excluded.highest_failed_revision>=highest_failed_revision THEN excluded.full_fingerprint ELSE full_fingerprint END,canonical_path=CASE WHEN excluded.highest_failed_revision>=highest_failed_revision THEN excluded.canonical_path ELSE canonical_path END,static_context_fingerprint=CASE WHEN excluded.highest_failed_revision>=highest_failed_revision THEN excluded.static_context_fingerprint ELSE static_context_fingerprint END,failure_code=CASE WHEN excluded.highest_failed_revision>=highest_failed_revision THEN excluded.failure_code ELSE failure_code END,updated_utc=excluded.updated_utc",(role,revision,verifier,static,full,durable_path,durable_context,code,now))
+  highwater=db.execute('SELECT * FROM audit_credential_failure_highwater WHERE role=?',(role,)).fetchone();revision=highwater['highest_failed_revision'];verifier=highwater['failed_verifier'];static=highwater['static_fingerprint'];full=highwater['full_fingerprint'];code=highwater['failure_code']
+ db.execute("INSERT INTO audit_failure_latches(latch_key,event_id,failure_code,static_fingerprint,full_fingerprint,failure_field_mask_json,credential_role,declared_revision,created_utc,updated_utc,failed_verifier,failure_field_fingerprint,failed_canonical_path,static_context_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(latch_key) DO UPDATE SET event_id=excluded.event_id,failure_code=excluded.failure_code,static_fingerprint=excluded.static_fingerprint,full_fingerprint=excluded.full_fingerprint,failure_field_mask_json=excluded.failure_field_mask_json,credential_role=excluded.credential_role,declared_revision=excluded.declared_revision,updated_utc=excluded.updated_utc,failed_verifier=excluded.failed_verifier,failure_field_fingerprint=excluded.failure_field_fingerprint,failed_canonical_path=excluded.failed_canonical_path,static_context_fingerprint=excluded.static_context_fingerprint",(key,event_id,code,static,full,_jcs(list(mask)),role,revision,now,now,verifier,fields,durable_path if credential_failure else binding.get('canonical_path') if binding else None,durable_context if credential_failure else context))
 def _accept_bindings(db,configuration,roles):
  for binding in configuration['full']['credential_bindings']:
   role=binding['role']
@@ -264,38 +325,53 @@ def _recover_latch(db,key,configuration,proof,event_id=None,role=None):
  current_static=configuration.get('static_fingerprint');current_full=configuration.get('full_fingerprint');binding=_binding(configuration,role) if role else None
  fingerprints_compared=(row['static_fingerprint'],row['full_fingerprint'],current_static,current_full)
  if key.startswith('event:'):
-  allowed={f'event.{event_id}.identity','credential_bindings.ledger_audit','transport.audit_url','response.schema','response.event_uuid','response.status'}
-  valid=proof=='event_accept' and row['event_id']==event_id and event_id and set(mask)<=allowed
+  protocol_masks={tuple(sorted(items)) for items in ((f'event.{event_id}.identity',),('transport.audit_url','response.schema'),('transport.audit_url','response.schema','response.event_uuid'),('transport.audit_url','response.schema','response.status'))}
+  valid=proof=='event_accept' and row['event_id']==event_id and event_id and (mask in protocol_masks or role=='ledger_audit' and row['failure_code']=='REMOTE_REJECTED' and _credential_recovery(db,row,configuration,proof,role,mask))
  elif key=='peer':
-  valid=proof=='peer_identity' and all(item.startswith('peer_expected.') or item in ('transport.readiness_url','response.status','credential_bindings.ledger_readiness_outbound') for item in mask)
+  peer_leaves={'peer_expected.'+name for name in ('ok','service_id','schema_version','audit_contract_version',*CANARY_IDENTITY.as_dict())};protocol_masks={('peer_expected','transport.readiness_url'),('response.status','transport.readiness_url')};pure=(row['failure_code']=='PEER_IDENTITY_INVALID' and set(mask)<=peer_leaves and bool(mask) or row['failure_code']=='REMOTE_PROTOCOL_INVALID' and mask in protocol_masks) and current_static==row['static_fingerprint'] and current_full==row['full_fingerprint'];credential=row['failure_code']=='REMOTE_REJECTED' and mask==('credential_bindings.ledger_readiness_outbound','transport.readiness_url') and _credential_recovery(db,row,configuration,proof,'ledger_readiness_outbound',('credential_bindings.ledger_readiness_outbound',))
+  valid=proof=='peer_identity' and (pure or credential)
  elif key=='configuration':
   identity_leaves={'identity.'+name for name in ('runtime_class','authority_class','canary_label','compose_project','source_commit','source_tree','r7_release_id','r7_input_manifest_sha256','r7_identity_sha256')};registry_leaves={'registry.'+name for name in ('service_id','api_schema_head','database_schema_version','audit_contract_version')};peer_leaves={'peer_expected.'+name for name in ('service_id','schema_head','audit_contract_version')};transport_leaves={'transport.'+name for name in ('audit_url','readiness_url','timeout_seconds','interval_seconds','cycle_limit','lease_seconds')};binding_leaves={f'credential_bindings.{item}{suffix}' for item in ('ledger_audit','ledger_readiness_outbound','registry_peer_readiness_inbound') for suffix in ('','.canonical_path','.declared_revision')}
   valid=proof=='peer_identity' and row['failure_code']=='CONFIGURATION_INVALID' and set(mask)<=(identity_leaves|registry_leaves|peer_leaves|transport_leaves|binding_leaves) and current_static!=row['static_fingerprint'] and current_full!=row['full_fingerprint'] and _field_fingerprint(configuration,mask)!=row['failure_field_fingerprint']
  elif key.startswith('credential:'):
-  expected=key.split(':',1)[1];valid=role==expected and proof==('event_accept' if role=='ledger_audit' else 'peer_identity') and mask==(f'credential_bindings.{role}',)
+  expected=key.split(':',1)[1];valid=role==expected and _credential_recovery(db,row,configuration,proof,role,mask)
  else:return False
  if not valid:return False
- if role and any(item==f'credential_bindings.{role}' for item in mask):
-  if not binding or row['declared_revision'] is None or binding['revision']<=row['declared_revision'] or not row['failed_verifier'] or hmac.compare_digest(binding['verifier'],row['failed_verifier']) or current_full==row['full_fingerprint']:return False
- elif key.startswith('credential:'):return False
+ if key.startswith('credential:') and not valid:return False
  if any(value is None for value in fingerprints_compared[:1]) or current_static is None or current_full is None:return False
  db.execute('DELETE FROM audit_failure_latches WHERE latch_key=?',(key,));return True
 def _current_latch(db):return db.execute('SELECT failure_code,latch_key FROM audit_failure_latches ORDER BY created_utc,latch_key LIMIT 1').fetchone()
-def _worker_state(db,started,completed=None,attempts=0,failure=None):
+def _epoch_heartbeat(db,epoch,heartbeat):
+ if not epoch:return
+ changed=db.execute("UPDATE audit_boot_epoch SET heartbeat_utc=? WHERE singleton=1 AND release_start_uuid=? AND boot_epoch_revision=? AND epoch_state='ACTIVE'",(heartbeat,epoch['release_start_uuid'],epoch['boot_epoch_revision'])).rowcount
+ if changed!=1:raise AuditEpochError('BOOT_EPOCH_LOST')
+def _close_epoch(db,epoch):
+ if not epoch:return True
+ db.execute('BEGIN IMMEDIATE')
+ try:
+  changed=db.execute("UPDATE audit_boot_epoch SET epoch_state='CLOSED' WHERE singleton=1 AND release_start_uuid=? AND boot_epoch_revision=? AND epoch_state='ACTIVE'",(epoch['release_start_uuid'],epoch['boot_epoch_revision'])).rowcount
+  if changed!=1:raise AuditEpochError('BOOT_EPOCH_LOST')
+  db.commit();return True
+ except Exception:db.rollback();raise
+def _worker_state(db,started,completed=None,attempts=0,failure=None,epoch=None):
  heartbeat=completed or started;latch=_current_latch(db);code=latch['failure_code'] if latch else None;digest=hashlib.sha256((code+':'+latch['latch_key']).encode()).hexdigest() if latch else None
+ _epoch_heartbeat(db,epoch,heartbeat)
  db.execute("UPDATE audit_worker_state SET heartbeat_utc=?,last_cycle_started_utc=?,last_cycle_completed_utc=?,last_cycle_attempts=?,permanent_failure_code=?,permanent_failure_digest=? WHERE singleton=1",(heartbeat,started,completed,attempts,code,digest))
-def audit_worker_cycle(interval=AUDIT_RELEASE_INTERVAL_SECONDS,stop_event=None):
+def audit_worker_cycle(interval=AUDIT_RELEASE_INTERVAL_SECONDS,stop_event=None,runtime=None):
  started=_audit_utc();attempted=0;delivered=0;failed=0;seen=[]
- try:configuration=_prepare_audit_configuration()
+ try:configuration=_prepare_audit_configuration() if runtime is None else _prepare_audit_configuration(runtime=runtime)
+ except AuditEpochError as error:return {'heartbeat_utc':None,'attempted':0,'delivered':0,'failed':0,'failure_code':error.code}
  except AuditConfigurationError as error:
-  if error.code=='CREDENTIAL_INVALID' and not error.persistable:return {'heartbeat_utc':None,'attempted':0,'delivered':0,'failed':0,'failure_code':error.code,'static_fingerprint':error.static_fingerprint,'credential_role':error.role,'declared_revision':error.revision}
+  if not error.persistable and (error.code=='CREDENTIAL_INVALID' or not error.static_fingerprint):return {'heartbeat_utc':None,'attempted':0,'delivered':0,'failed':0,'failure_code':error.code,'static_fingerprint':error.static_fingerprint,'credential_role':error.role,'declared_revision':error.revision}
   d=connect()
-  try:_record_latch(d,'credential:'+error.role if error.role else 'configuration',error.code,{'static_fingerprint':error.static_fingerprint} if error.static_fingerprint else None,error.mask,role=error.role,revision=error.revision);_worker_state(d,started,started,0)
+  try:
+   d.execute('BEGIN IMMEDIATE');_record_latch(d,'credential:'+error.role if error.role else 'configuration',error.code,error.configuration(),error.mask,role=error.role,revision=error.revision);_worker_state(d,started,started,0,epoch=error.epoch);d.commit()
+  except Exception:d.rollback();raise
   finally:d.close()
   return {'heartbeat_utc':started,'attempted':0,'delivered':0,'failed':0,'failure_code':error.code}
  d=connect();permanent=None
  try:
-  _worker_state(d,started)
+  _worker_state(d,started,epoch=configuration.get('epoch'))
   if not compatible():_record_latch(d,'configuration','CONFIGURATION_INVALID',configuration,('registry.service_id','registry.api_schema_head','registry.audit_contract_version'));permanent='CONFIGURATION_INVALID'
   else:
    peer=peer_ready(configuration)
@@ -322,13 +398,13 @@ def audit_worker_cycle(interval=AUDIT_RELEASE_INTERVAL_SECONDS,stop_event=None):
       code,digest,is_permanent,mask=_audit_failure(error,event_id);cooldown=_audit_utc(time.time()+interval);d.execute('BEGIN IMMEDIATE');d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=?,lease_owner=NULL,lease_until=? WHERE event_id=? AND delivered_utc IS NULL AND lease_owner=?",(code+':'+digest,cooldown,event_id,owner));
       if is_permanent:_record_latch(d,'event:'+event_id,code,configuration,mask,event_id,'ledger_audit',next(item['revision'] for item in configuration['full']['credential_bindings'] if item['role']=='ledger_audit'));permanent=permanent or code
       d.commit();failed+=1
-  completed=_audit_utc();_worker_state(d,started,completed,attempted,permanent)
+  completed=_audit_utc();_worker_state(d,started,completed,attempted,permanent,configuration.get('epoch'))
   latch=_current_latch(d);return {'heartbeat_utc':completed,'attempted':attempted,'delivered':delivered,'failed':failed,'failure_code':latch['failure_code'] if latch else None,'configuration_fingerprint':configuration['full_fingerprint']}
  finally:d.close()
 def deliver_once():return audit_worker_cycle(AUDIT_RELEASE_INTERVAL_SECONDS)
 def audit_worker(environ=None,stop_event=None,monotonic=time.monotonic):
  """Run the durable periodic Registry audit-delivery loop."""
- interval=audit_interval(environ);stop=stop_event or threading.Event()
+ interval=audit_interval(environ);stop=stop_event or threading.Event();runtime={}
  def stopping(*_):stop.set()
  previous={}
  if stop_event is None:
@@ -336,14 +412,23 @@ def audit_worker(environ=None,stop_event=None,monotonic=time.monotonic):
  try:
   deadline=monotonic()
   while not stop.is_set():
-   metrics=audit_worker_cycle(interval,stop);print(_canonical({'kind':'registry_audit_worker_cycle',**metrics}),flush=True);deadline+=interval
+   metrics=audit_worker_cycle(interval,stop,runtime);print(_canonical({'kind':'registry_audit_worker_cycle',**metrics}),flush=True);deadline+=interval
+   if metrics.get('heartbeat_utc') is None:raise SystemExit('Registry audit worker startup rejected')
    if stop.wait(max(0,deadline-monotonic())):break
  finally:
+  if runtime.get('epoch'):
+   d=connect()
+   try:_close_epoch(d,runtime['epoch'])
+   finally:d.close()
   if stop_event is None:
    for name,handler in previous.items():signal.signal(name,handler)
-def audit_delivery_health(db,now_epoch=None):
+def audit_delivery_health(db,now_epoch=None,environ=None):
  now_epoch=time.time() if now_epoch is None else now_epoch;stale=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(now_epoch-90));old=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(now_epoch-120));state=db.execute('SELECT * FROM audit_worker_state WHERE singleton=1').fetchone();oldest=db.execute('SELECT min(j.committed_utc) FROM audit_outbox o JOIN journal j USING(event_id) WHERE o.delivered_utc IS NULL').fetchone()[0]
- ready=bool(state and state['heartbeat_utc'] and state['heartbeat_utc']>stale and state['permanent_failure_code'] is None and (oldest is None or oldest>old))
+ values=os.environ if environ is None else environ;expected_uuid=values.get('TOWNSQUARE_RELEASE_START_UUID');epoch_ready=True
+ if expected_uuid is not None:
+  try:static,_=_audit_static_config(values);context=_accepted_context(static);rows=db.execute('SELECT * FROM audit_accepted_context').fetchall();epoch=db.execute('SELECT * FROM audit_boot_epoch WHERE singleton=1').fetchone();epoch_ready=bool(_AUDIT_UUID4_RE.fullmatch(expected_uuid) and len(rows)==1 and all(rows[0][name]==value for name,value in context.items()) and epoch and epoch['release_start_uuid']==expected_uuid and epoch['epoch_state']=='ACTIVE' and epoch['heartbeat_utc'] and epoch['heartbeat_utc']>stale)
+  except Exception:epoch_ready=False
+ ready=bool(epoch_ready and state and state['heartbeat_utc'] and state['heartbeat_utc']>stale and state['permanent_failure_code'] is None and (oldest is None or oldest>old))
  return {'ready':ready,'worker_heartbeat_utc':state['heartbeat_utc'] if state else None,'oldest_pending_utc':oldest,'failure_code':state['permanent_failure_code'] if state else 'WORKER_HEARTBEAT_MISSING'}
 def require_manual_delivery_mode():
  if os.environ.get('REGISTRY_AUDIT_DELIVERY_MODE')!='manual':

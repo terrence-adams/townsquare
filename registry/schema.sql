@@ -241,5 +241,53 @@ INSERT INTO registry_migrations VALUES(8,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 ALTER TABLE audit_failure_latches ADD COLUMN failed_verifier TEXT CHECK(failed_verifier IS NULL OR (length(failed_verifier)=64 AND failed_verifier NOT GLOB '*[^0-9a-f]*'));
 ALTER TABLE audit_failure_latches ADD COLUMN failure_field_fingerprint TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000' CHECK(length(failure_field_fingerprint)=64 AND failure_field_fingerprint NOT GLOB '*[^0-9a-f]*');
 INSERT INTO registry_migrations VALUES(9,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+ALTER TABLE audit_failure_latches ADD COLUMN failed_canonical_path TEXT;
+ALTER TABLE audit_failure_latches ADD COLUMN static_context_fingerprint TEXT CHECK(static_context_fingerprint IS NULL OR (length(static_context_fingerprint)=64 AND static_context_fingerprint NOT GLOB '*[^0-9a-f]*'));
+CREATE TABLE audit_credential_failure_highwater(
+ role TEXT PRIMARY KEY CHECK(role IN ('ledger_audit','ledger_readiness_outbound','registry_peer_readiness_inbound')),
+ highest_failed_revision INTEGER NOT NULL CHECK(highest_failed_revision>0),
+ failed_verifier TEXT CHECK(failed_verifier IS NULL OR (length(failed_verifier)=64 AND failed_verifier NOT GLOB '*[^0-9a-f]*')),
+ static_fingerprint TEXT NOT NULL CHECK(length(static_fingerprint)=64 AND static_fingerprint NOT GLOB '*[^0-9a-f]*'),
+ full_fingerprint TEXT CHECK(full_fingerprint IS NULL OR (length(full_fingerprint)=64 AND full_fingerprint NOT GLOB '*[^0-9a-f]*')),
+ canonical_path TEXT,
+ static_context_fingerprint TEXT CHECK(static_context_fingerprint IS NULL OR (length(static_context_fingerprint)=64 AND static_context_fingerprint NOT GLOB '*[^0-9a-f]*')),
+ failure_code TEXT NOT NULL CHECK(failure_code IN ('CREDENTIAL_INVALID','REMOTE_REJECTED')),
+ updated_utc TEXT NOT NULL
+);
+CREATE TABLE audit_accepted_context(
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ accepted_context_schema_version INTEGER NOT NULL CHECK(accepted_context_schema_version=1),
+ r7_release_id TEXT NOT NULL,
+ r7_input_manifest_sha256 TEXT NOT NULL,
+ r7_identity_sha256 TEXT NOT NULL,
+ r7_context_sha256 TEXT NOT NULL,
+ source_commit TEXT NOT NULL,
+ source_tree TEXT NOT NULL,
+ runtime_class TEXT NOT NULL,
+ authority_class TEXT NOT NULL,
+ canary_label TEXT NOT NULL,
+ compose_project TEXT NOT NULL,
+ registry_service_id TEXT NOT NULL,
+ registry_api_schema_head INTEGER NOT NULL,
+ registry_database_schema_version INTEGER NOT NULL,
+ registry_audit_contract_version TEXT NOT NULL,
+ ledger_service_id TEXT NOT NULL,
+ ledger_schema_head INTEGER NOT NULL,
+ ledger_audit_contract_version TEXT NOT NULL
+);
+CREATE TABLE audit_boot_epoch(
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ release_start_uuid TEXT,
+ boot_epoch_revision INTEGER NOT NULL DEFAULT 0 CHECK(boot_epoch_revision>=0),
+ epoch_state TEXT NOT NULL DEFAULT 'CLOSED' CHECK(epoch_state IN ('ACTIVE','CLOSED')),
+ heartbeat_utc TEXT
+);
+INSERT INTO audit_boot_epoch(singleton) VALUES(1);
+CREATE TABLE audit_boot_epoch_history(
+ release_start_uuid TEXT PRIMARY KEY,
+ boot_epoch_revision INTEGER NOT NULL UNIQUE CHECK(boot_epoch_revision>0),
+ claimed_utc TEXT NOT NULL
+);
+INSERT INTO registry_migrations VALUES(10,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 PRAGMA application_id=1414746695;
-PRAGMA user_version=9;
+PRAGMA user_version=10;

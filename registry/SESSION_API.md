@@ -154,12 +154,28 @@ health endpoint, or Registry port publication.
 ## Release identity and migration
 
 The peer-facing Registry protocol schema remains version 2, matching the Ledger
-compatibility contract. Database migration version 6 is reported separately as
-`database_schema_version`. Registry internal readiness performs the live,
+compatibility contract. Database migration version 10 is reported separately
+as `database_schema_version`. Registry internal readiness performs the live,
 directional, same-R7-identity Ledger exchange; deployments must roll Registry
 and Ledger from the same generated release context.
 
-`registry-migrate` upgrades v1 through v5 databases atomically to v6 under its
+The mandatory audit worker rejects malformed protected credentials and a
+malformed `TOWNSQUARE_RELEASE_START_UUID` before opening the database. Once it
+has established the immutable release context, it claims the canonical shared
+UUIDv4 through the durable boot-epoch CAS. A fresh active epoch cannot be
+stolen; closed or stale epochs require a new UUID, and history prevents replay.
+Every heartbeat and cooperative close is conditional on the claimed UUID and
+epoch revision. Registry readiness additionally requires that exact active,
+fresh epoch, so a failed bootstrap cannot borrow a prior worker heartbeat.
+
+Permanent audit failures remain latched. Credential recovery is anchored to
+the accepted binding and monotonic highest failed revision, preserves the
+canonical static context, and clears only with a greater revision, a different
+verifier, and the role-specific authoritative peer or event proof. Bootstrap
+credential rejection remains stateless; a later invalid same-path rotation in
+an already accepted process may retain only its redacted static failure data.
+
+`registry-migrate` upgrades v1 through v9 databases atomically to v10 under its
 exclusive migration lock. Rollback is restore-from-copy only: preserve the
 pre-migration database copy, stop the candidate, and restore that copy with the
 matching previous release. Existing sessions are atomically marked `LOST`,

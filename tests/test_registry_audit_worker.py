@@ -51,7 +51,7 @@ class AuditWorkerTests(unittest.TestCase):
         self.app.acknowledge_delivery = acknowledge_delivery
         self.effects = []
         credential = bytes(range(32, 64))
-        self.app._prepare_audit_configuration = lambda: {
+        self.app._prepare_audit_configuration = lambda **_: {
             "static_fingerprint": "1" * 64, "full_fingerprint": "2" * 64,
             "decoded": {"ledger_audit": credential, "ledger_readiness_outbound": credential, "registry_peer_readiness_inbound": bytes(range(64, 96))},
             "candidates": {}, "full": {"credential_bindings": [{"role": "ledger_audit", "revision": 1}]},
@@ -81,7 +81,7 @@ class AuditWorkerTests(unittest.TestCase):
     def recovery_configuration(self, marker="a", revision=1, verifier=None):
         verifier = verifier or marker * 64
         bindings = [
-            {"role": role, "canonical_path": "/" + role, "revision": revision, "verifier": verifier if role == "ledger_audit" else ("c" if role == "ledger_readiness_outbound" else "d") * 64}
+            {"role": role, "canonical_path": "/" + role, "revision": revision.get(role, 1) if isinstance(revision, dict) else revision, "verifier": verifier if role == "ledger_audit" else ("c" if role == "ledger_readiness_outbound" else "d") * 64}
             for role in ("ledger_audit", "ledger_readiness_outbound", "registry_peer_readiness_inbound")
         ]
         full = {
@@ -91,7 +91,53 @@ class AuditWorkerTests(unittest.TestCase):
             "transport": {"interval_seconds": 30},
             "credential_bindings": bindings,
         }
-        return {"static_fingerprint": marker * 64, "full_fingerprint": ("e" if marker == "a" else marker) * 64, "full": full, "static": dict(full), "candidates": {item["role"]: True for item in bindings}}
+        static = json.loads(json.dumps(full)); static["credential_bindings"] = [
+            {"role": item["role"], "canonical_path": item["canonical_path"], "declared_revision": item["revision"]} for item in bindings
+        ]
+        return {
+            "static_fingerprint": self.app._domain_fingerprint("townsquare-registry-audit-static-config-fingerprint-v1", static),
+            "full_fingerprint": self.app._domain_fingerprint("townsquare-registry-audit-config-fingerprint-v1", full),
+            "full": full, "static": static, "candidates": {item["role"]: True for item in bindings},
+            "credential_contexts": {item["role"]: self.app._credential_context_fingerprint(static, item["role"]) for item in bindings},
+        }
+
+    def production_environment(self, revisions=(1, 1, 1)):
+        paths = {role: str(Path(self.tmp.name) / (role + ".credential")) for role, _, _ in self.app.AUDIT_ROLES}
+        credentials = {
+            "ledger_audit": bytes(range(32, 64)),
+            "ledger_readiness_outbound": bytes(range(64, 96)),
+            "registry_peer_readiness_inbound": bytes(range(96, 128)),
+        }
+        for role, raw in credentials.items(): Path(paths[role]).write_bytes(base64.urlsafe_b64encode(raw).rstrip(b"="))
+        env = {
+            "TOWNSQUARE_RUNTIME_CLASS": "CANARY", "TOWNSQUARE_AUTHORITY_CLASS": "NON-AUTHORITATIVE",
+            "TOWNSQUARE_CANARY_LABEL": "TS-CANARY-NAS1-20261007-A", "TOWNSQUARE_COMPOSE_PROJECT": "townsquare-canary-20261007-a",
+            "TOWNSQUARE_SOURCE_COMMIT": "a" * 40, "TOWNSQUARE_SOURCE_TREE": "b" * 40,
+            "TOWNSQUARE_R7_RELEASE_ID": "TS-R7-" + "c" * 64, "TOWNSQUARE_R7_INPUT_MANIFEST_SHA256": "d" * 64,
+            "TOWNSQUARE_R7_IDENTITY_SHA256": "e" * 64, "REGISTRY_SERVICE_ID": "townsquare-registry-v0", "REGISTRY_SCHEMA_HEAD": "2",
+            "TOWNSQUARE_RELEASE_START_UUID": "11111111-1111-4111-8111-111111111111",
+            "REGISTRY_AUDIT_CONTRACT_VERSION": "registry-ledger-audit-v1", "REGISTRY_LEDGER_SERVICE_ID": "townsquare-ledger-v0",
+            "REGISTRY_LEDGER_SCHEMA_HEAD": "14", "REGISTRY_LEDGER_AUDIT_CONTRACT": "registry-ledger-audit-v1", "REGISTRY_AUDIT_INTERVAL_SECONDS": "30",
+        }
+        for index, (role, path_env, revision_env) in enumerate(self.app.AUDIT_ROLES):
+            env[path_env] = "/" + role; env[revision_env] = str(revisions[index])
+        return env, paths
+
+    def use_production_prepare(self, paths):
+        canonical = {"/" + role: path for role, path in paths.items()}
+        runtime = {}
+        self.app._prepare_audit_configuration = lambda **_: self.saved["_prepare_audit_configuration"](
+            reader=lambda path: Path(canonical[path]).read_bytes(), runtime=runtime)
+        return runtime
+
+    def invalid_credential_fixtures(self):
+        weak = [bytes([7]) * 32, bytes(range(32)), bytes(range(31, -1, -1))]
+        weak.extend((bytes(range(size)) * (32 // size)) for size in (1, 2, 4, 8, 16))
+        return [
+            b"", b"A" * 42, b"A" * 44, b"A" * 43 + b"=", b"A" * 42 + b"B", b"A" * 42 + b"+", b"A" * 42 + b"/",
+            b"A" * 42 + b" ", b"A" * 42 + b"\n", b"A" * 42 + b"!", "é".encode(), b"short", b"_" * 43,
+            *[base64.urlsafe_b64encode(value).rstrip(b"=") for value in weak],
+        ]
 
     def test_aud_01_stranded_row_delivers_after_worker_cycle(self):
         self.add("aud-01")
@@ -209,6 +255,8 @@ class AuditWorkerTests(unittest.TestCase):
         self.assertIn('command: ["python", "-m", "canary.preexec", "--", "python", "-m", "registry.app", "--audit-worker"]', block)
         self.assertIn("COPY --chown=10003:10003 registry/app.py /app/registry/app.py", (ROOT / "registry" / "Dockerfile").read_text(encoding="utf-8"))
         self.assertNotRegex(block, r"(?m)^\s+ports:"); self.assertNotIn("build:", block); self.assertNotIn("--audit-worker", compose.split("\n  registry:\n", 1)[1].split("\n  registry-audit-worker:\n", 1)[0])
+        self.assertEqual(2, compose.count('TOWNSQUARE_RELEASE_START_UUID: "${TOWNSQUARE_RELEASE_START_UUID:?set fresh shared Registry release-start UUID}"'))
+        self.assertIn("TOWNSQUARE_RELEASE_START_UUID=REPLACE_WITH_FRESH_CANONICAL_UUIDV4_FOR_EACH_COORDINATED_START", (ROOT / "deploy" / "release.env.example").read_text(encoding="utf-8"))
 
     def test_aud_13_permanent_latch_survives_idle_restart_and_time(self):
         self.add("aud-13")
@@ -235,11 +283,7 @@ class AuditWorkerTests(unittest.TestCase):
             self.assertEqual(expected, self.app._audit_failure(error, "event")[0])
         weak = [bytes([7]) * 32, bytes(range(32)), bytes(range(31, -1, -1))]
         weak.extend((bytes(range(size)) * (32 // size)) for size in (1, 2, 4, 8, 16))
-        invalid = [
-            b"", b"A" * 42, b"A" * 44, b"A" * 43 + b"=", b"A" * 42 + b"+", b"A" * 42 + b"/",
-            b"A" * 42 + b" ", b"A" * 42 + b"\n", "é".encode(), b"short", b"_" * 43,
-            *[base64.urlsafe_b64encode(value).rstrip(b"=") for value in weak],
-        ]
+        invalid = self.invalid_credential_fixtures()
         for raw in invalid:
             with self.subTest(raw=raw), self.assertRaises(self.app.AuditConfigurationError): self.app.validate_audit_credential(raw)
         with tempfile.TemporaryDirectory() as directory:
@@ -254,14 +298,20 @@ class AuditWorkerTests(unittest.TestCase):
             "TOWNSQUARE_SOURCE_COMMIT": "a" * 40, "TOWNSQUARE_SOURCE_TREE": "b" * 40,
             "TOWNSQUARE_R7_RELEASE_ID": "TS-R7-" + "c" * 64, "TOWNSQUARE_R7_INPUT_MANIFEST_SHA256": "d" * 64,
             "TOWNSQUARE_R7_IDENTITY_SHA256": "e" * 64, "REGISTRY_SERVICE_ID": "townsquare-registry-v0", "REGISTRY_SCHEMA_HEAD": "2",
+            "TOWNSQUARE_RELEASE_START_UUID": "11111111-1111-4111-8111-111111111111",
             "REGISTRY_AUDIT_CONTRACT_VERSION": "registry-ledger-audit-v1", "REGISTRY_LEDGER_SERVICE_ID": "townsquare-ledger-v0",
             "REGISTRY_LEDGER_SCHEMA_HEAD": "14", "REGISTRY_LEDGER_AUDIT_CONTRACT": "registry-ledger-audit-v1", "REGISTRY_AUDIT_INTERVAL_SECONDS": "30",
             "REGISTRY_LEDGER_AUDIT_TOKEN_FILE": "/audit", "LEDGER_READINESS_TOKEN_FILE": "/out", "REGISTRY_PEER_READINESS_TOKEN_FILE": "/in",
             "REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION": "1", "LEDGER_READINESS_CREDENTIAL_REVISION": "1", "REGISTRY_PEER_READINESS_CREDENTIAL_REVISION": "1",
         }}
         with mock.patch.object(self.app, "_credential_verifier", side_effect=lambda *_: called.append("verifier")):
-            with self.assertRaises(self.app.AuditConfigurationError):
-                self.saved["_prepare_audit_configuration"](env, reader=lambda _path: b"invalid", db_factory=lambda: called.append("db"))
+            for raw in invalid:
+                with self.subTest(bootstrap=raw), self.assertRaises(self.app.AuditConfigurationError) as rejected:
+                    self.saved["_prepare_audit_configuration"](env, reader=lambda _path, raw=raw: raw, db_factory=lambda: called.append("db"))
+                self.assertEqual("AUDIT_BOOTSTRAP_CREDENTIAL_REJECTED", rejected.exception.code)
+            with self.assertRaises(self.app.AuditConfigurationError) as unreadable:
+                self.saved["_prepare_audit_configuration"](env, reader=lambda _path: (_ for _ in ()).throw(OSError("unreadable")), db_factory=lambda: called.append("db"))
+            self.assertEqual("AUDIT_BOOTSTRAP_CREDENTIAL_REJECTED", unreadable.exception.code)
         self.assertEqual([], called)
         credentials = {
             "/audit": base64.urlsafe_b64encode(bytes(range(32, 64))).rstrip(b"="),
@@ -289,6 +339,7 @@ class AuditWorkerTests(unittest.TestCase):
         try:
             old = self.recovery_configuration("a", 1, "1" * 64)
             repaired = self.recovery_configuration("b", 2, "2" * 64)
+            credential_repair = self.recovery_configuration("a", {"ledger_audit": 2}, "2" * 64)
 
             # A: exact accepted event proof clears only the exact event latch.
             self.app._record_latch(db, "event:a", "REMOTE_REJECTED", old, ("event.a.identity",), "a", "ledger_audit", 1)
@@ -307,11 +358,11 @@ class AuditWorkerTests(unittest.TestCase):
             db.execute("BEGIN IMMEDIATE"); self.assertTrue(self.app._recover_latch(db, "configuration", repaired, "peer_identity")); db.commit()
 
             # D: same-path credential repair binds only a greater revision/new verifier after role proof.
-            db.execute("INSERT INTO audit_credential_bindings(role,salt) VALUES('ledger_audit',?)", (bytes(range(32)),))
+            db.execute("INSERT INTO audit_credential_bindings(role,salt,accepted_revision,verifier,full_fingerprint) VALUES('ledger_audit',?,1,?,?)", (bytes(range(32)), "1" * 64, old["full_fingerprint"]))
             self.app._record_latch(db, "credential:ledger_audit", "CREDENTIAL_INVALID", old, ("credential_bindings.ledger_audit",), role="ledger_audit", revision=1)
             db.execute("BEGIN IMMEDIATE")
-            self.assertTrue(self.app._recover_latch(db, "credential:ledger_audit", repaired, "event_accept", role="ledger_audit"))
-            self.app._accept_bindings(db, repaired, {"ledger_audit"}); db.commit()
+            self.assertTrue(self.app._recover_latch(db, "credential:ledger_audit", credential_repair, "event_accept", role="ledger_audit"))
+            self.app._accept_bindings(db, credential_repair, {"ledger_audit"}); db.commit()
             self.assertEqual((2, "2" * 64), tuple(db.execute("SELECT accepted_revision,verifier FROM audit_credential_bindings WHERE role='ledger_audit'").fetchone()))
 
             # E: unrelated fingerprint change, wrong mask, stale revision, same verifier, or lost proof cannot clear.
@@ -319,17 +370,173 @@ class AuditWorkerTests(unittest.TestCase):
             db.execute("DELETE FROM audit_failure_latches"); self.app._record_latch(db, "configuration", "CONFIGURATION_INVALID", old, ("registry.service_id",))
             for candidate, proof in ((unrelated, "peer_identity"), (repaired, "missing")):
                 db.execute("BEGIN IMMEDIATE"); self.assertFalse(self.app._recover_latch(db, "configuration", candidate, proof)); db.rollback()
-            db.execute("DELETE FROM audit_failure_latches"); self.app._record_latch(db, "credential:ledger_audit", "CREDENTIAL_INVALID", old, ("credential_bindings.ledger_audit",), role="ledger_audit", revision=2)
-            for candidate in (self.recovery_configuration("b", 1, "2" * 64), self.recovery_configuration("b", 3, "1" * 64)):
+            db.execute("DELETE FROM audit_failure_latches"); self.app._record_latch(db, "credential:ledger_audit", "CREDENTIAL_INVALID", credential_repair, ("credential_bindings.ledger_audit",), role="ledger_audit", revision=2)
+            for candidate in (self.recovery_configuration("a", {"ledger_audit": 1}, "2" * 64), self.recovery_configuration("a", {"ledger_audit": 3}, "2" * 64)):
                 db.execute("BEGIN IMMEDIATE"); self.assertFalse(self.app._recover_latch(db, "credential:ledger_audit", candidate, "event_accept", role="ledger_audit")); db.rollback()
             db.execute("UPDATE audit_failure_latches SET failure_field_mask_json='[\"wrong.mask\"]'")
-            db.execute("BEGIN IMMEDIATE"); self.assertFalse(self.app._recover_latch(db, "credential:ledger_audit", repaired, "event_accept", role="ledger_audit")); db.rollback()
+            db.execute("BEGIN IMMEDIATE"); self.assertFalse(self.app._recover_latch(db, "credential:ledger_audit", credential_repair, "event_accept", role="ledger_audit")); db.rollback()
 
             # F: idle/restart/time never mutates a latch; G: transient errors never create one.
             before = tuple(db.execute("SELECT latch_key,updated_utc FROM audit_failure_latches").fetchone())
             self.assertEqual(before, tuple(db.execute("SELECT latch_key,updated_utc FROM audit_failure_latches").fetchone()))
             self.assertEqual(("REMOTE_UNAVAILABLE", False), (self.app._audit_failure(TimeoutError(), "g")[0], self.app._audit_failure(TimeoutError(), "g")[2]))
         finally: db.close()
+
+    def test_aud_14_production_path_peer_drift_requires_unchanged_local_fingerprints(self):
+        env, _paths = self.production_environment()
+        self.use_production_prepare(_paths)
+        peers = [
+            {"compatible": True},
+            {"compatible": False, "failure_code": "PEER_IDENTITY_INVALID", "failure_field_mask": ("peer_expected.service_id",)},
+            {"compatible": True},
+            {"compatible": True},
+        ]
+        self.app.peer_ready = lambda _configuration=None: peers.pop(0)
+        with mock.patch.dict(os.environ, env, clear=False):
+            self.assertIsNone(self.app.audit_worker_cycle()["failure_code"])
+            self.assertEqual("PEER_IDENTITY_INVALID", self.app.audit_worker_cycle()["failure_code"])
+            os.environ["REGISTRY_AUDIT_INTERVAL_SECONDS"] = "31"
+            self.assertEqual("PEER_IDENTITY_INVALID", self.app.audit_worker_cycle()["failure_code"])
+            os.environ["REGISTRY_AUDIT_INTERVAL_SECONDS"] = "30"
+            self.assertIsNone(self.app.audit_worker_cycle()["failure_code"])
+        db = self.db()
+        try: self.assertEqual(0, db.execute("SELECT count(*) FROM audit_failure_latches").fetchone()[0])
+        finally: db.close()
+
+    def test_aud_14_production_path_credential_repair_is_atomic(self):
+        env, paths = self.production_environment()
+        self.use_production_prepare(paths)
+        failing = {"event": None}
+        def delivery(event_id, _configuration=None):
+            if event_id == failing["event"]: raise urllib.error.HTTPError("http://ledger:8790", 401, "rejected", {}, None)
+            self.effects.append(event_id)
+        self.app._deliver_claimed = delivery
+        self.add("accepted-binding")
+        with mock.patch.dict(os.environ, env, clear=False):
+            self.assertEqual(1, self.app.audit_worker_cycle()["delivered"])
+            self.add("credential-repair"); failing["event"] = "credential-repair"
+            self.assertEqual("REMOTE_REJECTED", self.app.audit_worker_cycle()["failure_code"])
+            Path(paths["ledger_audit"]).write_bytes(base64.urlsafe_b64encode(bytes(range(128, 160))).rstrip(b"="))
+            os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = "2"; failing["event"] = None
+            future = time.time() + 31
+            with mock.patch.object(self.app.time, "time", return_value=future): result = self.app.audit_worker_cycle()
+        self.assertEqual((1, None), (result["delivered"], result["failure_code"]))
+        db = self.db()
+        try:
+            self.assertEqual((2, 0), tuple(db.execute("SELECT accepted_revision,(SELECT count(*) FROM audit_failure_latches) FROM audit_credential_bindings WHERE role='ledger_audit'").fetchone()))
+            self.assertIsNotNone(db.execute("SELECT delivered_utc FROM audit_outbox WHERE event_id='credential-repair'").fetchone()[0])
+        finally: db.close()
+
+    def test_aud_14_production_path_highwater_survives_lower_retries_and_restart(self):
+        env, paths = self.production_environment()
+        self.use_production_prepare(paths)
+        reject = {"event": None}; network = []
+        def delivery(event_id, _configuration=None):
+            network.append(event_id)
+            if event_id == reject["event"]: raise urllib.error.HTTPError("http://ledger:8790", 401, "rejected", {}, None)
+            self.effects.append(event_id)
+        self.app._deliver_claimed = delivery
+        self.add("highwater-seed")
+        with mock.patch.dict(os.environ, env, clear=False):
+            self.assertEqual(1, self.app.audit_worker_cycle()["delivered"])
+            self.add("highwater-event"); reject["event"] = "highwater-event"
+            Path(paths["ledger_audit"]).write_bytes(base64.urlsafe_b64encode(bytes(range(128, 160))).rstrip(b"=")); os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = "5"
+            self.assertEqual("REMOTE_REJECTED", self.app.audit_worker_cycle()["failure_code"])
+            for revision, start in ((2, 160), (2, 160), (3, 192), (4, 224)):
+                Path(paths["ledger_audit"]).write_bytes(base64.urlsafe_b64encode(bytes((start + index) % 256 for index in range(32))).rstrip(b"=")); os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = str(revision)
+                self.assertEqual("CREDENTIAL_INVALID", self.app.audit_worker_cycle()["failure_code"])
+            self.assertEqual(["highwater-seed", "highwater-event"], network)
+            db = self.db()
+            try: self.assertEqual(5, db.execute("SELECT highest_failed_revision FROM audit_credential_failure_highwater WHERE role='ledger_audit'").fetchone()[0])
+            finally: db.close()
+            Path(paths["ledger_audit"]).write_bytes(base64.urlsafe_b64encode(bytes(range(16, 48))).rstrip(b"=")); os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = "6"; reject["event"] = None
+            future = time.time() + 31
+            with mock.patch.object(self.app.time, "time", return_value=future): result = self.app.audit_worker_cycle()
+        self.assertEqual((1, None), (result["delivered"], result["failure_code"]))
+        db = self.db()
+        try:
+            self.assertEqual((6, 5, 0), tuple(db.execute("SELECT accepted_revision,(SELECT highest_failed_revision FROM audit_credential_failure_highwater WHERE role='ledger_audit'),(SELECT count(*) FROM audit_failure_latches) FROM audit_credential_bindings WHERE role='ledger_audit'").fetchone()))
+        finally: db.close()
+
+    def test_aud_14_d0_is_stateless_and_d1_recovers_only_after_role_proof(self):
+        env, paths = self.production_environment(); original = Path(paths["ledger_audit"]).read_bytes(); runtime = self.use_production_prepare(paths)
+        self.add("d1-proof")
+        with mock.patch.dict(os.environ, env, clear=False):
+            self.assertEqual(1, self.app.audit_worker_cycle()["delivered"])
+            before = self.path.read_bytes(); network_before = list(self.effects)
+            os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = "invalid"
+            self.assertEqual("CREDENTIAL_INVALID", self.app.audit_worker_cycle()["failure_code"])
+            db = self.db()
+            try: self.assertEqual((None, None), tuple(db.execute("SELECT declared_revision,full_fingerprint FROM audit_failure_latches WHERE latch_key='credential:ledger_audit'").fetchone()))
+            finally: db.close()
+            os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = "1"
+            for raw in self.invalid_credential_fixtures():
+                Path(paths["ledger_audit"]).write_bytes(raw); result = self.app.audit_worker_cycle()
+                self.assertEqual("CREDENTIAL_INVALID", result["failure_code"]); self.assertEqual(network_before, self.effects)
+            db = self.db()
+            try:
+                latch = db.execute("SELECT full_fingerprint,failed_verifier,declared_revision,failed_canonical_path FROM audit_failure_latches WHERE latch_key='credential:ledger_audit'").fetchone()
+                self.assertEqual((None, None, 1, None), tuple(latch))
+                persisted = tuple(db.execute("SELECT release_start_uuid,boot_epoch_revision,epoch_state,heartbeat_utc FROM audit_boot_epoch").fetchone())
+            finally: db.close()
+            restarted_calls = []; restarted = {}
+            with self.assertRaises(self.app.AuditConfigurationError) as rejected:
+                self.saved["_prepare_audit_configuration"](reader=lambda path: Path({"/ledger_audit": paths["ledger_audit"], "/ledger_readiness_outbound": paths["ledger_readiness_outbound"], "/registry_peer_readiness_inbound": paths["registry_peer_readiness_inbound"]}[path]).read_bytes(), db_factory=lambda: restarted_calls.append("db"), runtime=restarted)
+            self.assertEqual("AUDIT_BOOTSTRAP_CREDENTIAL_REJECTED", rejected.exception.code); self.assertEqual([], restarted_calls)
+            db = self.db()
+            try: self.assertEqual(persisted, tuple(db.execute("SELECT release_start_uuid,boot_epoch_revision,epoch_state,heartbeat_utc FROM audit_boot_epoch").fetchone()))
+            finally: db.close()
+            Path(paths["ledger_audit"]).write_bytes(base64.urlsafe_b64encode(bytes(range(128, 160))).rstrip(b"=")); os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = "2"; self.add("d1-repair-proof")
+            repaired = self.app.audit_worker_cycle()
+        self.assertEqual((1, None), (repaired["delivered"], repaired["failure_code"]))
+        db = self.db()
+        try: self.assertEqual((2, 0), tuple(db.execute("SELECT accepted_revision,(SELECT count(*) FROM audit_failure_latches) FROM audit_credential_bindings WHERE role='ledger_audit'").fetchone()))
+        finally: db.close()
+        self.assertNotEqual(before, self.path.read_bytes())
+
+    def test_aud_12_release_start_epoch_restart_replay_mismatch_and_cas(self):
+        env, paths = self.production_environment(); runtime1 = self.use_production_prepare(paths)
+        with mock.patch.dict(os.environ, env, clear=False):
+            self.app.audit_worker_cycle(); first = dict(runtime1["epoch"])
+            db = self.db()
+            try:
+                self.assertTrue(self.app.audit_delivery_health(db, environ=env)["ready"])
+                self.app._close_epoch(db, first)
+            finally: db.close()
+            env2 = dict(env); env2["TOWNSQUARE_RELEASE_START_UUID"] = "22222222-2222-4222-8222-222222222222"; os.environ.update(env2); runtime2 = self.use_production_prepare(paths); self.app.audit_worker_cycle(); second = dict(runtime2["epoch"])
+            self.assertEqual(first["boot_epoch_revision"] + 1, second["boot_epoch_revision"])
+            db = self.db()
+            try:
+                with self.assertRaisesRegex(self.app.AuditEpochError, "BOOT_EPOCH_LOST"): self.app._epoch_heartbeat(db, first, self.app._audit_utc())
+                snapshot = tuple(db.execute("SELECT * FROM audit_boot_epoch").fetchone())
+            finally: db.close()
+            os.environ.update(env); replay = self.saved["_prepare_audit_configuration"]
+            reader = lambda path: Path({"/ledger_audit": paths["ledger_audit"], "/ledger_readiness_outbound": paths["ledger_readiness_outbound"], "/registry_peer_readiness_inbound": paths["registry_peer_readiness_inbound"]}[path]).read_bytes()
+            with self.assertRaisesRegex(self.app.AuditEpochError, "BOOT_EPOCH_REPLAY"): replay(reader=reader, runtime={})
+            mismatch = dict(env2); mismatch["TOWNSQUARE_RELEASE_START_UUID"] = "33333333-3333-4333-8333-333333333333"; mismatch["TOWNSQUARE_SOURCE_TREE"] = "9" * 40
+            with self.assertRaisesRegex(self.app.AuditEpochError, "IMMUTABLE_CONTEXT_MISMATCH"): replay(environ=mismatch, reader=reader, runtime={})
+            db = self.db()
+            try: self.assertEqual(snapshot, tuple(db.execute("SELECT * FROM audit_boot_epoch").fetchone()))
+            finally: db.close()
+            active = dict(env2); active["TOWNSQUARE_RELEASE_START_UUID"] = "44444444-4444-4444-8444-444444444444"
+            with self.assertRaisesRegex(self.app.AuditEpochError, "BOOT_EPOCH_(ACTIVE|CAS)_CONFLICT"): replay(environ=active, reader=reader, runtime={})
+            db = self.db()
+            try:
+                self.assertIsNone(db.execute("SELECT 1 FROM audit_boot_epoch_history WHERE release_start_uuid=?", (active["TOWNSQUARE_RELEASE_START_UUID"],)).fetchone())
+                self.app._close_epoch(db, second)
+            finally: db.close()
+            barrier = threading.Barrier(2); outcomes = []
+            def claimant(candidate):
+                try:
+                    barrier.wait(); replay(environ=candidate, reader=reader, runtime={}); outcomes.append("WIN")
+                except self.app.AuditEpochError as error: outcomes.append(error.code)
+            candidates = []
+            for value in ("55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"):
+                candidate = dict(env2); candidate["TOWNSQUARE_RELEASE_START_UUID"] = value; candidates.append(candidate)
+            threads = [threading.Thread(target=claimant, args=(candidate,)) for candidate in candidates]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join(5)
+            self.assertEqual(["BOOT_EPOCH_CAS_CONFLICT", "WIN"], sorted(outcomes))
 
     def test_schema_v6_copy_migrates_atomically_to_worker_state_v7(self):
         old = os.environ.get("REGISTRY_DB"); os.environ["REGISTRY_DB"] = str(self.path)
@@ -342,7 +549,7 @@ class AuditWorkerTests(unittest.TestCase):
                 if statement.lstrip().upper().startswith("INSERT INTO REGISTRY_MIGRATIONS VALUES(6,"): break
             db.execute(f"PRAGMA application_id={migrate.APPLICATION_ID}"); db.execute("PRAGMA user_version=6")
             migrate.migrate(db)
-            self.assertEqual(9, db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(10, db.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual((1, None), tuple(db.execute("SELECT singleton,heartbeat_utc FROM audit_worker_state").fetchone()))
             db.close()
             contract = json.loads((ROOT / "contracts" / "r7" / "registry-schema.json").read_text(encoding="utf-8"))

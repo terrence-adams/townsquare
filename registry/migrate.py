@@ -5,7 +5,7 @@ from pathlib import Path
 DB=Path(os.environ['REGISTRY_DB']); LOCK=DB.with_suffix('.migration.lock')
 ROOT=Path(__file__).resolve().parents[1]; SCHEMA=Path(__file__).with_name('schema.sql')
 CONTRACT=ROOT/'contracts'/'r7'/'registry-schema.json'
-APPLICATION_ID=1414746695; USER_VERSION=9
+APPLICATION_ID=1414746695; USER_VERSION=10
 def _sha(path):
  data=path.read_bytes().replace(b'\r\n',b'\n').replace(b'\r',b'\n')
  return hashlib.sha256(data).hexdigest()
@@ -17,7 +17,7 @@ def _statements(path):
  if current.strip(): raise RuntimeError('partial Registry schema statement')
  return statements
 def _upgrade_statements(version):
- if version not in (1,2,3,4,5,6,7,8):raise RuntimeError(f'unsupported Registry upgrade version: {version}')
+ if version not in (1,2,3,4,5,6,7,8,9):raise RuntimeError(f'unsupported Registry upgrade version: {version}')
  statements=_statements(SCHEMA)
  start=next(index for index,statement in enumerate(statements) if statement.lstrip().upper().startswith(f'INSERT INTO REGISTRY_MIGRATIONS VALUES({version},'))+1
  end=next(index for index,statement in enumerate(statements) if statement.lstrip().upper().startswith(f'INSERT INTO REGISTRY_MIGRATIONS VALUES({version+1},'))
@@ -25,7 +25,7 @@ def _upgrade_statements(version):
 def _contract():
  try: value=json.loads(CONTRACT.read_text(encoding='utf-8'))
  except Exception as exc: raise RuntimeError('Registry schema contract unavailable') from exc
- if value.get('application_id')!=APPLICATION_ID or value.get('user_version')!=USER_VERSION or value.get('head')!='9' or value.get('schema_sha256')!=_sha(SCHEMA) or value.get('migrator_sha256')!=_sha(Path(__file__)):
+ if value.get('application_id')!=APPLICATION_ID or value.get('user_version')!=USER_VERSION or value.get('head')!='10' or value.get('schema_sha256')!=_sha(SCHEMA) or value.get('migrator_sha256')!=_sha(Path(__file__)):
   raise RuntimeError('Registry schema contract hash or identity mismatch')
  return value
 def canonical_schema_sha256(db):
@@ -41,7 +41,7 @@ def _require_upgrade_shape(db,version):
   if 'session_credential_sha256' not in columns or 'session_public_key_b64url' in columns: raise RuntimeError('Registry v5 session column shape mismatch')
 def verify(db):
  contract=_contract(); versions=[r[0] for r in db.execute('SELECT version FROM registry_migrations ORDER BY version')]
- if versions!=[1,2,3,4,5,6,7,8,9] or db.execute('PRAGMA application_id').fetchone()[0]!=APPLICATION_ID or db.execute('PRAGMA user_version').fetchone()[0]!=USER_VERSION: raise RuntimeError('Registry migration history or database identity mismatch')
+ if versions!=[1,2,3,4,5,6,7,8,9,10] or db.execute('PRAGMA application_id').fetchone()[0]!=APPLICATION_ID or db.execute('PRAGMA user_version').fetchone()[0]!=USER_VERSION: raise RuntimeError('Registry migration history or database identity mismatch')
  if canonical_schema_sha256(db)!=contract.get('canonical_schema_sha256'): raise RuntimeError('Registry canonical schema digest mismatch')
  return USER_VERSION
 def migrate(db):
@@ -58,7 +58,7 @@ def migrate(db):
      for statement in _upgrade_statements(version): db.execute(statement)
      db.execute(f"INSERT INTO registry_migrations VALUES({version+1},strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
     db.execute(f'PRAGMA application_id={APPLICATION_ID}'); db.execute(f'PRAGMA user_version={USER_VERSION}')
-   elif versions != [1,2,3,4,5,6,7,8,9]: raise RuntimeError(f'unsupported registry schema versions: {versions}')
+   elif versions != [1,2,3,4,5,6,7,8,9,10]: raise RuntimeError(f'unsupported registry schema versions: {versions}')
   db.commit()
  except Exception: db.rollback(); raise
  return verify(db)
