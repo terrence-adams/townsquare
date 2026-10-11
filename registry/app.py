@@ -32,7 +32,7 @@ def connect():
  if d.execute("PRAGMA application_id").fetchone()[0] != 1414746695 or d.execute("PRAGMA user_version").fetchone()[0] != DATABASE_SCHEMA_VERSION:
   d.close(); raise RuntimeError('Registry application_id/user_version mismatch')
  return d
-SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; DATABASE_SCHEMA_VERSION=8; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
+SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; DATABASE_SCHEMA_VERSION=9; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
 AUDIT_INTERVAL_ENV='REGISTRY_AUDIT_INTERVAL_SECONDS';AUDIT_RELEASE_INTERVAL_SECONDS=30;AUDIT_CYCLE_LIMIT=100;AUDIT_LEASE_SECONDS=30
 AUDIT_ROLES=(
  ('ledger_audit','REGISTRY_LEDGER_AUDIT_TOKEN_FILE','REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION'),
@@ -113,8 +113,10 @@ def _audit_static_config(environ=None):
  if bad:raise AuditConfigurationError('CONFIGURATION_INVALID',bad)
  registry={'service_id':_audit_string(values.get('REGISTRY_SERVICE_ID'),'registry.service_id'),'api_schema_head':_audit_uint(values.get('REGISTRY_SCHEMA_HEAD'),'registry.api_schema_head'),'database_schema_version':DATABASE_SCHEMA_VERSION,'audit_contract_version':_audit_string(values.get('REGISTRY_AUDIT_CONTRACT_VERSION'),'registry.audit_contract_version')}
  peer={'service_id':_audit_string(values.get('REGISTRY_LEDGER_SERVICE_ID'),'peer_expected.service_id'),'schema_head':_audit_uint(values.get('REGISTRY_LEDGER_SCHEMA_HEAD'),'peer_expected.schema_head'),'audit_contract_version':_audit_string(values.get('REGISTRY_LEDGER_AUDIT_CONTRACT'),'peer_expected.audit_contract_version')}
- if registry!={'service_id':SERVICE_ID,'api_schema_head':SCHEMA_VERSION,'database_schema_version':DATABASE_SCHEMA_VERSION,'audit_contract_version':AUDIT_CONTRACT_VERSION}:raise AuditConfigurationError('CONFIGURATION_INVALID',('registry',))
- if peer!={'service_id':'townsquare-ledger-v0','schema_head':14,'audit_contract_version':AUDIT_CONTRACT_VERSION}:raise AuditConfigurationError('CONFIGURATION_INVALID',('peer_expected',))
+ registry_expected={'service_id':SERVICE_ID,'api_schema_head':SCHEMA_VERSION,'database_schema_version':DATABASE_SCHEMA_VERSION,'audit_contract_version':AUDIT_CONTRACT_VERSION}
+ peer_expected={'service_id':'townsquare-ledger-v0','schema_head':14,'audit_contract_version':AUDIT_CONTRACT_VERSION}
+ if registry!=registry_expected:raise AuditConfigurationError('CONFIGURATION_INVALID',tuple('registry.'+name for name in registry_expected if registry.get(name)!=registry_expected[name]))
+ if peer!=peer_expected:raise AuditConfigurationError('CONFIGURATION_INVALID',tuple('peer_expected.'+name for name in peer_expected if peer.get(name)!=peer_expected[name]))
  interval=_audit_uint(values.get(AUDIT_INTERVAL_ENV),'transport.interval_seconds')
  if not 5<=interval<=300:raise AuditConfigurationError('CONFIGURATION_INVALID',('transport.interval_seconds',))
  transport={'audit_url':_audit_url(LEDGER_AUDIT_URL,'transport.audit_url'),'readiness_url':_audit_url(LEDGER_READINESS_URL,'transport.readiness_url'),'timeout_seconds':LEDGER_AUDIT_TIMEOUT_SECONDS,'interval_seconds':interval,'cycle_limit':AUDIT_CYCLE_LIMIT,'lease_seconds':AUDIT_LEASE_SECONDS}
@@ -132,6 +134,7 @@ def _prepare_audit_configuration(environ=None,reader=None,db_factory=None,salt_s
   role=binding['role']
   try:decoded[role]=validate_audit_credential(reader(binding['canonical_path']))
   except (OSError,AuditConfigurationError):raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,binding['declared_revision']) from None
+ if hmac.compare_digest(decoded['ledger_readiness_outbound'],decoded['registry_peer_readiness_inbound']):raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.ledger_readiness_outbound','credential_bindings.registry_peer_readiness_inbound'),static_fingerprint)
  if any(binding['declared_revision'] is None for binding in static['credential_bindings']):
   role=next(binding['role'] for binding in static['credential_bindings'] if binding['declared_revision'] is None);raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,None)
  db=db_factory();full_bindings=[];candidates={}
@@ -144,6 +147,8 @@ def _prepare_audit_configuration(environ=None,reader=None,db_factory=None,salt_s
     db.execute('INSERT INTO audit_credential_bindings(role,salt) VALUES(?,?)',(role,salt));accepted_revision=None;accepted_verifier=None
    else:salt=row['salt'];accepted_revision=row['accepted_revision'];accepted_verifier=row['verifier']
    verifier=_credential_verifier(role,salt,decoded[role]);revision=binding['declared_revision']
+   failed=db.execute("SELECT declared_revision FROM audit_failure_latches WHERE latch_key=?",('credential:'+role,)).fetchone()
+   if failed and failed['declared_revision'] is not None and revision<=failed['declared_revision']:raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,revision,True)
    if accepted_revision is not None and (revision<accepted_revision or (revision==accepted_revision and not hmac.compare_digest(verifier,accepted_verifier))):raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,revision,True)
    candidate=accepted_revision is None or revision>accepted_revision
    if candidate and accepted_verifier is not None and hmac.compare_digest(verifier,accepted_verifier):raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.'+role,),static_fingerprint,role,revision,True)
@@ -180,12 +185,11 @@ def peer_ready(configuration=None):
  try:
   if configuration is None:require_directional_tokens();token=base64.urlsafe_b64encode(validate_audit_credential(Path(LEDGER_READINESS_TOKEN_FILE).read_bytes())).rstrip(b'=').decode()
   else:
-   if hmac.compare_digest(configuration['decoded']['ledger_readiness_outbound'],configuration['decoded']['registry_peer_readiness_inbound']):raise AuditConfigurationError('CREDENTIAL_INVALID',('credential_bindings.ledger_readiness_outbound','credential_bindings.registry_peer_readiness_inbound'),configuration['static_fingerprint'])
    token=base64.urlsafe_b64encode(configuration['decoded']['ledger_readiness_outbound']).rstrip(b'=').decode()
   request=urllib.request.Request(LEDGER_READINESS_URL,headers={'Authorization':'Bearer '+token})
   with urllib.request.urlopen(request,timeout=LEDGER_AUDIT_TIMEOUT_SECONDS) as response: peer=json.load(response)
   compatible=peer.get('ok') is True and compatible_identity(peer,CANARY_IDENTITY) and peer.get('service_id')=='townsquare-ledger-v0' and peer.get('schema_version')==14 and peer.get('audit_contract_version')==AUDIT_CONTRACT_VERSION
-  expected={'service_id','schema_version','audit_contract_version',*CANARY_IDENTITY.as_dict()};mask=tuple(sorted('peer_expected.'+name for name in expected if name!='ok' and (name=='service_id' and peer.get(name)!='townsquare-ledger-v0' or name=='schema_version' and peer.get(name)!=14 or name=='audit_contract_version' and peer.get(name)!=AUDIT_CONTRACT_VERSION or name in CANARY_IDENTITY.as_dict() and peer.get(name)!=CANARY_IDENTITY.as_dict()[name])))
+  expected={'service_id','schema_version','audit_contract_version',*CANARY_IDENTITY.as_dict()};mask=tuple(sorted((('peer_expected.ok',) if peer.get('ok') is not True else ())+tuple('peer_expected.'+name for name in expected if name=='service_id' and peer.get(name)!='townsquare-ledger-v0' or name=='schema_version' and peer.get(name)!=14 or name=='audit_contract_version' and peer.get(name)!=AUDIT_CONTRACT_VERSION or name in CANARY_IDENTITY.as_dict() and peer.get(name)!=CANARY_IDENTITY.as_dict()[name])))
   return {'compatible':compatible,'failure_code':None if compatible else 'PEER_IDENTITY_INVALID','failure_field_mask':mask,'service_id':peer.get('service_id'),'schema_version':peer.get('schema_version'),**{name:peer.get(name) for name in CANARY_IDENTITY.as_dict()}}
  except urllib.error.HTTPError as error:
   if error.code in (400,401,403,409):return {'compatible':False,'failure_code':'REMOTE_REJECTED','failure_field_mask':('credential_bindings.ledger_readiness_outbound','transport.readiness_url')}
@@ -230,16 +234,52 @@ def _deliver_claimed(event_id,configuration=None):
  try:value=json.loads(raw.decode('utf-8'))
  except (UnicodeError,ValueError):raise AuditDeliveryFailure('REMOTE_PROTOCOL_INVALID',True,('transport.audit_url','response.schema')) from None
  if not isinstance(value,dict) or set(value)!={'event_uuid','ledger_event_id'} or value.get('event_uuid')!=event_id or not isinstance(value.get('ledger_event_id'),str) or not value['ledger_event_id']:raise AuditDeliveryFailure('REMOTE_PROTOCOL_INVALID',True,('transport.audit_url','response.schema','response.event_uuid'))
+def _binding(configuration,role):return next((item for item in configuration.get('full',{}).get('credential_bindings',()) if item.get('role')==role),None)
+def _field_value(configuration,path):
+ parts=path.split('.')
+ if parts[0]=='credential_bindings' and len(parts)>=2:
+  value=_binding(configuration,parts[1])
+  for part in parts[2:]:value=value.get(part) if isinstance(value,dict) else None
+  return value
+ value=configuration.get('full') or configuration.get('static') or {}
+ for part in parts:value=value.get(part) if isinstance(value,dict) else None
+ return value
+def _field_fingerprint(configuration,mask):
+ value={path:_field_value(configuration,path) for path in sorted(set(mask))}
+ return _domain_fingerprint('townsquare-registry-audit-failure-fields-v1',value)
 def _record_latch(db,key,code,configuration,mask,event_id=None,role=None,revision=None):
  if code not in AUDIT_PERMANENT_CODES:raise RuntimeError('invalid permanent audit failure code')
- now=_audit_utc();static=configuration.get('static_fingerprint') if configuration else hashlib.sha256(('static:'+code).encode()).hexdigest();full=configuration.get('full_fingerprint') if configuration else None;mask_json=_jcs(sorted(set(mask)))
- db.execute("INSERT INTO audit_failure_latches(latch_key,event_id,failure_code,static_fingerprint,full_fingerprint,failure_field_mask_json,credential_role,declared_revision,created_utc,updated_utc) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(latch_key) DO UPDATE SET event_id=excluded.event_id,failure_code=excluded.failure_code,static_fingerprint=excluded.static_fingerprint,full_fingerprint=excluded.full_fingerprint,failure_field_mask_json=excluded.failure_field_mask_json,credential_role=excluded.credential_role,declared_revision=excluded.declared_revision,updated_utc=excluded.updated_utc",(key,event_id,code,static,full,mask_json,role,revision,now,now))
+ mask=tuple(sorted(set(mask)));now=_audit_utc();static=configuration.get('static_fingerprint') if configuration else hashlib.sha256(('static:'+code).encode()).hexdigest();full=configuration.get('full_fingerprint') if configuration else None;binding=_binding(configuration or {},role) if role else None;verifier=binding.get('verifier') if binding else None;fields=_field_fingerprint(configuration or {},mask)
+ db.execute("INSERT INTO audit_failure_latches(latch_key,event_id,failure_code,static_fingerprint,full_fingerprint,failure_field_mask_json,credential_role,declared_revision,created_utc,updated_utc,failed_verifier,failure_field_fingerprint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(latch_key) DO UPDATE SET event_id=excluded.event_id,failure_code=excluded.failure_code,static_fingerprint=excluded.static_fingerprint,full_fingerprint=excluded.full_fingerprint,failure_field_mask_json=excluded.failure_field_mask_json,credential_role=excluded.credential_role,declared_revision=excluded.declared_revision,updated_utc=excluded.updated_utc,failed_verifier=excluded.failed_verifier,failure_field_fingerprint=excluded.failure_field_fingerprint",(key,event_id,code,static,full,_jcs(list(mask)),role,revision,now,now,verifier,fields))
 def _accept_bindings(db,configuration,roles):
  for binding in configuration['full']['credential_bindings']:
   role=binding['role']
-  if role in roles:
-   if configuration['candidates'].get(role):db.execute('UPDATE audit_credential_bindings SET accepted_revision=?,verifier=?,full_fingerprint=? WHERE role=?',(binding['revision'],binding['verifier'],configuration['full_fingerprint'],role));configuration['candidates'][role]=False
-   db.execute('DELETE FROM audit_failure_latches WHERE latch_key=?',('credential:'+role,))
+  if role in roles and configuration['candidates'].get(role):db.execute('UPDATE audit_credential_bindings SET accepted_revision=?,verifier=?,full_fingerprint=? WHERE role=?',(binding['revision'],binding['verifier'],configuration['full_fingerprint'],role));configuration['candidates'][role]=False
+def _recover_latch(db,key,configuration,proof,event_id=None,role=None):
+ row=db.execute('SELECT * FROM audit_failure_latches WHERE latch_key=?',(key,)).fetchone()
+ if row is None:return True
+ try:mask=tuple(json.loads(row['failure_field_mask_json']))
+ except (TypeError,ValueError):return False
+ if not mask or mask!=tuple(sorted(set(mask))) or not all(isinstance(item,str) and item for item in mask):return False
+ current_static=configuration.get('static_fingerprint');current_full=configuration.get('full_fingerprint');binding=_binding(configuration,role) if role else None
+ fingerprints_compared=(row['static_fingerprint'],row['full_fingerprint'],current_static,current_full)
+ if key.startswith('event:'):
+  allowed={f'event.{event_id}.identity','credential_bindings.ledger_audit','transport.audit_url','response.schema','response.event_uuid','response.status'}
+  valid=proof=='event_accept' and row['event_id']==event_id and event_id and set(mask)<=allowed
+ elif key=='peer':
+  valid=proof=='peer_identity' and all(item.startswith('peer_expected.') or item in ('transport.readiness_url','response.status','credential_bindings.ledger_readiness_outbound') for item in mask)
+ elif key=='configuration':
+  identity_leaves={'identity.'+name for name in ('runtime_class','authority_class','canary_label','compose_project','source_commit','source_tree','r7_release_id','r7_input_manifest_sha256','r7_identity_sha256')};registry_leaves={'registry.'+name for name in ('service_id','api_schema_head','database_schema_version','audit_contract_version')};peer_leaves={'peer_expected.'+name for name in ('service_id','schema_head','audit_contract_version')};transport_leaves={'transport.'+name for name in ('audit_url','readiness_url','timeout_seconds','interval_seconds','cycle_limit','lease_seconds')};binding_leaves={f'credential_bindings.{item}{suffix}' for item in ('ledger_audit','ledger_readiness_outbound','registry_peer_readiness_inbound') for suffix in ('','.canonical_path','.declared_revision')}
+  valid=proof=='peer_identity' and row['failure_code']=='CONFIGURATION_INVALID' and set(mask)<=(identity_leaves|registry_leaves|peer_leaves|transport_leaves|binding_leaves) and current_static!=row['static_fingerprint'] and current_full!=row['full_fingerprint'] and _field_fingerprint(configuration,mask)!=row['failure_field_fingerprint']
+ elif key.startswith('credential:'):
+  expected=key.split(':',1)[1];valid=role==expected and proof==('event_accept' if role=='ledger_audit' else 'peer_identity') and mask==(f'credential_bindings.{role}',)
+ else:return False
+ if not valid:return False
+ if role and any(item==f'credential_bindings.{role}' for item in mask):
+  if not binding or row['declared_revision'] is None or binding['revision']<=row['declared_revision'] or not row['failed_verifier'] or hmac.compare_digest(binding['verifier'],row['failed_verifier']) or current_full==row['full_fingerprint']:return False
+ elif key.startswith('credential:'):return False
+ if any(value is None for value in fingerprints_compared[:1]) or current_static is None or current_full is None:return False
+ db.execute('DELETE FROM audit_failure_latches WHERE latch_key=?',(key,));return True
 def _current_latch(db):return db.execute('SELECT failure_code,latch_key FROM audit_failure_latches ORDER BY created_utc,latch_key LIMIT 1').fetchone()
 def _worker_state(db,started,completed=None,attempts=0,failure=None):
  heartbeat=completed or started;latch=_current_latch(db);code=latch['failure_code'] if latch else None;digest=hashlib.sha256((code+':'+latch['latch_key']).encode()).hexdigest() if latch else None
@@ -260,17 +300,24 @@ def audit_worker_cycle(interval=AUDIT_RELEASE_INTERVAL_SECONDS,stop_event=None):
   else:
    peer=peer_ready(configuration)
    if not peer.get('compatible'):
-    if peer.get('failure_code') in AUDIT_PERMANENT_CODES:_record_latch(d,'peer',peer['failure_code'],configuration,peer.get('failure_field_mask',('peer_expected',)));permanent=peer['failure_code']
+    if peer.get('failure_code') in AUDIT_PERMANENT_CODES:
+     mask=peer.get('failure_field_mask',('peer_expected.service_id',));role='ledger_readiness_outbound' if 'credential_bindings.ledger_readiness_outbound' in mask else None;revision=_binding(configuration,role)['revision'] if role else None;_record_latch(d,'peer',peer['failure_code'],configuration,mask,role=role,revision=revision);permanent=peer['failure_code']
    else:
-    d.execute('BEGIN IMMEDIATE');_accept_bindings(d,configuration,{'ledger_readiness_outbound','registry_peer_readiness_inbound'});d.execute("DELETE FROM audit_failure_latches WHERE latch_key IN ('peer','configuration')");d.commit()
+    d.execute('BEGIN IMMEDIATE')
+    recovered=_recover_latch(d,'peer',configuration,'peer_identity',role='ledger_readiness_outbound') and _recover_latch(d,'configuration',configuration,'peer_identity')
+    for role in ('ledger_readiness_outbound','registry_peer_readiness_inbound'):recovered=recovered and _recover_latch(d,'credential:'+role,configuration,'peer_identity',role=role)
+    if recovered:_accept_bindings(d,configuration,{'ledger_readiness_outbound','registry_peer_readiness_inbound'});d.commit()
+    else:d.rollback();permanent=(_current_latch(d) or {'failure_code':'CONFIGURATION_INVALID'})['failure_code']
     owner=str(uuid.uuid4())
-    while attempted<AUDIT_CYCLE_LIMIT and not (stop_event and stop_event.is_set()):
+    while recovered and attempted<AUDIT_CYCLE_LIMIT and not (stop_event and stop_event.is_set()):
      event_id=claim(d,owner,excluded=seen)
      if not event_id:break
      attempted+=1;seen.append(event_id)
      if stop_event and stop_event.is_set():break
      try:
-      _deliver_claimed(event_id,configuration);d.execute('BEGIN IMMEDIATE');acknowledge_delivery(d,event_id,owner);_accept_bindings(d,configuration,{'ledger_audit'});d.execute('DELETE FROM audit_failure_latches WHERE latch_key=?',('event:'+event_id,));d.commit();delivered+=1
+      _deliver_claimed(event_id,configuration);d.execute('BEGIN IMMEDIATE');recovered=_recover_latch(d,'credential:ledger_audit',configuration,'event_accept',event_id,'ledger_audit') and _recover_latch(d,'event:'+event_id,configuration,'event_accept',event_id,'ledger_audit')
+      if recovered:acknowledge_delivery(d,event_id,owner);_accept_bindings(d,configuration,{'ledger_audit'});d.commit();delivered+=1
+      else:d.rollback();d.execute('BEGIN IMMEDIATE');d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=?,lease_owner=NULL,lease_until=? WHERE event_id=? AND delivered_utc IS NULL AND lease_owner=?",('CONFIGURATION_INVALID:'+hashlib.sha256(b'latch-recovery-rejected').hexdigest(),_audit_utc(time.time()+interval),event_id,owner));d.commit();failed+=1
      except Exception as error:
       code,digest,is_permanent,mask=_audit_failure(error,event_id);cooldown=_audit_utc(time.time()+interval);d.execute('BEGIN IMMEDIATE');d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=?,lease_owner=NULL,lease_until=? WHERE event_id=? AND delivered_utc IS NULL AND lease_owner=?",(code+':'+digest,cooldown,event_id,owner));
       if is_permanent:_record_latch(d,'event:'+event_id,code,configuration,mask,event_id,'ledger_audit',next(item['revision'] for item in configuration['full']['credential_bindings'] if item['role']=='ledger_audit'));permanent=permanent or code

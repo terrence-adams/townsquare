@@ -682,7 +682,7 @@ class StaticContainmentTests(unittest.TestCase):
             db = sqlite3.connect(database)
             try:
                 self.assertEqual(1414746695, db.execute("PRAGMA application_id").fetchone()[0])
-                self.assertEqual(8, db.execute("PRAGMA user_version").fetchone()[0])
+                self.assertEqual(9, db.execute("PRAGMA user_version").fetchone()[0])
             finally:
                 db.close()
 

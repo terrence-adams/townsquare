@@ -238,5 +238,8 @@ CREATE TABLE audit_failure_latches(
 );
 CREATE INDEX audit_failure_latches_event ON audit_failure_latches(event_id);
 INSERT INTO registry_migrations VALUES(8,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+ALTER TABLE audit_failure_latches ADD COLUMN failed_verifier TEXT CHECK(failed_verifier IS NULL OR (length(failed_verifier)=64 AND failed_verifier NOT GLOB '*[^0-9a-f]*'));
+ALTER TABLE audit_failure_latches ADD COLUMN failure_field_fingerprint TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000' CHECK(length(failure_field_fingerprint)=64 AND failure_field_fingerprint NOT GLOB '*[^0-9a-f]*');
+INSERT INTO registry_migrations VALUES(9,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 PRAGMA application_id=1414746695;
-PRAGMA user_version=8;
+PRAGMA user_version=9;

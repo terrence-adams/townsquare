@@ -78,6 +78,21 @@ class AuditWorkerTests(unittest.TestCase):
         try: return dict(db.execute("SELECT * FROM audit_outbox WHERE event_id=?", (event_id,)).fetchone())
         finally: db.close()
 
+    def recovery_configuration(self, marker="a", revision=1, verifier=None):
+        verifier = verifier or marker * 64
+        bindings = [
+            {"role": role, "canonical_path": "/" + role, "revision": revision, "verifier": verifier if role == "ledger_audit" else ("c" if role == "ledger_readiness_outbound" else "d") * 64}
+            for role in ("ledger_audit", "ledger_readiness_outbound", "registry_peer_readiness_inbound")
+        ]
+        full = {
+            "schema": "townsquare-registry-audit-config-v1",
+            "registry": {"service_id": "registry-" + marker},
+            "peer_expected": {"service_id": "ledger"},
+            "transport": {"interval_seconds": 30},
+            "credential_bindings": bindings,
+        }
+        return {"static_fingerprint": marker * 64, "full_fingerprint": ("e" if marker == "a" else marker) * 64, "full": full, "static": dict(full), "candidates": {item["role"]: True for item in bindings}}
+
     def test_aud_01_stranded_row_delivers_after_worker_cycle(self):
         self.add("aud-01")
         result = self.app.audit_worker_cycle()
@@ -158,7 +173,7 @@ class AuditWorkerTests(unittest.TestCase):
 
     def test_aud_08_peer_identity_failure_degrades_then_recovers(self):
         self.add("aud-08", self.app._audit_utc())
-        self.app.peer_ready = lambda _configuration=None: {"compatible": False, "failure_code": "PEER_IDENTITY_INVALID", "failure_field_mask": ("peer_expected",)}
+        self.app.peer_ready = lambda _configuration=None: {"compatible": False, "failure_code": "PEER_IDENTITY_INVALID", "failure_field_mask": ("peer_expected.service_id",)}
         result = self.app.audit_worker_cycle(); self.assertEqual("PEER_IDENTITY_INVALID", result["failure_code"]); self.assertEqual([], self.effects)
         db = self.db(); self.assertFalse(self.app.audit_delivery_health(db)["ready"]); db.close()
         self.app.peer_ready = lambda _configuration=None: {"compatible": True}; self.app.audit_worker_cycle()
@@ -253,6 +268,10 @@ class AuditWorkerTests(unittest.TestCase):
             "/out": base64.urlsafe_b64encode(bytes(range(64, 96))).rstrip(b"="),
             "/in": base64.urlsafe_b64encode(bytes(range(96, 128))).rstrip(b"="),
         }
+        identical = dict(credentials); identical["/in"] = identical["/out"]
+        with self.assertRaises(self.app.AuditConfigurationError) as rejected:
+            self.saved["_prepare_audit_configuration"](env, reader=identical.__getitem__, db_factory=lambda: called.append("db"))
+        self.assertEqual("CREDENTIAL_INVALID", rejected.exception.code); self.assertEqual([], called)
         configuration = self.saved["_prepare_audit_configuration"](
             env, reader=credentials.__getitem__, db_factory=self.db, salt_source=lambda _size: bytes(range(128, 160)))
         self.assertEqual(
@@ -265,6 +284,53 @@ class AuditWorkerTests(unittest.TestCase):
             hashlib.sha256(b"townsquare-registry-audit-config-fingerprint-v1\0" + self.app._jcs(configuration["full"]).encode()).hexdigest(),
             configuration["full_fingerprint"])
 
+    def test_aud_14_a_to_g_transactional_recovery_matrix(self):
+        db = self.db()
+        try:
+            old = self.recovery_configuration("a", 1, "1" * 64)
+            repaired = self.recovery_configuration("b", 2, "2" * 64)
+
+            # A: exact accepted event proof clears only the exact event latch.
+            self.app._record_latch(db, "event:a", "REMOTE_REJECTED", old, ("event.a.identity",), "a", "ledger_audit", 1)
+            self.app._record_latch(db, "event:other", "REMOTE_REJECTED", old, ("event.other.identity",), "other", "ledger_audit", 1)
+            db.execute("BEGIN IMMEDIATE")
+            self.assertTrue(self.app._recover_latch(db, "event:a", old, "event_accept", "a", "ledger_audit")); db.commit()
+            self.assertEqual(["event:other"], [row[0] for row in db.execute("SELECT latch_key FROM audit_failure_latches")])
+
+            # B: authoritative peer repair may clear an identity latch without local fingerprint change.
+            db.execute("DELETE FROM audit_failure_latches")
+            self.app._record_latch(db, "peer", "PEER_IDENTITY_INVALID", old, ("peer_expected.service_id",))
+            db.execute("BEGIN IMMEDIATE"); self.assertTrue(self.app._recover_latch(db, "peer", old, "peer_identity", role="ledger_readiness_outbound")); db.commit()
+
+            # C: local semantic recovery requires the masked leaf and both fingerprints to change.
+            self.app._record_latch(db, "configuration", "CONFIGURATION_INVALID", old, ("registry.service_id",))
+            db.execute("BEGIN IMMEDIATE"); self.assertTrue(self.app._recover_latch(db, "configuration", repaired, "peer_identity")); db.commit()
+
+            # D: same-path credential repair binds only a greater revision/new verifier after role proof.
+            db.execute("INSERT INTO audit_credential_bindings(role,salt) VALUES('ledger_audit',?)", (bytes(range(32)),))
+            self.app._record_latch(db, "credential:ledger_audit", "CREDENTIAL_INVALID", old, ("credential_bindings.ledger_audit",), role="ledger_audit", revision=1)
+            db.execute("BEGIN IMMEDIATE")
+            self.assertTrue(self.app._recover_latch(db, "credential:ledger_audit", repaired, "event_accept", role="ledger_audit"))
+            self.app._accept_bindings(db, repaired, {"ledger_audit"}); db.commit()
+            self.assertEqual((2, "2" * 64), tuple(db.execute("SELECT accepted_revision,verifier FROM audit_credential_bindings WHERE role='ledger_audit'").fetchone()))
+
+            # E: unrelated fingerprint change, wrong mask, stale revision, same verifier, or lost proof cannot clear.
+            unrelated = self.recovery_configuration("b", 2, "2" * 64); unrelated["full"]["registry"]["service_id"] = old["full"]["registry"]["service_id"]
+            db.execute("DELETE FROM audit_failure_latches"); self.app._record_latch(db, "configuration", "CONFIGURATION_INVALID", old, ("registry.service_id",))
+            for candidate, proof in ((unrelated, "peer_identity"), (repaired, "missing")):
+                db.execute("BEGIN IMMEDIATE"); self.assertFalse(self.app._recover_latch(db, "configuration", candidate, proof)); db.rollback()
+            db.execute("DELETE FROM audit_failure_latches"); self.app._record_latch(db, "credential:ledger_audit", "CREDENTIAL_INVALID", old, ("credential_bindings.ledger_audit",), role="ledger_audit", revision=2)
+            for candidate in (self.recovery_configuration("b", 1, "2" * 64), self.recovery_configuration("b", 3, "1" * 64)):
+                db.execute("BEGIN IMMEDIATE"); self.assertFalse(self.app._recover_latch(db, "credential:ledger_audit", candidate, "event_accept", role="ledger_audit")); db.rollback()
+            db.execute("UPDATE audit_failure_latches SET failure_field_mask_json='[\"wrong.mask\"]'")
+            db.execute("BEGIN IMMEDIATE"); self.assertFalse(self.app._recover_latch(db, "credential:ledger_audit", repaired, "event_accept", role="ledger_audit")); db.rollback()
+
+            # F: idle/restart/time never mutates a latch; G: transient errors never create one.
+            before = tuple(db.execute("SELECT latch_key,updated_utc FROM audit_failure_latches").fetchone())
+            self.assertEqual(before, tuple(db.execute("SELECT latch_key,updated_utc FROM audit_failure_latches").fetchone()))
+            self.assertEqual(("REMOTE_UNAVAILABLE", False), (self.app._audit_failure(TimeoutError(), "g")[0], self.app._audit_failure(TimeoutError(), "g")[2]))
+        finally: db.close()
+
     def test_schema_v6_copy_migrates_atomically_to_worker_state_v7(self):
         old = os.environ.get("REGISTRY_DB"); os.environ["REGISTRY_DB"] = str(self.path)
         try:
@@ -276,7 +342,7 @@ class AuditWorkerTests(unittest.TestCase):
                 if statement.lstrip().upper().startswith("INSERT INTO REGISTRY_MIGRATIONS VALUES(6,"): break
             db.execute(f"PRAGMA application_id={migrate.APPLICATION_ID}"); db.execute("PRAGMA user_version=6")
             migrate.migrate(db)
-            self.assertEqual(8, db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(9, db.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual((1, None), tuple(db.execute("SELECT singleton,heartbeat_utc FROM audit_worker_state").fetchone()))
             db.close()
             contract = json.loads((ROOT / "contracts" / "r7" / "registry-schema.json").read_text(encoding="utf-8"))
