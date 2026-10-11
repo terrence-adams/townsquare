@@ -171,13 +171,13 @@ class SessionRegistryS1Tests(unittest.TestCase):
             try:
                 statements = (ROOT / "registry" / "schema.sql").read_text(encoding="utf-8").splitlines(True)
                 current = ""
-                executed = 0
                 for line in statements:
                     current += line
                     if sqlite3.complete_statement(current):
-                        executed += 1
-                        if executed <= 15:
-                            db.execute(current)
+                        db.execute(current)
+                        if current.lstrip().upper().startswith("INSERT INTO REGISTRY_MIGRATIONS VALUES(2,"):
+                            current = ""
+                            break
                         current = ""
                 db.execute("PRAGMA application_id=1414746695")
                 db.execute("PRAGMA user_version=2")
@@ -192,9 +192,11 @@ class SessionRegistryS1Tests(unittest.TestCase):
                 finally:
                     if old is None: __import__("os").environ.pop("REGISTRY_DB", None)
                     else: __import__("os").environ["REGISTRY_DB"] = old
-                self.assertEqual([(1,), (2,), (3,), (4,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
-                self.assertEqual({"sessions", "session_journal"}, {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_journal')")})
+                self.assertEqual([(1,), (2,), (3,), (4,), (5,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+                expected = {"sessions", "session_journal", "session_enrollments", "session_registration_replays", "session_credential_rotations"}
+                self.assertEqual(expected, {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_journal','session_enrollments','session_registration_replays','session_credential_rotations')")})
                 self.assertIn("response_status", {row[1] for row in db.execute("PRAGMA table_info(requests)")})
+                self.assertIn("session_credential_sha256", {row[1] for row in db.execute("PRAGMA table_info(sessions)")})
                 self.assertEqual(200, db.execute("SELECT response_status FROM requests WHERE principal='legacy'").fetchone()[0])
             finally:
                 db.close()

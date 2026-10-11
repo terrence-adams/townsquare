@@ -49,7 +49,7 @@ class RegistryV2ReleaseContracts(unittest.TestCase):
             module = importlib.reload(importlib.import_module("registry.migrate"))
             yield module
 
-    def test_populated_registry_v1_upgrades_to_v2_and_rerun_preserves_pending_work(self):
+    def test_populated_registry_v1_upgrades_to_current_head_and_rerun_preserves_pending_work(self):
         """A normal v1 DB upgrades once; re-running changes neither head nor outbox UUID."""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "registry-v1.db"
@@ -62,14 +62,14 @@ class RegistryV2ReleaseContracts(unittest.TestCase):
                     if not callable(migrate):
                         return
                     migrate(db)
-                    self.assertEqual([(1,), (2,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+                    self.assertEqual([(1,), (2,), (3,), (4,), (5,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
                     self.assertEqual(["pending-v1"], [r[0] for r in db.execute("SELECT event_id FROM audit_outbox")])
                     columns = {r[1] for r in db.execute("PRAGMA table_info(audit_outbox)")}
                     self.assertTrue({"lease_owner", "lease_until"} <= columns)
                     triggers = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
                     self.assertTrue(any("lease" in name for name in triggers), "v2 leases require DB-enforced transition guards")
                     migrate(db)
-                    self.assertEqual([(1,), (2,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+                    self.assertEqual([(1,), (2,), (3,), (4,), (5,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
             finally:
                 db.close()
 
@@ -95,7 +95,7 @@ class RegistryV2ReleaseContracts(unittest.TestCase):
                     self.assertEqual(["pending-v1"], [r[0] for r in db.execute("SELECT event_id FROM audit_outbox")])
                     self.assertNotIn("lease_owner", {r[1] for r in db.execute("PRAGMA table_info(audit_outbox)")})
                     migrate(db)
-                    self.assertEqual([(1,), (2,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+                    self.assertEqual([(1,), (2,), (3,), (4,), (5,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
             finally:
                 db.close()
 

@@ -9,3 +9,6 @@ The Ledger `migrate` service remains the sole Ledger migrator and Ledger starts
 only after it succeeds. `registry-migrate` is the sole Registry migrator and
 Registry starts only after it succeeds. Do not run two Registry schema writers,
 and do not combine the independent databases into a cross-service transaction.
+
+The Session Registry API, scoped credential rules, v5 migration, and
+restore-from-copy rollback boundary are documented in `SESSION_API.md`.

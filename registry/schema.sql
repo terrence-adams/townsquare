@@ -53,5 +53,61 @@ CREATE TRIGGER session_journal_no_delete BEFORE DELETE ON session_journal BEGIN 
 INSERT INTO registry_migrations VALUES(3,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 ALTER TABLE requests ADD COLUMN response_status INTEGER NOT NULL DEFAULT 200;
 INSERT INTO registry_migrations VALUES(4,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+ALTER TABLE sessions ADD COLUMN session_credential_sha256 TEXT CHECK(
+ session_credential_sha256 IS NULL OR (
+  length(session_credential_sha256)=64 AND
+  session_credential_sha256=lower(session_credential_sha256) AND
+  session_credential_sha256 NOT GLOB '*[^0-9a-f]*'
+ )
+);
+CREATE TABLE session_enrollments(
+ grant_id TEXT PRIMARY KEY,
+ token_sha256 TEXT UNIQUE NOT NULL CHECK(length(token_sha256)=64 AND token_sha256=lower(token_sha256) AND token_sha256 NOT GLOB '*[^0-9a-f]*'),
+ agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+ provider TEXT NOT NULL,
+ seat_or_host TEXT NOT NULL,
+ expires_utc TEXT NOT NULL,
+ consumed_utc TEXT,
+ session_uuid TEXT REFERENCES sessions(session_uuid),
+ CHECK((consumed_utc IS NULL AND session_uuid IS NULL) OR (consumed_utc IS NOT NULL AND session_uuid IS NOT NULL))
+);
+CREATE TABLE session_registration_replays(
+ grant_id TEXT PRIMARY KEY REFERENCES session_enrollments(grant_id),
+ idem_key TEXT NOT NULL,
+ request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64 AND request_sha256=lower(request_sha256) AND request_sha256 NOT GLOB '*[^0-9a-f]*'),
+ response_json TEXT NOT NULL,
+ response_status INTEGER NOT NULL,
+ committed_utc TEXT NOT NULL
+);
+CREATE TABLE session_credential_rotations(
+ session_uuid TEXT NOT NULL REFERENCES sessions(session_uuid),
+ rotation_id TEXT NOT NULL,
+ old_credential_sha256 TEXT NOT NULL CHECK(length(old_credential_sha256)=64 AND old_credential_sha256=lower(old_credential_sha256) AND old_credential_sha256 NOT GLOB '*[^0-9a-f]*'),
+ new_credential_sha256 TEXT NOT NULL CHECK(length(new_credential_sha256)=64 AND new_credential_sha256=lower(new_credential_sha256) AND new_credential_sha256 NOT GLOB '*[^0-9a-f]*'),
+ request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64 AND request_sha256=lower(request_sha256) AND request_sha256 NOT GLOB '*[^0-9a-f]*'),
+ response_json TEXT NOT NULL,
+ response_status INTEGER NOT NULL,
+ event_id TEXT UNIQUE NOT NULL,
+ committed_utc TEXT NOT NULL,
+ PRIMARY KEY(session_uuid,rotation_id)
+);
+DROP TRIGGER session_journal_no_update;
+DROP TRIGGER session_journal_no_delete;
+ALTER TABLE session_journal RENAME TO session_journal_v4;
+CREATE TABLE session_journal(
+ seq INTEGER PRIMARY KEY AUTOINCREMENT,
+ event_id TEXT UNIQUE NOT NULL,
+ session_uuid TEXT NOT NULL REFERENCES sessions(session_uuid),
+ agent_id TEXT NOT NULL,
+ action TEXT NOT NULL CHECK(action IN ('register','heartbeat','terminate','mark_lost','credential_rotate')),
+ body_json TEXT NOT NULL,
+ committed_utc TEXT NOT NULL
+);
+INSERT INTO session_journal(seq,event_id,session_uuid,agent_id,action,body_json,committed_utc)
+ SELECT seq,event_id,session_uuid,agent_id,action,body_json,committed_utc FROM session_journal_v4;
+DROP TABLE session_journal_v4;
+CREATE TRIGGER session_journal_no_update BEFORE UPDATE ON session_journal BEGIN SELECT RAISE(ABORT,'session journal is append-only'); END;
+CREATE TRIGGER session_journal_no_delete BEFORE DELETE ON session_journal BEGIN SELECT RAISE(ABORT,'session journal is append-only'); END;
+INSERT INTO registry_migrations VALUES(5,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 PRAGMA application_id=1414746695;
-PRAGMA user_version=4;
+PRAGMA user_version=5;

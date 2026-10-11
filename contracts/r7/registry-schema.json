@@ -2,12 +2,12 @@
   "schema_version": "1",
   "domain": "registry",
   "application_id": 1414746695,
-  "user_version": 4,
-  "head": "4",
+  "user_version": 5,
+  "head": "5",
   "schema_path": "registry/schema.sql",
-  "schema_sha256": "c613dc941bf6391f5e9c8434e35c54700536fc8b8ac028d97628bf3a07f5b0f2",
+  "schema_sha256": "00ccb6dfa7257382dad31ad45e05644d0a1699e4f014191137ca0ce4019ff311",
   "migrator_path": "registry/migrate.py",
-  "migrator_sha256": "344a57ad98132cd95b80d6b02bbcf0224ca8357d5096d19e35bafb5fd401a77f",
+  "migrator_sha256": "01e2766b7c702fdcd18a74d5b691d2a128a285968252fc4b0f2e63567462f4b5",
   "steps": [
     {
       "ordinal": 1,
@@ -28,8 +28,13 @@
       "ordinal": 4,
       "id": "4",
       "sha256": "fd4bba82400115ebe0b7f6ab60bb361c4b6afe96a44a9b36627e4d37e9fffea1"
+    },
+    {
+      "ordinal": 5,
+      "id": "5",
+      "sha256": "9dd7660895a793c2c8d8ba28c9a2506b485525d9e545746f54bae98192ecc3fa"
     }
   ],
-  "history_sha256": "11a17e81bed32d7bd7a8450d7c4fef93b413ae8e02772dc44ddca5cb2657a649",
-  "canonical_schema_sha256": "cc2d88b7ed5577f8400473d786c1168bfb94a1c7ee1f91c112f6d8060a3e6983"
+  "history_sha256": "92cf6c590aa91927a66eba5b79b4b871237f587d0762336d2644126d509ef566",
+  "canonical_schema_sha256": "b1abe5dc49929f14c8d633c3b4cd6a0f1abdd31d2bbccbc7933c236db092eeaf"
 }
