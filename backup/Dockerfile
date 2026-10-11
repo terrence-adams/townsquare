@@ -34,9 +34,9 @@ RUN python /opt/townsquare/verify-tool-artifacts.py /wheelhouse/tooling /opt/tow
  && addgroup --system --gid 10004 townsquare-backup && adduser --system --uid 10004 --ingroup townsquare-backup --home /nonexistent townsquare-backup
 WORKDIR /opt/townsquare/backup
 COPY --chown=root:root r7-identity.json /opt/townsquare/release/r7-identity.json
-COPY --chown=root:root backup/create-backup.py backup/restore-drill.py backup/recovery_replay_drill.py backup/prune.py /opt/townsquare/backup/
-COPY --chown=root:root registrar/app/__init__.py registrar/app/db.py registrar/app/filename.py registrar/app/service.py registrar/app/native_ledger.py /opt/townsquare/registrar/app/
-COPY --chown=root:root registry/app.py /opt/townsquare/registry/app.py
+COPY --chown=10004:10004 backup/create-backup.py backup/restore-drill.py backup/recovery_replay_drill.py backup/prune.py /opt/townsquare/backup/
+COPY --chown=10004:10004 registrar/app/__init__.py registrar/app/db.py registrar/app/filename.py registrar/app/service.py registrar/app/native_ledger.py /opt/townsquare/registrar/app/
+COPY --chown=10004:10004 registry/app.py /opt/townsquare/registry/app.py
 COPY --chown=root:root shared /opt/townsquare/shared
 COPY --chown=root:root canary/__init__.py canary/preexec.py /opt/townsquare/canary/
 RUN chmod 0444 /opt/townsquare/release/r7-identity.json && find /opt/townsquare -type f -exec chmod a-w {} +
