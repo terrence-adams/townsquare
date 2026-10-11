@@ -26,6 +26,13 @@ class SessionRegistryReleaseWiringTests(unittest.TestCase):
   source=(ROOT/'compose.yml').read_text(encoding='utf-8');resolved=resolve_listener_values(source,environment());registry=resolved.split('\n  registry:\n',1)[1].split('\n  registry-migrate:\n',1)[0];ledger=resolved.split('\n  ledger:\n',1)[1].split('\n  viewer:\n',1)[0]
   for name,value in environment().items():self.assertIn(f'{name}: "{value}"',registry)
   self.assertIn(f'REGISTRY_READINESS_URL: "{READINESS_URL}"',ledger);self.assertIn(LOOPBACK_READINESS_URL,registry);self.assertNotRegex(registry,r'(?m)^\s+ports:');self.assertNotIn(':8789',resolved)
+ def test_production_compose_overrides_cannot_change_runtime_endpoint(self):
+  app=load_app();source=(ROOT/'compose.yml').read_text(encoding='utf-8')
+  mutations=[{'REGISTRY_SESSION_BIND_HOST':'127.0.0.1'},{'REGISTRY_SESSION_BIND_PORT':'9999'},{'REGISTRY_SESSION_PUBLIC_URL':'http://changed:8793'},{'REGISTRY_SESSION_LISTENER_SHA256':'0'*64},{'REGISTRY_SESSION_BIND_HOST':'127.0.0.1','REGISTRY_SESSION_BIND_PORT':'9999','REGISTRY_SESSION_PUBLIC_URL':'http://changed:9999'}]
+  for mutation in mutations:
+   values={**environment(),**mutation};values['REGISTRY_SESSION_LISTENER_SHA256']=hashlib.sha256(json.dumps({'schema':'townsquare.session-registry-listener.v1','bind_host':values['REGISTRY_SESSION_BIND_HOST'],'bind_port':int(values['REGISTRY_SESSION_BIND_PORT']),'public_url':values['REGISTRY_SESSION_PUBLIC_URL']},sort_keys=True,separators=(',',':')).encode()).hexdigest() if len(mutation)>1 else values['REGISTRY_SESSION_LISTENER_SHA256'];resolved=resolve_listener_values(source,values)
+   for name,value in values.items():self.assertIn(f'{name}: "{value}"',resolved)
+   with self.assertRaisesRegex(RuntimeError,'configuration invalid'):app.session_listener_config(values)
  def test_current_canary_and_registrar_consumers_use_the_same_endpoint(self):
   canary=(ROOT/'canary'/'compose.canary.yml').read_text(encoding='utf-8');validator=(ROOT/'canary'/'validate_compose.py').read_text(encoding='utf-8');registrar=(ROOT/'registrar'/'app'/'main.py').read_text(encoding='utf-8')
   for name,value in environment().items():self.assertIn(f'{name}: {value}' if name!='REGISTRY_SESSION_BIND_PORT' else f'{name}: "{value}"',canary)

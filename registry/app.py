@@ -7,10 +7,10 @@ against the Ledger database.
 import base64,datetime,hashlib,hmac,json,os,re,secrets,sqlite3,sys,time,unicodedata,uuid
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
 from shared.canary_authority import CanaryAuthorityError,CanaryProofVerifier,FileNonceStore,canonical_bytes,decode_proof,decode_signature,load_r7_context
 from shared.canary_identity import compatible_identity,require_canary_identity
 from shared.registry_outbox import acknowledge_delivery
+from shared import session_registry_listener
 
 # Verified before a database path is resolved, a token is read, or a server
 # (and therefore any request thread) can be created.
@@ -155,18 +155,12 @@ def _canonical(value): return json.dumps(value,ensure_ascii=False,sort_keys=True
 def _sha256_text(value): return hashlib.sha256(value.encode('utf-8')).hexdigest()
 def session_listener_config(environ=None):
  values=os.environ if environ is None else environ
- host=values.get('REGISTRY_SESSION_BIND_HOST');port_text=values.get('REGISTRY_SESSION_BIND_PORT');public_url=values.get('REGISTRY_SESSION_PUBLIC_URL');pinned=values.get('REGISTRY_SESSION_LISTENER_SHA256')
  try:
-  if not isinstance(host,str) or not 0<len(host)<=253 or any(char.isspace() or ord(char)<0x21 for char in host) or any(char in host for char in '/\\@?#'):raise ValueError()
-  if not isinstance(port_text,str) or not re.fullmatch(r'[1-9][0-9]{0,4}',port_text):raise ValueError()
-  port=int(port_text)
-  if port>65535 or port==8789:raise ValueError()
-  parsed=urlsplit(public_url)
-  if parsed.scheme!='http' or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment or parsed.port!=port or parsed.port==8789:raise ValueError()
-  canonical=_canonical({'schema':'townsquare.session-registry-listener.v1','bind_host':host,'bind_port':port,'public_url':public_url})
-  if not isinstance(pinned,str) or not _SHA256.fullmatch(pinned) or not hmac.compare_digest(_sha256_text(canonical),pinned):raise ValueError()
+  canonical=_canonical({'schema':session_registry_listener.SCHEMA,'bind_host':session_registry_listener.BIND_HOST,'bind_port':session_registry_listener.BIND_PORT,'public_url':session_registry_listener.PUBLIC_URL})
+  if canonical!=session_registry_listener.CANONICAL_JSON or not hmac.compare_digest(_sha256_text(canonical),session_registry_listener.SHA256):raise ValueError()
+  if any(not isinstance(values.get(name),str) or not hmac.compare_digest(values[name],expected) for name,expected in session_registry_listener.environment().items()):raise ValueError()
  except (TypeError,ValueError):raise RuntimeError('session Registry listener configuration invalid') from None
- return host,port
+ return session_registry_listener.BIND_HOST,session_registry_listener.BIND_PORT
 def _nonempty_string(value,limit=512): return isinstance(value,str) and 0<len(value)<=limit and unicodedata.is_normalized('NFC',value) and all(not 0xd800<=ord(char)<=0xdfff for char in value)
 def _provider_session_id(value): return _nonempty_string(value) and all(0x20<=ord(char)<=0x7e for char in value)
 def _optional_string(value,limit=512): return value is None or _nonempty_string(value,limit)

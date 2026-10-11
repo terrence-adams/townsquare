@@ -133,6 +133,9 @@ by constructing `ThreadingHTTPServer` directly.
 The current release tuple is `0.0.0.0`, port `8793`, and
 `http://registry:8793`; its canonical digest is
 `6822f4d0ec8da1e2c56120c925a8dd6f068f85d6030eab84055a2a0789167b7d`.
+The packaged tuple and literal digest are authoritative; the four environment
+fields are equality assertions and cannot select another listener, even when an
+override supplies a self-consistent recomputed digest.
 Production and canary Compose give the Registry no host-published port. Ledger
 readiness uses `http://registry:8793/health/ready`, while the Registry container
 healthcheck uses loopback port `8793`. `deploy/release.env.example` carries the

@@ -164,23 +164,37 @@ class OwnershipRouteTests(RegistryFixture):
 class ListenerConfigTests(unittest.TestCase):
  @classmethod
  def setUpClass(cls):cls.app=load_app()
- def config(self,host='0.0.0.0',port=8793,public_url='http://session-registry:8793'):
-  value={'schema':'townsquare.session-registry-listener.v1','bind_host':host,'bind_port':port,'public_url':public_url};pin=hashlib.sha256(self.app._canonical(value).encode()).hexdigest();return {'REGISTRY_SESSION_BIND_HOST':host,'REGISTRY_SESSION_BIND_PORT':str(port),'REGISTRY_SESSION_PUBLIC_URL':public_url,'REGISTRY_SESSION_LISTENER_SHA256':pin}
+ def config(self):return self.app.session_registry_listener.environment()
  def test_release_pinned_listener_is_explicit_and_has_no_unsafe_default(self):
   self.assertEqual(('0.0.0.0',8793),self.app.session_listener_config(self.config()))
   for missing in self.config():
    value=self.config();value.pop(missing)
    with self.assertRaisesRegex(RuntimeError,'configuration invalid'):self.app.session_listener_config(value)
- def test_every_legacy_8789_url_form_and_changed_pin_fail_closed_and_redacted(self):
-  for url in ('http://0.0.0.0:8789','http://127.0.0.1:8789','http://localhost:8789','http://registry:8789','http://[::1]:8789'):
-   with self.assertRaisesRegex(RuntimeError,'configuration invalid') as raised:self.app.session_listener_config(self.config(port=8789,public_url=url))
-   self.assertNotIn(url,str(raised.exception))
-  changed=self.config();changed['REGISTRY_SESSION_PUBLIC_URL']='http://session-registry:8794'
+ def test_every_field_and_self_consistent_changed_tuple_fail_closed_and_redacted(self):
+  for name,changed in {'REGISTRY_SESSION_BIND_HOST':'127.0.0.1','REGISTRY_SESSION_BIND_PORT':'8794','REGISTRY_SESSION_PUBLIC_URL':'http://registry:8794','REGISTRY_SESSION_LISTENER_SHA256':'0'*64}.items():
+   value=self.config();value[name]=changed
+   with self.assertRaisesRegex(RuntimeError,'configuration invalid') as raised:self.app.session_listener_config(value)
+   self.assertNotIn(changed,str(raised.exception))
+  changed=self.config();changed.update(REGISTRY_SESSION_BIND_HOST='127.0.0.1',REGISTRY_SESSION_BIND_PORT='8794',REGISTRY_SESSION_PUBLIC_URL='http://changed:8794');changed['REGISTRY_SESSION_LISTENER_SHA256']=hashlib.sha256(self.app._canonical({'schema':'townsquare.session-registry-listener.v1','bind_host':'127.0.0.1','bind_port':8794,'public_url':'http://changed:8794'}).encode()).hexdigest()
   with self.assertRaisesRegex(RuntimeError,'configuration invalid'):self.app.session_listener_config(changed)
+ def test_packaged_schema_or_digest_drift_fails_closed(self):
+  for name,changed in (('SCHEMA','townsquare.session-registry-listener.v2'),('SHA256','0'*64)):
+   with mock.patch.object(self.app.session_registry_listener,name,changed):
+    with self.assertRaisesRegex(RuntimeError,'configuration invalid'):self.app.session_listener_config(self.config())
+ def test_every_legacy_8789_url_form_fails_closed_and_redacted(self):
+  for url in ('http://0.0.0.0:8789','http://127.0.0.1:8789','http://localhost:8789','http://registry:8789','http://[::1]:8789'):
+   changed=self.config();changed.update(REGISTRY_SESSION_BIND_PORT='8789',REGISTRY_SESSION_PUBLIC_URL=url);changed['REGISTRY_SESSION_LISTENER_SHA256']=hashlib.sha256(self.app._canonical({'schema':'townsquare.session-registry-listener.v1','bind_host':changed['REGISTRY_SESSION_BIND_HOST'],'bind_port':8789,'public_url':url}).encode()).hexdigest()
+   with self.assertRaisesRegex(RuntimeError,'configuration invalid') as raised:self.app.session_listener_config(changed)
+   self.assertNotIn(url,str(raised.exception))
  def test_startup_refuses_invalid_listener_before_socket_creation(self):
   server=mock.Mock()
-  with mock.patch.object(self.app,'require_manual_delivery_mode'),mock.patch.object(self.app,'compatible',return_value=True),mock.patch.object(self.app,'ThreadingHTTPServer',server),mock.patch.object(self.app.sys,'argv',['app.py']),mock.patch.dict(self.app.os.environ,{},clear=True):
-   with self.assertRaisesRegex(RuntimeError,'configuration invalid'):self.app.main()
+  invalid=[{}]
+  for missing in self.config():value=self.config();value.pop(missing);invalid.append(value)
+  invalid.extend([dict(self.config(),REGISTRY_SESSION_BIND_HOST='127.0.0.1'),dict(self.config(),REGISTRY_SESSION_BIND_PORT='malformed'),dict(self.config(),REGISTRY_SESSION_PUBLIC_URL='http://changed:8793'),dict(self.config(),REGISTRY_SESSION_LISTENER_SHA256='0'*64)])
+  combined=dict(self.config(),REGISTRY_SESSION_BIND_HOST='127.0.0.1',REGISTRY_SESSION_BIND_PORT='8794',REGISTRY_SESSION_PUBLIC_URL='http://changed:8794');combined['REGISTRY_SESSION_LISTENER_SHA256']=hashlib.sha256(self.app._canonical({'schema':'townsquare.session-registry-listener.v1','bind_host':'127.0.0.1','bind_port':8794,'public_url':'http://changed:8794'}).encode()).hexdigest();invalid.append(combined)
+  for values in invalid:
+   with mock.patch.object(self.app,'require_manual_delivery_mode'),mock.patch.object(self.app,'compatible',return_value=True),mock.patch.object(self.app,'ThreadingHTTPServer',server),mock.patch.object(self.app.sys,'argv',['app.py']),mock.patch.dict(self.app.os.environ,values,clear=True):
+    with self.assertRaisesRegex(RuntimeError,'configuration invalid'):self.app.main()
   server.assert_not_called()
  def test_startup_uses_only_the_validated_release_tuple(self):
   server=mock.Mock()
