@@ -31,8 +31,13 @@ def load_app():
     identity.require_canary_identity = lambda: types.SimpleNamespace(as_dict=lambda: {})
     outbox = types.ModuleType("shared.registry_outbox")
     outbox.acknowledge_delivery = lambda *_: True
-    old = {name: sys.modules.get(name) for name in ("shared", "shared.canary_authority", "shared.canary_identity", "shared.registry_outbox")}
-    sys.modules.update({"shared": shared, "shared.canary_authority": authority, "shared.canary_identity": identity, "shared.registry_outbox": outbox})
+    listener_spec = importlib.util.spec_from_file_location("shared.session_registry_listener", ROOT / "shared" / "session_registry_listener.py")
+    listener = importlib.util.module_from_spec(listener_spec)
+    assert listener_spec.loader
+    listener_spec.loader.exec_module(listener)
+    shared.session_registry_listener = listener
+    old = {name: sys.modules.get(name) for name in ("shared", "shared.canary_authority", "shared.canary_identity", "shared.registry_outbox", "shared.session_registry_listener")}
+    sys.modules.update({"shared": shared, "shared.canary_authority": authority, "shared.canary_identity": identity, "shared.registry_outbox": outbox, "shared.session_registry_listener": listener})
     try:
         spec = importlib.util.spec_from_file_location("session_registry_s1_app", ROOT / "registry" / "app.py")
         module = importlib.util.module_from_spec(spec)
@@ -192,7 +197,7 @@ class SessionRegistryS1Tests(unittest.TestCase):
                 finally:
                     if old is None: __import__("os").environ.pop("REGISTRY_DB", None)
                     else: __import__("os").environ["REGISTRY_DB"] = old
-                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,), (7,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
                 expected = {"sessions", "session_journal", "session_enrollments", "session_registration_replays", "session_owning_replays", "session_key_rotations"}
                 self.assertEqual(expected, {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_journal','session_enrollments','session_registration_replays','session_owning_replays','session_key_rotations')")})
                 self.assertIn("response_status", {row[1] for row in db.execute("PRAGMA table_info(requests)")})

@@ -192,5 +192,29 @@ CREATE TABLE session_key_rotations(
  PRIMARY KEY(session_uuid,nonce)
 );
 INSERT INTO registry_migrations VALUES(6,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+DROP TRIGGER audit_outbox_transition_guard;
+CREATE TRIGGER audit_outbox_transition_guard BEFORE UPDATE ON audit_outbox WHEN NOT (
+  (OLD.delivered_utc IS NULL AND OLD.lease_owner IS NULL AND NEW.delivered_utc IS NULL AND NEW.lease_owner IS NOT NULL AND NEW.lease_until IS NOT NULL AND NEW.attempts=OLD.attempts AND NEW.last_error IS OLD.last_error)
+  OR
+  (OLD.delivered_utc IS NULL AND OLD.lease_owner IS NOT NULL AND OLD.lease_until IS NOT NULL AND NEW.delivered_utc IS NULL AND NEW.lease_owner IS NOT NULL AND NEW.lease_until IS NOT NULL AND NEW.attempts=OLD.attempts AND NEW.last_error IS OLD.last_error)
+  OR
+  (OLD.delivered_utc IS NULL AND OLD.lease_owner IS NOT NULL AND OLD.lease_until IS NOT NULL AND NEW.delivered_utc IS NOT NULL AND NEW.lease_owner IS NULL AND NEW.lease_until IS NULL AND NEW.attempts=OLD.attempts+1 AND NEW.last_error IS NULL)
+  OR
+  (OLD.delivered_utc IS NULL AND OLD.lease_owner IS NOT NULL AND OLD.lease_until IS NOT NULL AND NEW.delivered_utc IS NULL AND NEW.lease_owner IS NULL AND NEW.lease_until IS NOT NULL AND NEW.attempts=OLD.attempts+1 AND NEW.last_error IS NOT NULL)
+) BEGIN SELECT RAISE(ABORT,'illegal outbox state transition'); END;
+DROP TRIGGER audit_outbox_lease_guard;
+CREATE TRIGGER audit_outbox_lease_guard BEFORE UPDATE OF lease_owner,lease_until ON audit_outbox WHEN NEW.delivered_utc IS NOT NULL AND (NEW.lease_owner IS NOT NULL OR NEW.lease_until IS NOT NULL) BEGIN SELECT RAISE(ABORT,'delivered outbox cannot be leased'); END;
+CREATE TABLE audit_worker_state(
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ heartbeat_utc TEXT,
+ last_cycle_started_utc TEXT,
+ last_cycle_completed_utc TEXT,
+ last_cycle_attempts INTEGER NOT NULL DEFAULT 0 CHECK(last_cycle_attempts BETWEEN 0 AND 100),
+ permanent_failure_code TEXT,
+ permanent_failure_digest TEXT,
+ CHECK((permanent_failure_code IS NULL AND permanent_failure_digest IS NULL) OR (permanent_failure_code IS NOT NULL AND length(permanent_failure_digest)=64))
+);
+INSERT INTO audit_worker_state(singleton) VALUES(1);
+INSERT INTO registry_migrations VALUES(7,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 PRAGMA application_id=1414746695;
-PRAGMA user_version=6;
+PRAGMA user_version=7;

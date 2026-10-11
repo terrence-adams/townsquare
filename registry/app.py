@@ -4,7 +4,7 @@ It deliberately uses only stdlib.  Ledger publication is asynchronous and
 idempotent through the outbox; this service has no foreign key or transaction
 against the Ledger database.
 """
-import base64,datetime,hashlib,hmac,json,os,re,secrets,sqlite3,sys,time,unicodedata,uuid
+import base64,datetime,hashlib,hmac,json,os,re,secrets,signal,sqlite3,sys,threading,time,unicodedata,urllib.error,urllib.request,uuid
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
 from shared.canary_authority import CanaryAuthorityError,CanaryProofVerifier,FileNonceStore,canonical_bytes,decode_proof,decode_signature,load_r7_context
@@ -29,10 +29,12 @@ CANARY_NONCE_DIRECTORY=os.environ.get("REGISTRY_CANARY_NONCE_DIRECTORY","/var/li
 LOOKUP_TOKEN_SHA256_FILE=os.environ.get("REGISTRY_LOOKUP_TOKEN_SHA256_FILE","/run/secrets/registry-lookup-credential-sha256")
 def connect():
  d=sqlite3.connect(DB,timeout=5,isolation_level=None); d.row_factory=sqlite3.Row; d.execute("PRAGMA foreign_keys=ON"); d.execute("PRAGMA journal_mode=WAL"); d.execute("PRAGMA synchronous=FULL"); d.execute("PRAGMA busy_timeout=5000")
- if d.execute("PRAGMA application_id").fetchone()[0] != 1414746695 or d.execute("PRAGMA user_version").fetchone()[0] != 6:
+ if d.execute("PRAGMA application_id").fetchone()[0] != 1414746695 or d.execute("PRAGMA user_version").fetchone()[0] != DATABASE_SCHEMA_VERSION:
   d.close(); raise RuntimeError('Registry application_id/user_version mismatch')
  return d
-SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; DATABASE_SCHEMA_VERSION=6; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
+SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; DATABASE_SCHEMA_VERSION=7; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
+AUDIT_INTERVAL_ENV='REGISTRY_AUDIT_INTERVAL_SECONDS';AUDIT_RELEASE_INTERVAL_SECONDS=30;AUDIT_CYCLE_LIMIT=100;AUDIT_LEASE_SECONDS=30
+def _audit_utc(epoch=None):return time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(time.time() if epoch is None else epoch))
 def compatible():
  if os.environ.get('REGISTRY_SERVICE_ID',SERVICE_ID)!=SERVICE_ID:return False
  if os.environ.get('REGISTRY_SCHEMA_HEAD',str(SCHEMA_VERSION))!=str(SCHEMA_VERSION):return False
@@ -70,33 +72,81 @@ def peer_ready():
   compatible=peer.get('ok') is True and compatible_identity(peer,CANARY_IDENTITY) and peer.get('service_id')=='townsquare-ledger-v0' and peer.get('schema_version')==14 and peer.get('audit_contract_version')==AUDIT_CONTRACT_VERSION
   return {'compatible':compatible,'service_id':peer.get('service_id'),'schema_version':peer.get('schema_version'),**{name:peer.get(name) for name in CANARY_IDENTITY.as_dict()}}
  except Exception:return {'compatible':False,'detail':'ledger readiness exchange failed'}
-def claim(db,owner):
+def audit_interval(environ=None):
+ values=os.environ if environ is None else environ;raw=values.get(AUDIT_INTERVAL_ENV)
+ if not isinstance(raw,str) or not re.fullmatch(r'[1-9][0-9]*',raw) or not 5<=int(raw)<=300:raise RuntimeError('Registry audit interval configuration invalid')
+ return int(raw)
+def claim(db,owner,lease_seconds=AUDIT_LEASE_SECONDS,excluded=()):
  """Atomically lease one pending stable UUID; expired claims are recoverable."""
- now=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()); until=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(time.time()+30))
- row=db.execute("SELECT event_id FROM audit_outbox WHERE delivered_utc IS NULL AND (lease_until IS NULL OR lease_until<?) ORDER BY event_id LIMIT 1",(now,)).fetchone()
- if not row:return None
- changed=db.execute("UPDATE audit_outbox SET lease_owner=?,lease_until=? WHERE event_id=? AND delivered_utc IS NULL AND (lease_until IS NULL OR lease_until<?)",(owner,until,row['event_id'],now)).rowcount
- return row['event_id'] if changed else None
-def deliver_once():
- if not compatible() or not peer_ready().get('compatible'): return # retain queue on mismatch/failure
- import urllib.request
- d=connect()
+ now=_audit_utc();until=_audit_utc(time.time()+lease_seconds);db.execute('BEGIN IMMEDIATE')
  try:
-  owner=str(uuid.uuid4())
-  while (event_id:=claim(d,owner)):
-   r=d.execute("SELECT j.* FROM journal j WHERE j.event_id=?",(event_id,)).fetchone()
-   # Ledger accepts only this fixed three-field envelope. The Registry actor is
-   # server-bound by Ledger's scoped credential, not by the original caller.
-   data=json.dumps({"board":"BOARD-AUDIT-RECORD","actor":"registry","event_uuid":r['event_id']},sort_keys=True,separators=(',',':')).encode()
-   try:
-    req=urllib.request.Request(LEDGER_AUDIT_URL,data=data,headers={"Content-Type":"application/json","Authorization":"Bearer "+ledger_audit_token(),"Idempotency-Key":"registry-"+r['event_id']},method="POST")
-    with urllib.request.urlopen(req,timeout=LEDGER_AUDIT_TIMEOUT_SECONDS) as response:
-     if response.status//100!=2:raise RuntimeError(str(response.status))
-    acknowledge_delivery(d,r['event_id'],owner)
-   except Exception as e:
-    # Never retain exception text: HTTP libraries can include request details.
-    d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=?,lease_owner=NULL,lease_until=NULL WHERE event_id=? AND lease_owner=?",(type(e).__name__[:80],r['event_id'],owner))
+  exclusion="" if not excluded else " AND o.event_id NOT IN ("+",".join("?" for _ in excluded)+")"
+  row=db.execute("SELECT o.event_id FROM audit_outbox o JOIN journal j USING(event_id) WHERE o.delivered_utc IS NULL AND (o.lease_until IS NULL OR o.lease_until<?)"+exclusion+" ORDER BY j.seq LIMIT 1",(now,*excluded)).fetchone()
+  if not row:db.commit();return None
+  changed=db.execute("UPDATE audit_outbox SET lease_owner=?,lease_until=? WHERE event_id=? AND delivered_utc IS NULL AND (lease_until IS NULL OR lease_until<?)",(owner,until,row['event_id'],now)).rowcount;db.commit();return row['event_id'] if changed else None
+ except Exception:db.rollback();raise
+class AuditDeliveryFailure(RuntimeError):
+ def __init__(self,code,permanent=False):super().__init__(code);self.code=code;self.permanent=permanent
+def _audit_failure(error):
+ if isinstance(error,AuditDeliveryFailure):code,permanent=error.code,error.permanent
+ elif isinstance(error,urllib.error.HTTPError) and error.code in (400,401,403,409):code,permanent='REMOTE_REJECTED',True
+ elif isinstance(error,(OSError,TimeoutError,urllib.error.URLError)):code,permanent='REMOTE_UNAVAILABLE',False
+ else:code,permanent='DELIVERY_FAILURE',False
+ digest=hashlib.sha256((code+':'+type(error).__name__).encode()).hexdigest()
+ return code,digest,permanent
+def _deliver_claimed(event_id):
+ data=_canonical({'board':'BOARD-AUDIT-RECORD','actor':'registry','event_uuid':event_id}).encode()
+ request=urllib.request.Request(LEDGER_AUDIT_URL,data=data,headers={'Content-Type':'application/json','Authorization':'Bearer '+ledger_audit_token(),'Idempotency-Key':'registry-'+event_id},method='POST')
+ with urllib.request.urlopen(request,timeout=LEDGER_AUDIT_TIMEOUT_SECONDS) as response:
+  if response.status//100!=2:raise AuditDeliveryFailure('REMOTE_REJECTED',True)
+  raw=response.read(65537)
+ if len(raw)>65536:raise AuditDeliveryFailure('REMOTE_RESPONSE_INVALID',True)
+ try:value=json.loads(raw.decode('utf-8'))
+ except (UnicodeError,ValueError):raise AuditDeliveryFailure('REMOTE_RESPONSE_INVALID',True) from None
+ if not isinstance(value,dict) or set(value)!={'event_uuid','ledger_event_id'} or value.get('event_uuid')!=event_id or not isinstance(value.get('ledger_event_id'),str) or not value['ledger_event_id']:raise AuditDeliveryFailure('REMOTE_IDENTITY_MISMATCH',True)
+def _worker_state(db,started,completed=None,attempts=0,failure=None):
+ heartbeat=completed or started;code,digest=(failure or (None,None))
+ db.execute("UPDATE audit_worker_state SET heartbeat_utc=?,last_cycle_started_utc=?,last_cycle_completed_utc=?,last_cycle_attempts=?,permanent_failure_code=?,permanent_failure_digest=? WHERE singleton=1",(heartbeat,started,completed,attempts,code,digest))
+def audit_worker_cycle(interval=AUDIT_RELEASE_INTERVAL_SECONDS,stop_event=None):
+ started=_audit_utc();d=connect();attempted=0;delivered=0;failed=0;permanent=None;seen=[]
+ try:
+  _worker_state(d,started)
+  if not compatible():permanent=('CONFIGURATION_INVALID',hashlib.sha256(b'CONFIGURATION_INVALID').hexdigest())
+  elif not peer_ready().get('compatible'):permanent=('PEER_IDENTITY_INVALID',hashlib.sha256(b'PEER_IDENTITY_INVALID').hexdigest())
+  else:
+   owner=str(uuid.uuid4())
+   while attempted<AUDIT_CYCLE_LIMIT and not (stop_event and stop_event.is_set()):
+    event_id=claim(d,owner,excluded=seen)
+    if not event_id:break
+    attempted+=1;seen.append(event_id)
+    if stop_event and stop_event.is_set():break
+    try:_deliver_claimed(event_id);acknowledge_delivery(d,event_id,owner);delivered+=1
+    except Exception as error:
+     code,digest,is_permanent=_audit_failure(error);cooldown=_audit_utc(time.time()+interval);d.execute("UPDATE audit_outbox SET attempts=attempts+1,last_error=?,lease_owner=NULL,lease_until=? WHERE event_id=? AND delivered_utc IS NULL AND lease_owner=?",(code+':'+digest,cooldown,event_id,owner));failed+=1
+     if is_permanent and permanent is None:permanent=(code,digest)
+  completed=_audit_utc();_worker_state(d,started,completed,attempted,permanent)
+  return {'heartbeat_utc':completed,'attempted':attempted,'delivered':delivered,'failed':failed,'failure_code':permanent[0] if permanent else None}
  finally:d.close()
+def deliver_once():return audit_worker_cycle(AUDIT_RELEASE_INTERVAL_SECONDS)
+def audit_worker(environ=None,stop_event=None,monotonic=time.monotonic):
+ """Run the durable periodic Registry audit-delivery loop."""
+ interval=audit_interval(environ);stop=stop_event or threading.Event()
+ def stopping(*_):stop.set()
+ previous={}
+ if stop_event is None:
+  for name in (signal.SIGINT,signal.SIGTERM):previous[name]=signal.signal(name,stopping)
+ try:
+  deadline=monotonic()
+  while not stop.is_set():
+   metrics=audit_worker_cycle(interval,stop);print(_canonical({'kind':'registry_audit_worker_cycle',**metrics}),flush=True);deadline+=interval
+   if stop.wait(max(0,deadline-monotonic())):break
+ finally:
+  if stop_event is None:
+   for name,handler in previous.items():signal.signal(name,handler)
+def audit_delivery_health(db,now_epoch=None):
+ now_epoch=time.time() if now_epoch is None else now_epoch;stale=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(now_epoch-90));old=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(now_epoch-120));state=db.execute('SELECT * FROM audit_worker_state WHERE singleton=1').fetchone();oldest=db.execute('SELECT min(j.committed_utc) FROM audit_outbox o JOIN journal j USING(event_id) WHERE o.delivered_utc IS NULL').fetchone()[0]
+ ready=bool(state and state['heartbeat_utc'] and state['heartbeat_utc']>stale and state['permanent_failure_code'] is None and (oldest is None or oldest>old))
+ return {'ready':ready,'worker_heartbeat_utc':state['heartbeat_utc'] if state else None,'oldest_pending_utc':oldest,'failure_code':state['permanent_failure_code'] if state else 'WORKER_HEARTBEAT_MISSING'}
 def require_manual_delivery_mode():
  if os.environ.get('REGISTRY_AUDIT_DELIVERY_MODE')!='manual':
   raise RuntimeError('REGISTRY_AUDIT_DELIVERY_MODE must be exactly manual for this canary')
@@ -376,17 +426,19 @@ class Handler(BaseHTTPRequestHandler):
     if self.headers.get('Authorization')!='Bearer '+ledger_readiness_token(): return self.reply(401,{"ok":False,"detail":"readiness authorization required"})
    except (OSError,RuntimeError):return self.reply(503,{"ok":False,"detail":"readiness credential unavailable"})
    try:
-    d=connect(); version=d.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]; pending=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL").fetchone()[0]; failed=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL AND last_error IS NOT NULL").fetchone()[0];d.close();
+    d=connect(); version=d.execute("SELECT max(version) FROM registry_migrations").fetchone()[0]; pending=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL").fetchone()[0]; failed=d.execute("SELECT count(*) FROM audit_outbox WHERE delivered_utc IS NULL AND last_error IS NOT NULL").fetchone()[0];delivery=audit_delivery_health(d);d.close();
     tuple={"registry_service":SERVICE_ID,"registry_schema":SCHEMA_VERSION,"ledger_service":"townsquare-ledger-v0","ledger_schema":14,"audit_contract":AUDIT_CONTRACT_VERSION}
     expected_peer={"service_id":"townsquare-ledger-v0","schema_version":14,**CANARY_IDENTITY.as_dict()}
     base={**identity_metadata(),"database_schema_version":version,"compatibility":tuple,"compatible_peer":expected_peer}
     if not compatible(): return self.reply(503,{"ok":False,**base,"detail":"incompatible schema/audit contract"})
-    if failed:return self.reply(503,{"ok":False,**base,"pending_audit":pending,"delivery_failures":failed,"detail":"registry audit delivery degraded"})
+    if failed or not delivery['ready']:return self.reply(503,{"ok":False,**base,"pending_audit":pending,"delivery_failures":failed,"audit_worker":delivery,"detail":"registry audit delivery degraded"})
     return self.reply(200,{"ok":True,**base,"pending_audit":pending,"delivery_failures":0})
    except Exception:return self.reply(503,{"ok":False,"detail":"registry readiness unavailable"})
   if self.path=="/health/internal/ready":
    if self.client_address[0] not in ('127.0.0.1','::1'): return self.reply(404,{"detail":"not found"})
-   if compatible() and peer_ready().get('compatible'): return self.reply(200,{"ok":True})
+   try:d=connect();delivery=audit_delivery_health(d);d.close()
+   except Exception:delivery={'ready':False}
+   if compatible() and peer_ready().get('compatible') and delivery['ready']: return self.reply(200,{"ok":True})
    return self.reply(503,{"ok":False})
   session_match=re.fullmatch(r'/v1/sessions/([0-9a-f-]{36})(?:/(history|provider-locator))?',self.path)
   if session_match:
@@ -472,10 +524,12 @@ class Handler(BaseHTTPRequestHandler):
   except Exception as e:d.rollback();self.reply(503,{"detail":str(e)})
   finally:d.close()
 def main():
+ if sys.argv[1:]==['--audit-worker']:
+  audit_worker();return
  require_manual_delivery_mode()
  if not compatible(): raise SystemExit('Registry schema/audit contract incompatible; run registry-migrate')
  if sys.argv[1:]==['--deliver-audit-once']:
   deliver_once();return
- if sys.argv[1:]: raise SystemExit('usage: app.py [--deliver-audit-once]')
+ if sys.argv[1:]: raise SystemExit('usage: app.py [--audit-worker|--deliver-audit-once]')
  ThreadingHTTPServer(session_listener_config(),Handler).serve_forever()
 if __name__=="__main__":main()

@@ -12,6 +12,15 @@ history and provider-locator ownership routes accept only a valid
 `SessionSignature`; neither the legacy Registry Bearer nor an operator header
 can authorize them. Every session response carries `Cache-Control: no-store`.
 
+## Audit delivery worker
+
+The production image exposes the closed `python -m registry.app
+--audit-worker` mode. It starts one cycle immediately, then uses the configured
+monotonic interval; the release composition pins that interval to 30 seconds.
+`REGISTRY_AUDIT_INTERVAL_SECONDS` accepts only canonical decimal values from 5
+through 300. The worker owns no public listener and shares only the protected
+Registry database and the existing fixed Ledger audit/readiness inputs.
+
 ## Enrollment
 
 `POST /v1/session-enrollments` is restricted to loopback plus the existing

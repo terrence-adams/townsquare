@@ -51,6 +51,11 @@ class ComposeInterpolationSyntaxContract(unittest.TestCase):
             "TOWNSQUARE_MINISIGN_VERSION": "0.11-1",
             "TOWNSQUARE_LEDGER_PORT": "8786",
             "TOWNSQUARE_VIEWER_PORT": "8791",
+            "TOWNSQUARE_SOURCE_COMMIT": "a" * 40,
+            "TOWNSQUARE_SOURCE_TREE": "b" * 40,
+            "TOWNSQUARE_R7_RELEASE_ID": "TS-R7-" + "c" * 64,
+            "TOWNSQUARE_R7_INPUT_MANIFEST_SHA256": "d" * 64,
+            "TOWNSQUARE_R7_IDENTITY_SHA256": "e" * 64,
             **session_registry_environment(),
         }
         path_values = (
@@ -67,6 +72,7 @@ class ComposeInterpolationSyntaxContract(unittest.TestCase):
             "TOWNSQUARE_LEDGER_REGISTRY_READINESS_TOKEN_FILE",
             "TOWNSQUARE_BACKUP_RECIPIENT_FILE",
             "TOWNSQUARE_CONTEXT_MANIFEST",
+            "TOWNSQUARE_R7_IDENTITY_FILE",
             "TOWNSQUARE_AUTHORITY_PUBLIC_KEY_FILE",
             "TOWNSQUARE_AUTHORITY_PROOF_FILE",
             "TOWNSQUARE_AUTHORITY_SIGNATURE_FILE",

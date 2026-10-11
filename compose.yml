@@ -16,6 +16,31 @@ x-hardened: &hardened
     driver: local
     options: {max-size: 10m, max-file: "5"}
 
+x-registry-r7-build-args: &registry-r7-build-args
+  PYTHON_IMAGE: "${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}"
+  TOWNSQUARE_RUNTIME_CLASS: CANARY
+  TOWNSQUARE_AUTHORITY_CLASS: NON-AUTHORITATIVE
+  TOWNSQUARE_CANARY_LABEL: TS-CANARY-NAS1-20261007-A
+  TOWNSQUARE_COMPOSE_PROJECT: townsquare-canary-20261007-a
+  TOWNSQUARE_SOURCE_COMMIT: "${TOWNSQUARE_SOURCE_COMMIT:?set exact Registry successor commit}"
+  TOWNSQUARE_SOURCE_TREE: "${TOWNSQUARE_SOURCE_TREE:?set exact Registry successor tree}"
+  TOWNSQUARE_R7_RELEASE_ID: "${TOWNSQUARE_R7_RELEASE_ID:?set exact R7 release id}"
+  TOWNSQUARE_R7_INPUT_MANIFEST_SHA256: "${TOWNSQUARE_R7_INPUT_MANIFEST_SHA256:?set exact R7 input manifest digest}"
+  TOWNSQUARE_R7_IDENTITY_SHA256: "${TOWNSQUARE_R7_IDENTITY_SHA256:?set exact R7 identity digest}"
+
+x-registry-r7-environment: &registry-r7-environment
+  TOWNSQUARE_RUNTIME_CLASS: CANARY
+  TOWNSQUARE_AUTHORITY_CLASS: NON-AUTHORITATIVE
+  TOWNSQUARE_CANARY_LABEL: TS-CANARY-NAS1-20261007-A
+  TOWNSQUARE_COMPOSE_PROJECT: townsquare-canary-20261007-a
+  TOWNSQUARE_SOURCE_COMMIT: "${TOWNSQUARE_SOURCE_COMMIT:?set exact Registry successor commit}"
+  TOWNSQUARE_SOURCE_TREE: "${TOWNSQUARE_SOURCE_TREE:?set exact Registry successor tree}"
+  TOWNSQUARE_R7_RELEASE_ID: "${TOWNSQUARE_R7_RELEASE_ID:?set exact R7 release id}"
+  TOWNSQUARE_R7_INPUT_MANIFEST_SHA256: "${TOWNSQUARE_R7_INPUT_MANIFEST_SHA256:?set exact R7 input manifest digest}"
+  TOWNSQUARE_R7_IDENTITY_SHA256: "${TOWNSQUARE_R7_IDENTITY_SHA256:?set exact R7 identity digest}"
+  TOWNSQUARE_R7_IDENTITY_FILE: /opt/townsquare/release/r7-identity.json
+  TOWNSQUARE_CONTEXT_MANIFEST: /run/config/canary-context-manifest.json
+
 services:
   ledger-migrate:
     image: "${TOWNSQUARE_LEDGER_IMAGE:?set immutable ledger image reference}"
@@ -119,12 +144,13 @@ services:
     build:
       context: .
       dockerfile: registry/Dockerfile
-      args: {PYTHON_IMAGE: "${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}"}
+      args: *registry-r7-build-args
     <<: *hardened
     user: "10003:10003"
     depends_on:
       registry-migrate: {condition: service_completed_successfully}
     environment:
+      <<: *registry-r7-environment
       REGISTRY_DB: /var/lib/registry/registry.db
       REGISTRY_TOKEN_FILE: /run/secrets/registry_api_token
       REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
@@ -137,6 +163,7 @@ services:
       LEDGER_READINESS_URL: http://ledger:8790/health/ready
       LEDGER_READINESS_TOKEN_FILE: /run/secrets/registry_ledger_readiness_token
       REGISTRY_PEER_READINESS_TOKEN_FILE: /run/secrets/ledger_registry_readiness_token
+      REGISTRY_AUDIT_DELIVERY_MODE: manual
       REGISTRY_SESSION_BIND_HOST: "${REGISTRY_SESSION_BIND_HOST:?set exact Session Registry bind host}"
       REGISTRY_SESSION_BIND_PORT: "${REGISTRY_SESSION_BIND_PORT:?set exact Session Registry bind port}"
       REGISTRY_SESSION_PUBLIC_URL: "${REGISTRY_SESSION_PUBLIC_URL:?set exact Session Registry public URL}"
@@ -146,6 +173,9 @@ services:
         source: "${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}"
         target: /var/lib/registry
     secrets: [registry_api_token, ledger_registry_audit_token, registry_ledger_readiness_token, ledger_registry_readiness_token]
+    configs:
+      - {source: context_manifest, target: /run/config/canary-context-manifest.json}
+      - {source: r7_identity, target: /opt/townsquare/release/r7-identity.json}
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
     networks: [app]
     healthcheck:
@@ -155,6 +185,38 @@ services:
       retries: 3
       start_period: 15s
 
+  registry-audit-worker:
+    image: "${TOWNSQUARE_REGISTRY_IMAGE:?set immutable registry image reference}"
+    <<: *hardened
+    user: "10003:10003"
+    command: ["python", "-m", "canary.preexec", "--", "python", "-m", "registry.app", "--audit-worker"]
+    depends_on:
+      registry-migrate: {condition: service_completed_successfully}
+    environment:
+      <<: *registry-r7-environment
+      REGISTRY_DB: /var/lib/registry/registry.db
+      REGISTRY_AUDIT_INTERVAL_SECONDS: "30"
+      REGISTRY_AUDIT_CONTRACT_VERSION: registry-ledger-audit-v1
+      REGISTRY_SERVICE_ID: townsquare-registry-v0
+      REGISTRY_SCHEMA_HEAD: "2"
+      REGISTRY_LEDGER_SERVICE_ID: townsquare-ledger-v0
+      REGISTRY_LEDGER_SCHEMA_HEAD: "14"
+      REGISTRY_LEDGER_AUDIT_CONTRACT: registry-ledger-audit-v1
+      REGISTRY_LEDGER_AUDIT_TOKEN_FILE: /run/secrets/ledger_registry_audit_token
+      LEDGER_READINESS_URL: http://ledger:8790/health/ready
+      LEDGER_READINESS_TOKEN_FILE: /run/secrets/registry_ledger_readiness_token
+      REGISTRY_PEER_READINESS_TOKEN_FILE: /run/secrets/ledger_registry_readiness_token
+    volumes:
+      - type: bind
+        source: "${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}"
+        target: /var/lib/registry
+    secrets: [ledger_registry_audit_token, registry_ledger_readiness_token, ledger_registry_readiness_token]
+    configs:
+      - {source: context_manifest, target: /run/config/canary-context-manifest.json}
+      - {source: r7_identity, target: /opt/townsquare/release/r7-identity.json}
+    tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
+    networks: [app]
+
   # Independent database, independent exclusive migrator. This is intentionally
   # not the Ledger `migrate` service and never shares a transaction with it.
   registry-migrate:
@@ -162,17 +224,21 @@ services:
     build:
       context: .
       dockerfile: registry/Dockerfile
-      args: {PYTHON_IMAGE: "${TOWNSQUARE_PYTHON_IMAGE:?set immutable Python base reference}"}
+      args: *registry-r7-build-args
     <<: *hardened
     restart: "no"
     user: "10003:10003"
-    command: ["python", "/app/migrate.py"]
+    command: ["python", "-m", "canary.preexec", "--", "python", "/app/migrate.py"]
     environment:
+      <<: *registry-r7-environment
       REGISTRY_DB: /var/lib/registry/registry.db
     volumes:
       - type: bind
         source: "${TOWNSQUARE_REGISTRY_DATA_DIR:?set a separate durable registry data directory}"
         target: /var/lib/registry
+    configs:
+      - {source: context_manifest, target: /run/config/canary-context-manifest.json}
+      - {source: r7_identity, target: /opt/townsquare/release/r7-identity.json}
     tmpfs: [/tmp:rw,noexec,nosuid,size=32m,mode=1777]
     networks: [app]
 
@@ -227,6 +293,7 @@ secrets:
   backup_recipient: {file: "${TOWNSQUARE_BACKUP_RECIPIENT_FILE:?set secret path}"}
 configs:
   context_manifest: {file: "${TOWNSQUARE_CONTEXT_MANIFEST:?set immutable manifest file}"}
+  r7_identity: {file: "${TOWNSQUARE_R7_IDENTITY_FILE:?set immutable R7 identity file}"}
   authority_public_key: {file: "${TOWNSQUARE_AUTHORITY_PUBLIC_KEY_FILE:?set public verification key}"}
   authority_proof: {file: "${TOWNSQUARE_AUTHORITY_PROOF_FILE:?set canonical authority proof}"}
   authority_proof_signature: {file: "${TOWNSQUARE_AUTHORITY_SIGNATURE_FILE:?set detached proof signature}"}
