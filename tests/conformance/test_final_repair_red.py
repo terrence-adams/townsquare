@@ -43,7 +43,9 @@ class FinalRepairContracts(unittest.TestCase):
         self.assertIn("lease_until", source)
         self.assertIn("claim", source.lower())
         self.assertIn("periodic", source.lower())
-        self.assertIn("threading.Thread", source)
+        compose = self.text("compose.yml")
+        self.assertIn('command: ["python", "-m", "canary.preexec", "--", "python", "-m", "registry.app", "--audit-worker"]', compose)
+        self.assertEqual(1, compose.count("\n  registry-audit-worker:\n"))
 
     def test_registry_journal_and_outbox_are_append_only_with_recoverable_lease_state(self):
         schema = self.text("registry/schema.sql")

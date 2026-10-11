@@ -53,6 +53,8 @@ def identity_environment():
     values = dict(IDENTITY)
     for name, value in IDENTITY.items():
         values["TOWNSQUARE_EMBEDDED_" + name.removeprefix("TOWNSQUARE_")] = value
+    values["TOWNSQUARE_R7_IDENTITY_SHA256"] = "e" * 64
+    values["TOWNSQUARE_EMBEDDED_R7_IDENTITY_SHA256"] = "e" * 64
     return values
 
 
@@ -680,7 +682,7 @@ class StaticContainmentTests(unittest.TestCase):
             db = sqlite3.connect(database)
             try:
                 self.assertEqual(1414746695, db.execute("PRAGMA application_id").fetchone()[0])
-                self.assertEqual(7, db.execute("PRAGMA user_version").fetchone()[0])
+                self.assertEqual(8, db.execute("PRAGMA user_version").fetchone()[0])
             finally:
                 db.close()
 

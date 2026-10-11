@@ -216,5 +216,27 @@ CREATE TABLE audit_worker_state(
 );
 INSERT INTO audit_worker_state(singleton) VALUES(1);
 INSERT INTO registry_migrations VALUES(7,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+CREATE TABLE audit_credential_bindings(
+ role TEXT PRIMARY KEY CHECK(role IN ('ledger_audit','ledger_readiness_outbound','registry_peer_readiness_inbound')),
+ salt BLOB NOT NULL CHECK(length(salt)=32),
+ accepted_revision INTEGER CHECK(accepted_revision IS NULL OR accepted_revision>0),
+ verifier TEXT CHECK(verifier IS NULL OR (length(verifier)=64 AND verifier NOT GLOB '*[^0-9a-f]*')),
+ full_fingerprint TEXT CHECK(full_fingerprint IS NULL OR (length(full_fingerprint)=64 AND full_fingerprint NOT GLOB '*[^0-9a-f]*')),
+ CHECK((accepted_revision IS NULL AND verifier IS NULL AND full_fingerprint IS NULL) OR (accepted_revision IS NOT NULL AND verifier IS NOT NULL AND full_fingerprint IS NOT NULL))
+);
+CREATE TABLE audit_failure_latches(
+ latch_key TEXT PRIMARY KEY,
+ event_id TEXT,
+ failure_code TEXT NOT NULL CHECK(failure_code IN ('CONFIGURATION_INVALID','CREDENTIAL_INVALID','PEER_IDENTITY_INVALID','REMOTE_PROTOCOL_INVALID','REMOTE_REJECTED')),
+ static_fingerprint TEXT NOT NULL CHECK(length(static_fingerprint)=64 AND static_fingerprint NOT GLOB '*[^0-9a-f]*'),
+ full_fingerprint TEXT CHECK(full_fingerprint IS NULL OR (length(full_fingerprint)=64 AND full_fingerprint NOT GLOB '*[^0-9a-f]*')),
+ failure_field_mask_json TEXT NOT NULL,
+ credential_role TEXT CHECK(credential_role IS NULL OR credential_role IN ('ledger_audit','ledger_readiness_outbound','registry_peer_readiness_inbound')),
+ declared_revision INTEGER CHECK(declared_revision IS NULL OR declared_revision>0),
+ created_utc TEXT NOT NULL,
+ updated_utc TEXT NOT NULL
+);
+CREATE INDEX audit_failure_latches_event ON audit_failure_latches(event_id);
+INSERT INTO registry_migrations VALUES(8,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 PRAGMA application_id=1414746695;
-PRAGMA user_version=7;
+PRAGMA user_version=8;

@@ -18,6 +18,7 @@ RUNTIME_FIELDS = (
 EMBEDDED_FIELDS = tuple("TOWNSQUARE_EMBEDDED_" + name.removeprefix("TOWNSQUARE_") for name in RUNTIME_FIELDS)
 IDENTITY_FILE_ENV = "TOWNSQUARE_R7_IDENTITY_FILE"
 IDENTITY_FILE_SHA256_ENV = "TOWNSQUARE_R7_IDENTITY_SHA256"
+EMBEDDED_IDENTITY_SHA256_ENV = "TOWNSQUARE_EMBEDDED_R7_IDENTITY_SHA256"
 DEFAULT_IDENTITY_FILE = "/opt/townsquare/release/r7-identity.json"
 DEFAULT_CONTEXT_FILE = "/run/config/canary-context-manifest.json"
 FIXED_VALUES = {
@@ -78,6 +79,10 @@ def verify_canary_identity(environ: Mapping[str, str]) -> CanaryIdentity:
     for runtime_name, embedded_name in zip(RUNTIME_FIELDS, EMBEDDED_FIELDS):
         if runtime[runtime_name] != embedded[embedded_name]:
             raise CanaryIdentityError(f"runtime and embedded canary identity differ for {runtime_name}")
+    runtime_digest = _required(environ, IDENTITY_FILE_SHA256_ENV)
+    embedded_digest = _required(environ, EMBEDDED_IDENTITY_SHA256_ENV)
+    if not _SHA256.fullmatch(runtime_digest) or runtime_digest != embedded_digest:
+        raise CanaryIdentityError("runtime and embedded R7 identity SHA-256 differ")
     return _identity_from_values(runtime)
 
 def _pairs(items):

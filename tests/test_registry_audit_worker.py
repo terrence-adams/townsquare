@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import base64
 import hashlib
 import io
 import json
@@ -12,6 +13,7 @@ import threading
 import time
 import unittest
 import importlib
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -41,14 +43,20 @@ class AuditWorkerTests(unittest.TestCase):
         db = sqlite3.connect(self.path)
         db.executescript((ROOT / "registry" / "schema.sql").read_text(encoding="utf-8"))
         db.close()
-        self.saved = {name: getattr(self.app, name) for name in ("DB", "compatible", "peer_ready", "ledger_audit_token", "acknowledge_delivery", "_deliver_claimed")}
+        self.saved = {name: getattr(self.app, name) for name in ("DB", "compatible", "peer_ready", "ledger_audit_token", "acknowledge_delivery", "_deliver_claimed", "_prepare_audit_configuration")}
         self.app.DB = self.path
         self.app.compatible = lambda: True
-        self.app.peer_ready = lambda: {"compatible": True}
+        self.app.peer_ready = lambda _configuration=None: {"compatible": True}
         self.app.ledger_audit_token = lambda: "test-only-token"
         self.app.acknowledge_delivery = acknowledge_delivery
         self.effects = []
-        self.app._deliver_claimed = lambda event_id: self.effects.append(event_id)
+        credential = bytes(range(32, 64))
+        self.app._prepare_audit_configuration = lambda: {
+            "static_fingerprint": "1" * 64, "full_fingerprint": "2" * 64,
+            "decoded": {"ledger_audit": credential, "ledger_readiness_outbound": credential, "registry_peer_readiness_inbound": bytes(range(64, 96))},
+            "candidates": {}, "full": {"credential_bindings": [{"role": "ledger_audit", "revision": 1}]},
+        }
+        self.app._deliver_claimed = lambda event_id, _configuration=None: self.effects.append(event_id)
 
     def tearDown(self):
         for name, value in self.saved.items(): setattr(self.app, name, value)
@@ -91,7 +99,7 @@ class AuditWorkerTests(unittest.TestCase):
     def test_aud_03_concurrent_workers_make_one_remote_effect_and_ack(self):
         self.add("aud-03")
         entered = threading.Event(); release = threading.Event()
-        def delivery(event_id):
+        def delivery(event_id, _configuration=None):
             self.effects.append(event_id); entered.set(); self.assertTrue(release.wait(3))
         self.app._deliver_claimed = delivery
         first = threading.Thread(target=self.app.audit_worker_cycle)
@@ -122,7 +130,7 @@ class AuditWorkerTests(unittest.TestCase):
 
     def test_aud_06_poison_attempted_once_and_does_not_starve_next_row(self):
         self.add("aud-06-a"); self.add("aud-06-b")
-        def delivery(event_id):
+        def delivery(event_id, _configuration=None):
             self.effects.append(event_id)
             if event_id == "aud-06-a": raise OSError("payload must not be retained")
         self.app._deliver_claimed = delivery
@@ -134,7 +142,7 @@ class AuditWorkerTests(unittest.TestCase):
     def test_aud_06_long_cycle_never_reclaims_failed_row(self):
         self.add("aud-06-long-a"); self.add("aud-06-long-b")
         clock = iter([1_800_000_000] * 4 + [1_800_000_006] * 16)
-        self.app._deliver_claimed = lambda _event: (_ for _ in ()).throw(OSError("offline"))
+        self.app._deliver_claimed = lambda _event, _configuration=None: (_ for _ in ()).throw(OSError("offline"))
         with mock.patch.object(self.app.time, "time", side_effect=lambda: next(clock)):
             result = self.app.audit_worker_cycle(interval=5)
         self.assertEqual((2, 2), (result["attempted"], result["failed"]))
@@ -142,18 +150,18 @@ class AuditWorkerTests(unittest.TestCase):
 
     def test_aud_07_restart_resumes_pending_work(self):
         self.add("aud-07")
-        self.app._deliver_claimed = lambda _event: (_ for _ in ()).throw(OSError("offline"))
+        self.app._deliver_claimed = lambda _event, _configuration=None: (_ for _ in ()).throw(OSError("offline"))
         with mock.patch.object(self.app.time, "time", return_value=1_800_000_000): self.app.audit_worker_cycle(interval=5)
-        self.app._deliver_claimed = lambda event: self.effects.append(event)
+        self.app._deliver_claimed = lambda event, _configuration=None: self.effects.append(event)
         with mock.patch.object(self.app.time, "time", return_value=1_800_000_006): result = self.app.audit_worker_cycle(interval=5)
         self.assertEqual(1, result["delivered"]); self.assertEqual(["aud-07"], self.effects)
 
     def test_aud_08_peer_identity_failure_degrades_then_recovers(self):
         self.add("aud-08", self.app._audit_utc())
-        self.app.peer_ready = lambda: {"compatible": False}
+        self.app.peer_ready = lambda _configuration=None: {"compatible": False, "failure_code": "PEER_IDENTITY_INVALID", "failure_field_mask": ("peer_expected",)}
         result = self.app.audit_worker_cycle(); self.assertEqual("PEER_IDENTITY_INVALID", result["failure_code"]); self.assertEqual([], self.effects)
         db = self.db(); self.assertFalse(self.app.audit_delivery_health(db)["ready"]); db.close()
-        self.app.peer_ready = lambda: {"compatible": True}; self.app.audit_worker_cycle()
+        self.app.peer_ready = lambda _configuration=None: {"compatible": True}; self.app.audit_worker_cycle()
         db = self.db(); self.assertTrue(self.app.audit_delivery_health(db)["ready"]); db.close()
 
     def test_aud_09_release_interval_and_bounds_are_exact(self):
@@ -165,14 +173,14 @@ class AuditWorkerTests(unittest.TestCase):
 
     def test_aud_10_cooperative_shutdown_finishes_within_bound(self):
         self.add("aud-10"); stop = threading.Event(); entered = threading.Event()
-        def delivery(event): entered.set(); self.assertTrue(stop.wait(3)); self.effects.append(event)
+        def delivery(event, _configuration=None): entered.set(); self.assertTrue(stop.wait(3)); self.effects.append(event)
         self.app._deliver_claimed = delivery
         started = time.monotonic(); worker = threading.Thread(target=self.app.audit_worker, args=({self.app.AUDIT_INTERVAL_ENV: "5"}, stop)); worker.start(); self.assertTrue(entered.wait(3)); stop.set(); worker.join(5)
         self.assertFalse(worker.is_alive()); self.assertLess(time.monotonic() - started, 5); self.assertEqual(["aud-10"], self.effects)
 
     def test_aud_11_logs_and_metrics_are_payload_and_secret_free(self):
         self.add("aud-11"); stop = threading.Event()
-        def delivery(_event): stop.set()
+        def delivery(_event, _configuration=None): stop.set()
         self.app._deliver_claimed = delivery
         output = io.StringIO()
         with contextlib.redirect_stdout(output): self.app.audit_worker({self.app.AUDIT_INTERVAL_ENV: "5"}, stop)
@@ -187,6 +195,76 @@ class AuditWorkerTests(unittest.TestCase):
         self.assertIn("COPY --chown=10003:10003 registry/app.py /app/registry/app.py", (ROOT / "registry" / "Dockerfile").read_text(encoding="utf-8"))
         self.assertNotRegex(block, r"(?m)^\s+ports:"); self.assertNotIn("build:", block); self.assertNotIn("--audit-worker", compose.split("\n  registry:\n", 1)[1].split("\n  registry-audit-worker:\n", 1)[0])
 
+    def test_aud_13_permanent_latch_survives_idle_restart_and_time(self):
+        self.add("aud-13")
+        self.app._deliver_claimed = lambda *_: (_ for _ in ()).throw(self.app.AuditDeliveryFailure("REMOTE_REJECTED", True, ("event.identity",)))
+        first = self.app.audit_worker_cycle()
+        self.assertEqual("REMOTE_REJECTED", first["failure_code"])
+        with mock.patch.object(self.app.time, "time", return_value=2_000_000_000):
+            idle = self.app.audit_worker_cycle()
+        self.assertEqual("REMOTE_REJECTED", idle["failure_code"])
+        db = self.db()
+        try:
+            self.assertEqual(("event:aud-13", "REMOTE_REJECTED"), tuple(db.execute("SELECT latch_key,failure_code FROM audit_failure_latches").fetchone()))
+            self.assertFalse(self.app.audit_delivery_health(db, now_epoch=2_000_000_000)["ready"])
+        finally: db.close()
+
+    def test_aud_14_closed_failure_classes_and_credential_pre_db_rejection(self):
+        cases = {
+            urllib.error.HTTPError("http://ledger", status, "x", {}, None): expected
+            for status, expected in ((400, "REMOTE_REJECTED"), (401, "REMOTE_REJECTED"), (403, "REMOTE_REJECTED"), (409, "REMOTE_REJECTED"), (408, "REMOTE_UNAVAILABLE"), (425, "REMOTE_UNAVAILABLE"), (429, "REMOTE_UNAVAILABLE"), (503, "REMOTE_UNAVAILABLE"))
+        }
+        for error, expected in cases.items():
+            with self.subTest(status=error.code): self.assertEqual(expected, self.app._audit_failure(error, "event")[0])
+        for error, expected in ((TimeoutError(), "REMOTE_UNAVAILABLE"), (ValueError(), "REMOTE_PROTOCOL_INVALID")):
+            self.assertEqual(expected, self.app._audit_failure(error, "event")[0])
+        weak = [bytes([7]) * 32, bytes(range(32)), bytes(range(31, -1, -1))]
+        weak.extend((bytes(range(size)) * (32 // size)) for size in (1, 2, 4, 8, 16))
+        invalid = [
+            b"", b"A" * 42, b"A" * 44, b"A" * 43 + b"=", b"A" * 42 + b"+", b"A" * 42 + b"/",
+            b"A" * 42 + b" ", b"A" * 42 + b"\n", "é".encode(), b"short", b"_" * 43,
+            *[base64.urlsafe_b64encode(value).rstrip(b"=") for value in weak],
+        ]
+        for raw in invalid:
+            with self.subTest(raw=raw), self.assertRaises(self.app.AuditConfigurationError): self.app.validate_audit_credential(raw)
+        with tempfile.TemporaryDirectory() as directory:
+            for index, value in enumerate(weak):
+                target = Path(directory) / str(index)
+                with self.subTest(generator=index), self.assertRaises(self.app.AuditConfigurationError): self.app.generate_audit_credential(target, rng=lambda _size, value=value: value)
+                self.assertFalse(target.exists())
+        called = []
+        env = {**os.environ, **{
+            "TOWNSQUARE_RUNTIME_CLASS": "CANARY", "TOWNSQUARE_AUTHORITY_CLASS": "NON-AUTHORITATIVE",
+            "TOWNSQUARE_CANARY_LABEL": "TS-CANARY-NAS1-20261007-A", "TOWNSQUARE_COMPOSE_PROJECT": "townsquare-canary-20261007-a",
+            "TOWNSQUARE_SOURCE_COMMIT": "a" * 40, "TOWNSQUARE_SOURCE_TREE": "b" * 40,
+            "TOWNSQUARE_R7_RELEASE_ID": "TS-R7-" + "c" * 64, "TOWNSQUARE_R7_INPUT_MANIFEST_SHA256": "d" * 64,
+            "TOWNSQUARE_R7_IDENTITY_SHA256": "e" * 64, "REGISTRY_SERVICE_ID": "townsquare-registry-v0", "REGISTRY_SCHEMA_HEAD": "2",
+            "REGISTRY_AUDIT_CONTRACT_VERSION": "registry-ledger-audit-v1", "REGISTRY_LEDGER_SERVICE_ID": "townsquare-ledger-v0",
+            "REGISTRY_LEDGER_SCHEMA_HEAD": "14", "REGISTRY_LEDGER_AUDIT_CONTRACT": "registry-ledger-audit-v1", "REGISTRY_AUDIT_INTERVAL_SECONDS": "30",
+            "REGISTRY_LEDGER_AUDIT_TOKEN_FILE": "/audit", "LEDGER_READINESS_TOKEN_FILE": "/out", "REGISTRY_PEER_READINESS_TOKEN_FILE": "/in",
+            "REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION": "1", "LEDGER_READINESS_CREDENTIAL_REVISION": "1", "REGISTRY_PEER_READINESS_CREDENTIAL_REVISION": "1",
+        }}
+        with mock.patch.object(self.app, "_credential_verifier", side_effect=lambda *_: called.append("verifier")):
+            with self.assertRaises(self.app.AuditConfigurationError):
+                self.saved["_prepare_audit_configuration"](env, reader=lambda _path: b"invalid", db_factory=lambda: called.append("db"))
+        self.assertEqual([], called)
+        credentials = {
+            "/audit": base64.urlsafe_b64encode(bytes(range(32, 64))).rstrip(b"="),
+            "/out": base64.urlsafe_b64encode(bytes(range(64, 96))).rstrip(b"="),
+            "/in": base64.urlsafe_b64encode(bytes(range(96, 128))).rstrip(b"="),
+        }
+        configuration = self.saved["_prepare_audit_configuration"](
+            env, reader=credentials.__getitem__, db_factory=self.db, salt_source=lambda _size: bytes(range(128, 160)))
+        self.assertEqual(
+            ["ledger_audit", "ledger_readiness_outbound", "registry_peer_readiness_inbound"],
+            [item["role"] for item in configuration["full"]["credential_bindings"]])
+        self.assertEqual(
+            hashlib.sha256(b"townsquare-registry-audit-static-config-fingerprint-v1\0" + self.app._jcs(configuration["static"]).encode()).hexdigest(),
+            configuration["static_fingerprint"])
+        self.assertEqual(
+            hashlib.sha256(b"townsquare-registry-audit-config-fingerprint-v1\0" + self.app._jcs(configuration["full"]).encode()).hexdigest(),
+            configuration["full_fingerprint"])
+
     def test_schema_v6_copy_migrates_atomically_to_worker_state_v7(self):
         old = os.environ.get("REGISTRY_DB"); os.environ["REGISTRY_DB"] = str(self.path)
         try:
@@ -198,7 +276,7 @@ class AuditWorkerTests(unittest.TestCase):
                 if statement.lstrip().upper().startswith("INSERT INTO REGISTRY_MIGRATIONS VALUES(6,"): break
             db.execute(f"PRAGMA application_id={migrate.APPLICATION_ID}"); db.execute("PRAGMA user_version=6")
             migrate.migrate(db)
-            self.assertEqual(7, db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(8, db.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual((1, None), tuple(db.execute("SELECT singleton,heartbeat_utc FROM audit_worker_state").fetchone()))
             db.close()
             contract = json.loads((ROOT / "contracts" / "r7" / "registry-schema.json").read_text(encoding="utf-8"))

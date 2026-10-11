@@ -56,6 +56,9 @@ class ComposeInterpolationSyntaxContract(unittest.TestCase):
             "TOWNSQUARE_R7_RELEASE_ID": "TS-R7-" + "c" * 64,
             "TOWNSQUARE_R7_INPUT_MANIFEST_SHA256": "d" * 64,
             "TOWNSQUARE_R7_IDENTITY_SHA256": "e" * 64,
+            "REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION": "1",
+            "LEDGER_READINESS_CREDENTIAL_REVISION": "1",
+            "REGISTRY_PEER_READINESS_CREDENTIAL_REVISION": "1",
             **session_registry_environment(),
         }
         path_values = (
