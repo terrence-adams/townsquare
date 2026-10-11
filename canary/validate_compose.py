@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 from pathlib import PurePosixPath
+from shared.session_registry_listener import READINESS_URL as SESSION_REGISTRY_READINESS_URL,environment as session_registry_environment
 
 
 PROJECT = "townsquare-canary-20261007-a"
@@ -54,7 +55,7 @@ SERVICE_ENVIRONMENT = {
         "REGISTRY_SERVICE_ID": "townsquare-registry-v0",
         "REGISTRY_SCHEMA_HEAD": "2",
         "REGISTRY_AUDIT_CONTRACT_VERSION": "registry-ledger-audit-v1",
-        "REGISTRY_READINESS_URL": "http://registry:8789/health/ready",
+        "REGISTRY_READINESS_URL": SESSION_REGISTRY_READINESS_URL,
     },
     "registry-migrate": {"REGISTRY_DB": "/var/lib/registry/registry.db", "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json"},
     "registry": {
@@ -71,6 +72,7 @@ SERVICE_ENVIRONMENT = {
         "REGISTRY_LEDGER_SERVICE_ID": "townsquare-ledger-v0",
         "REGISTRY_LEDGER_SCHEMA_HEAD": "14",
         "REGISTRY_LEDGER_AUDIT_CONTRACT": "registry-ledger-audit-v1",
+        **session_registry_environment(),
         "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json",
     },
     "viewer": {
@@ -106,6 +108,7 @@ FORBIDDEN_KEYS = {
     "privileged", "cap_add", "devices", "network_mode", "extra_hosts", "dns",
     "pid", "ipc", "profiles",
 }
+REGISTRY_HEALTHCHECK_TEST=["CMD","python","-c","import urllib.request; urllib.request.urlopen('http://127.0.0.1:8793/health/internal/ready',timeout=2).read()"]
 
 
 class ComposeValidationError(RuntimeError):
@@ -218,6 +221,8 @@ def validate(model: dict[str, object], *, expected_identity: Mapping[str, str]) 
             raise ComposeValidationError(f"service {name} port mapping is not the exact NAS LAN allowlist")
         if name not in {"ledger", "viewer", "read-gateway"} and raw.get("ports"):
             raise ComposeValidationError(f"service {name} must not publish a host port")
+        if name=="registry" and raw.get("healthcheck",{}).get("test")!=REGISTRY_HEALTHCHECK_TEST:
+            raise ComposeValidationError("Registry healthcheck is not the exact protected listener")
 
 
 def main() -> None:

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from canary.safe_archive import CanaryPathError, extract_validated, validated_members
-from canary.validate_compose import ComposeValidationError, read_identity_env, validate
+from canary.validate_compose import ComposeValidationError, REGISTRY_HEALTHCHECK_TEST, read_identity_env, validate
 from shared.canary_authority import (
     CanaryAuthorityError,
     CanaryProofVerifier,
@@ -33,6 +33,7 @@ from registrar.app import auth as registrar_auth
 from registrar.app.service import Forbidden
 from registrar.app.db import connect as ledger_connect, migrate as ledger_migrate
 from canary.bootstrap import BootstrapError, SECRET_FILES, bootstrap
+from shared.session_registry_listener import READINESS_URL as SESSION_REGISTRY_READINESS_URL,environment as session_registry_environment
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -73,7 +74,7 @@ def rendered_compose_fixture():
             "TOWNSQUARE_REGISTRY_AUDIT_CONTRACT": "registry-ledger-audit-v1",
             "REGISTRY_INTEGRATION_ENABLED": "true", "REGISTRY_SERVICE_ID": "townsquare-registry-v0",
             "REGISTRY_SCHEMA_HEAD": "2", "REGISTRY_AUDIT_CONTRACT_VERSION": "registry-ledger-audit-v1",
-            "REGISTRY_READINESS_URL": "http://registry:8789/health/ready",
+            "REGISTRY_READINESS_URL": SESSION_REGISTRY_READINESS_URL,
         },
         "registry-migrate": {"REGISTRY_DB": "/var/lib/registry/registry.db", "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json"},
         "registry": {
@@ -88,6 +89,7 @@ def rendered_compose_fixture():
             "REGISTRY_SERVICE_ID": "townsquare-registry-v0", "REGISTRY_SCHEMA_HEAD": "2",
             "REGISTRY_LEDGER_SERVICE_ID": "townsquare-ledger-v0", "REGISTRY_LEDGER_SCHEMA_HEAD": "14",
             "REGISTRY_LEDGER_AUDIT_CONTRACT": "registry-ledger-audit-v1",
+            **session_registry_environment(),
             "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json",
         },
         "viewer": {"TOWNSQUARE_VIEWER_PROFILE": "native-ledger-mvp", "REGISTRAR_BASE_URL": "http://ledger:8790", "HOME": "/tmp", "TOWNSQUARE_CONTEXT_MANIFEST": "/run/config/canary-context-manifest.json"},
@@ -145,6 +147,7 @@ def rendered_compose_fixture():
     services["ledger"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18790", "target": 8790}]
     services["viewer"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18502", "target": 8502}]
     services["read-gateway"]["ports"] = [{"host_ip": "192.168.2.3", "published": "18503", "target": 8503}]
+    services["registry"]["healthcheck"] = {"test": list(REGISTRY_HEALTHCHECK_TEST)}
     return {
         "name": "townsquare-canary-20261007-a",
         "services": services,
@@ -426,6 +429,19 @@ class StaticContainmentTests(unittest.TestCase):
             mutate(candidate)
             with self.assertRaises(ComposeValidationError):
                 validate(candidate, expected_identity=IDENTITY)
+
+    def test_registry_listener_tuple_health_and_no_host_port_are_exact(self):
+        baseline=rendered_compose_fixture();validate(baseline,expected_identity=IDENTITY);registry=baseline["services"]["registry"]
+        self.assertEqual(session_registry_environment(),{key:registry["environment"][key] for key in session_registry_environment()});self.assertNotIn("ports",registry);self.assertEqual(REGISTRY_HEALTHCHECK_TEST,registry["healthcheck"]["test"])
+        for mutate in (
+            lambda value:value["environment"].update(REGISTRY_SESSION_BIND_PORT="8789"),
+            lambda value:value["environment"].update(REGISTRY_SESSION_PUBLIC_URL="http://registry:8789"),
+            lambda value:value["environment"].update(REGISTRY_SESSION_LISTENER_SHA256="0"*64),
+            lambda value:value["healthcheck"].update(test=[*REGISTRY_HEALTHCHECK_TEST[:-1],REGISTRY_HEALTHCHECK_TEST[-1].replace("8793","8789")]),
+            lambda value:value.update(ports=[{"host_ip":"127.0.0.1","published":"8793","target":8793}]),
+        ):
+            candidate=copy.deepcopy(baseline);mutate(candidate["services"]["registry"])
+            with self.assertRaises(ComposeValidationError):validate(candidate,expected_identity=IDENTITY)
 
     def test_rendered_compose_rejects_uid_and_cross_service_mount_mutations(self):
         baseline = rendered_compose_fixture()

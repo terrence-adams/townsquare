@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from shared.session_registry_listener import environment as session_registry_environment
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -50,6 +51,7 @@ class ComposeInterpolationSyntaxContract(unittest.TestCase):
             "TOWNSQUARE_MINISIGN_VERSION": "0.11-1",
             "TOWNSQUARE_LEDGER_PORT": "8786",
             "TOWNSQUARE_VIEWER_PORT": "8791",
+            **session_registry_environment(),
         }
         path_values = (
             "TOWNSQUARE_LEDGER_DATA_DIR",

@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from shared.canary_authority import CanaryAuthorityError,CanaryProofVerifier,SQLiteNonceStore,canonical_bytes,decode_proof,decode_signature,load_r7_context
 from shared.canary_identity import compatible_identity,require_canary_identity
 from shared.ledger_context import LedgerContextError,load_ledger_context
+from shared.session_registry_listener import READINESS_URL as SESSION_REGISTRY_READINESS_URL
 from .auth import authenticate_identity,authenticate_native_identity
 from .db import LEDGER_SERVICE_VERSION,REGISTRY_AUDIT_CONTRACT_VERSION,REGISTRY_SCHEMA_VERSION,REGISTRY_SERVICE_VERSION,registry_integration_status,session,verify_schema
 from .service import Conflict,Forbidden,Invalid,Registrar,Unavailable
@@ -35,7 +36,7 @@ for _forbidden_authority_name in (
 ensure_runtime_mode(os.environ.get("REGISTRAR_ENV","development"))
 
 DB_PATH=os.environ.get("REGISTRAR_DB","/data/registrar.db")
-REGISTRY_READINESS_URL=os.environ.get("REGISTRY_READINESS_URL","http://registry:8789/health/ready")
+REGISTRY_READINESS_URL=os.environ.get("REGISTRY_READINESS_URL",SESSION_REGISTRY_READINESS_URL)
 REGISTRY_READINESS_TIMEOUT_SECONDS=3
 
 # The separate one-shot migrator is the sole schema writer. Application boot
