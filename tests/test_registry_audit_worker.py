@@ -223,7 +223,7 @@ class AuditWorkerTests(unittest.TestCase):
         result = self.app.audit_worker_cycle(); self.assertEqual("PEER_IDENTITY_INVALID", result["failure_code"]); self.assertEqual([], self.effects)
         db = self.db(); self.assertFalse(self.app.audit_delivery_health(db)["ready"]); db.close()
         self.app.peer_ready = lambda _configuration=None: {"compatible": True}; self.app.audit_worker_cycle()
-        db = self.db(); self.assertTrue(self.app.audit_delivery_health(db)["ready"]); db.close()
+        db = self.db(); self.assertFalse(self.app.audit_delivery_health(db)["ready"], "a legacy heartbeat without a release epoch is never ready"); db.close()
 
     def test_aud_09_release_interval_and_bounds_are_exact(self):
         for value in ("5", "30", "300"): self.assertEqual(int(value), self.app.audit_interval({self.app.AUDIT_INTERVAL_ENV: value}))
@@ -467,7 +467,10 @@ class AuditWorkerTests(unittest.TestCase):
             os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = "invalid"
             self.assertEqual("CREDENTIAL_INVALID", self.app.audit_worker_cycle()["failure_code"])
             db = self.db()
-            try: self.assertEqual((None, None), tuple(db.execute("SELECT declared_revision,full_fingerprint FROM audit_failure_latches WHERE latch_key='credential:ledger_audit'").fetchone()))
+            try:
+                invalid = db.execute("SELECT declared_revision,full_fingerprint,failed_canonical_path,static_context_fingerprint,credential_role,failure_field_mask_json FROM audit_failure_latches WHERE latch_key='credential:ledger_audit'").fetchone()
+                self.assertEqual((None, None, "/ledger_audit", "ledger_audit", '["credential_bindings.ledger_audit"]'), (invalid[0], invalid[1], invalid[2], invalid[4], invalid[5]))
+                self.assertRegex(invalid[3], r"^[0-9a-f]{64}$")
             finally: db.close()
             os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = "1"
             for raw in self.invalid_credential_fixtures():
@@ -475,8 +478,8 @@ class AuditWorkerTests(unittest.TestCase):
                 self.assertEqual("CREDENTIAL_INVALID", result["failure_code"]); self.assertEqual(network_before, self.effects)
             db = self.db()
             try:
-                latch = db.execute("SELECT full_fingerprint,failed_verifier,declared_revision,failed_canonical_path FROM audit_failure_latches WHERE latch_key='credential:ledger_audit'").fetchone()
-                self.assertEqual((None, None, 1, None), tuple(latch))
+                latch = db.execute("SELECT full_fingerprint,failed_verifier,declared_revision,failed_canonical_path,static_context_fingerprint FROM audit_failure_latches WHERE latch_key='credential:ledger_audit'").fetchone()
+                self.assertEqual((None, None, 1, "/ledger_audit"), tuple(latch[:4])); self.assertRegex(latch[4], r"^[0-9a-f]{64}$")
                 persisted = tuple(db.execute("SELECT release_start_uuid,boot_epoch_revision,epoch_state,heartbeat_utc FROM audit_boot_epoch").fetchone())
             finally: db.close()
             restarted_calls = []; restarted = {}
@@ -487,12 +490,42 @@ class AuditWorkerTests(unittest.TestCase):
             try: self.assertEqual(persisted, tuple(db.execute("SELECT release_start_uuid,boot_epoch_revision,epoch_state,heartbeat_utc FROM audit_boot_epoch").fetchone()))
             finally: db.close()
             Path(paths["ledger_audit"]).write_bytes(base64.urlsafe_b64encode(bytes(range(128, 160))).rstrip(b"=")); os.environ["REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION"] = "2"; self.add("d1-repair-proof")
-            repaired = self.app.audit_worker_cycle()
+            def failed_ack(*_): raise RuntimeError("injected local acknowledgement failure after remote acceptance")
+            self.app.acknowledge_delivery = failed_ack
+            attempted = self.app.audit_worker_cycle()
+            self.assertEqual((0, 1), (attempted["delivered"], attempted["failed"]))
+            db = self.db()
+            try:
+                self.assertEqual((1, 1, None), tuple(db.execute("SELECT accepted_revision,(SELECT count(*) FROM audit_failure_latches WHERE latch_key='credential:ledger_audit'),(SELECT delivered_utc FROM audit_outbox WHERE event_id='d1-repair-proof') FROM audit_credential_bindings WHERE role='ledger_audit'").fetchone()))
+            finally: db.close()
+            self.app.acknowledge_delivery = acknowledge_delivery
+            with mock.patch.object(self.app.time, "time", return_value=time.time() + 31): repaired = self.app.audit_worker_cycle()
         self.assertEqual((1, None), (repaired["delivered"], repaired["failure_code"]))
         db = self.db()
         try: self.assertEqual((2, 0), tuple(db.execute("SELECT accepted_revision,(SELECT count(*) FROM audit_failure_latches) FROM audit_credential_bindings WHERE role='ledger_audit'").fetchone()))
         finally: db.close()
         self.assertNotEqual(before, self.path.read_bytes())
+
+    def test_readiness_requires_current_canonical_release_epoch_on_public_and_internal_paths(self):
+        env, paths = self.production_environment(); self.use_production_prepare(paths)
+        with mock.patch.dict(os.environ, env, clear=True): self.app.audit_worker_cycle()
+
+        def status(path, candidate):
+            request = object.__new__(self.app.Handler); request.path = path; request.headers = {"Authorization": "Bearer test-only-token"}; request.client_address = ("127.0.0.1", 1)
+            request.reply = lambda code, value, no_store=False: code
+            with mock.patch.dict(os.environ, candidate, clear=True), mock.patch.object(self.app, "require_directional_tokens", return_value=None), mock.patch.object(self.app, "ledger_readiness_token", return_value="test-only-token"): return request.do_GET()
+
+        self.assertEqual((200, 200), (status("/health/ready", env), status("/health/internal/ready", env)))
+        cases = []
+        missing = dict(env); missing.pop("TOWNSQUARE_RELEASE_START_UUID"); cases.append(missing)
+        malformed = dict(env); malformed["TOWNSQUARE_RELEASE_START_UUID"] = "not-a-canonical-uuid"; cases.append(malformed)
+        mismatch = dict(env); mismatch["TOWNSQUARE_RELEASE_START_UUID"] = "22222222-2222-4222-8222-222222222222"; cases.append(mismatch)
+        for candidate in cases:
+            self.assertEqual((503, 503), (status("/health/ready", candidate), status("/health/internal/ready", candidate)))
+        db = self.db()
+        try: db.execute("DELETE FROM audit_boot_epoch")
+        finally: db.close()
+        self.assertEqual((503, 503), (status("/health/ready", env), status("/health/internal/ready", env)), "legacy worker heartbeat without a bound release epoch is never ready")
 
     def test_aud_12_release_start_epoch_restart_replay_mismatch_and_cas(self):
         env, paths = self.production_environment(); runtime1 = self.use_production_prepare(paths)
