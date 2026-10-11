@@ -192,11 +192,12 @@ class SessionRegistryS1Tests(unittest.TestCase):
                 finally:
                     if old is None: __import__("os").environ.pop("REGISTRY_DB", None)
                     else: __import__("os").environ["REGISTRY_DB"] = old
-                self.assertEqual([(1,), (2,), (3,), (4,), (5,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
-                expected = {"sessions", "session_journal", "session_enrollments", "session_registration_replays", "session_credential_rotations"}
-                self.assertEqual(expected, {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_journal','session_enrollments','session_registration_replays','session_credential_rotations')")})
+                self.assertEqual([(1,), (2,), (3,), (4,), (5,), (6,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+                expected = {"sessions", "session_journal", "session_enrollments", "session_registration_replays", "session_owning_replays", "session_key_rotations"}
+                self.assertEqual(expected, {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_journal','session_enrollments','session_registration_replays','session_owning_replays','session_key_rotations')")})
                 self.assertIn("response_status", {row[1] for row in db.execute("PRAGMA table_info(requests)")})
-                self.assertIn("session_credential_sha256", {row[1] for row in db.execute("PRAGMA table_info(sessions)")})
+                self.assertNotIn("session_credential_sha256", {row[1] for row in db.execute("PRAGMA table_info(sessions)")})
+                self.assertIn("session_public_key_b64url", {row[1] for row in db.execute("PRAGMA table_info(sessions)")})
                 self.assertEqual(200, db.execute("SELECT response_status FROM requests WHERE principal='legacy'").fetchone()[0])
             finally:
                 db.close()

@@ -494,5 +494,27 @@ class MigrationAndPeerIdentityTests(unittest.TestCase):
                     os.environ["REGISTRY_PEER_READINESS_TOKEN_FILE"] = old_inbound
 
 
+def _successor(case, name):
+    """Keep inherited test labels active while exercising the replacement contract."""
+    def test(self):
+        case.setUpClass()
+        result = unittest.TestResult()
+        case(name).run(result)
+        self.assertEqual([], result.errors)
+        self.assertEqual([], result.failures)
+        self.assertEqual([], result.skipped)
+    return test
+
+
+from tests import test_session_registry_ed25519 as successor
+EnrollmentAndRotationTests.test_registration_exact_retry_and_all_changed_or_consumed_reuse_is_zero_write = _successor(successor.EnrollmentTests, "test_atomic_registration_replay_conflicts_and_no_private_material")
+EnrollmentAndRotationTests.test_expired_and_wrong_binding_fail_without_consumption_or_session = _successor(successor.EnrollmentTests, "test_expiry_binding_and_duplicate_locator_are_zero_write")
+EnrollmentAndRotationTests.test_rotation_exact_retry_accepts_old_or_new_after_restart_and_changed_reuse_is_zero_write = _successor(successor.OwningRequestTests, "test_rotation_cutoff_replay_and_terminate")
+EnrollmentAndRotationTests.test_session_credential_owns_heartbeat_and_cannot_cross_session = _successor(successor.OwningRequestTests, "test_get_one_use_and_database_exfiltration_cannot_forge")
+ScopedHttpTests.test_enrollment_registration_lookup_scope_owner_reads_and_provider_locator_separation = _successor(successor.EnrollmentTests, "test_http_requires_one_exact_enrollment_header_and_returns_no_store")
+MigrationAndPeerIdentityTests.test_v4_copy_upgrades_to_v5_and_rollback_copy_remains_byte_preserving = _successor(successor.FixtureAndMigrationTests, "test_v5_copy_migrates_to_lost_and_rollback_copy_is_unchanged")
+MigrationAndPeerIdentityTests.test_contract_hashes_and_same_release_registry_ledger_peer_identity = _successor(successor.FixtureAndMigrationTests, "test_public_fixture_is_byte_exact_and_identity_coherent")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,5 +109,88 @@ DROP TABLE session_journal_v4;
 CREATE TRIGGER session_journal_no_update BEFORE UPDATE ON session_journal BEGIN SELECT RAISE(ABORT,'session journal is append-only'); END;
 CREATE TRIGGER session_journal_no_delete BEFORE DELETE ON session_journal BEGIN SELECT RAISE(ABORT,'session journal is append-only'); END;
 INSERT INTO registry_migrations VALUES(5,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+DROP TRIGGER session_journal_no_update;
+DROP TRIGGER session_journal_no_delete;
+ALTER TABLE session_journal RENAME TO session_journal_v5;
+CREATE TABLE session_journal(
+ seq INTEGER PRIMARY KEY AUTOINCREMENT,
+ event_id TEXT UNIQUE NOT NULL,
+ session_uuid TEXT NOT NULL REFERENCES sessions(session_uuid),
+ agent_id TEXT NOT NULL,
+ action TEXT NOT NULL CHECK(action IN ('register','heartbeat','terminate','mark_lost','credential_rotate','credential_scheme_retired')),
+ body_json TEXT NOT NULL,
+ committed_utc TEXT NOT NULL
+);
+INSERT INTO session_journal(seq,event_id,session_uuid,agent_id,action,body_json,committed_utc)
+ SELECT seq,event_id,session_uuid,agent_id,action,body_json,committed_utc FROM session_journal_v5;
+DROP TABLE session_journal_v5;
+CREATE TRIGGER session_journal_no_update BEFORE UPDATE ON session_journal BEGIN SELECT RAISE(ABORT,'session journal is append-only'); END;
+CREATE TRIGGER session_journal_no_delete BEFORE DELETE ON session_journal BEGIN SELECT RAISE(ABORT,'session journal is append-only'); END;
+ALTER TABLE sessions ADD COLUMN credential_scheme TEXT NOT NULL DEFAULT 'retired' CHECK(credential_scheme IN ('ed25519-v1','retired'));
+ALTER TABLE sessions ADD COLUMN session_key_id TEXT;
+ALTER TABLE sessions ADD COLUMN session_key_epoch INTEGER CHECK(session_key_epoch IS NULL OR session_key_epoch>0);
+ALTER TABLE sessions ADD COLUMN session_public_key_b64url TEXT CHECK(session_public_key_b64url IS NULL OR length(session_public_key_b64url)=43);
+CREATE TEMP TABLE retired_session_events(session_uuid TEXT PRIMARY KEY,event_id TEXT NOT NULL,audit_id TEXT NOT NULL);
+INSERT INTO retired_session_events SELECT session_uuid,lower(hex(randomblob(16))),lower(hex(randomblob(16))) FROM sessions;
+UPDATE sessions SET status='LOST',ended_utc=COALESCE(ended_utc,strftime('%Y-%m-%dT%H:%M:%SZ','now')),last_seen_utc=strftime('%Y-%m-%dT%H:%M:%SZ','now'),updated_utc=strftime('%Y-%m-%dT%H:%M:%SZ','now'),revision=revision+1,session_credential_sha256=NULL,credential_scheme='retired',session_key_id=NULL,session_key_epoch=NULL,session_public_key_b64url=NULL;
+INSERT INTO session_journal(event_id,session_uuid,agent_id,action,body_json,committed_utc)
+ SELECT e.event_id,s.session_uuid,s.agent_id,'credential_scheme_retired','{"reason":"credential_scheme_retired","status":"LOST"}',strftime('%Y-%m-%dT%H:%M:%SZ','now') FROM sessions s JOIN retired_session_events e USING(session_uuid);
+INSERT INTO journal(event_id,agent_id,action,body_json,committed_utc)
+ SELECT e.audit_id,s.agent_id,'session_credential_scheme_retired','{"kind":"session_lifecycle","reason":"credential_scheme_retired","status":"LOST"}',strftime('%Y-%m-%dT%H:%M:%SZ','now') FROM sessions s JOIN retired_session_events e USING(session_uuid);
+INSERT INTO audit_outbox(event_id) SELECT audit_id FROM retired_session_events;
+DROP TABLE retired_session_events;
+DROP TABLE session_credential_rotations;
+DROP TABLE session_registration_replays;
+DROP TABLE session_enrollments;
+ALTER TABLE sessions DROP COLUMN session_credential_sha256;
+CREATE TABLE session_enrollments(
+ grant_id TEXT PRIMARY KEY,
+ token_sha256 TEXT UNIQUE NOT NULL CHECK(length(token_sha256)=64 AND token_sha256=lower(token_sha256) AND token_sha256 NOT GLOB '*[^0-9a-f]*'),
+ agent_id TEXT NOT NULL REFERENCES agents(agent_id),
+ provider TEXT NOT NULL,
+ seat_or_host TEXT NOT NULL,
+ created_utc TEXT NOT NULL,
+ expires_utc TEXT NOT NULL,
+ consumed_utc TEXT,
+ session_uuid TEXT REFERENCES sessions(session_uuid),
+ CHECK((consumed_utc IS NULL AND session_uuid IS NULL) OR (consumed_utc IS NOT NULL AND session_uuid IS NOT NULL))
+);
+CREATE TABLE session_registration_replays(
+ grant_id TEXT PRIMARY KEY REFERENCES session_enrollments(grant_id),
+ token_sha256 TEXT UNIQUE NOT NULL,
+ idempotency_key TEXT UNIQUE NOT NULL,
+ canonical_request_sha256 TEXT NOT NULL CHECK(length(canonical_request_sha256)=64),
+ response_body_jcs TEXT NOT NULL,
+ response_status INTEGER NOT NULL,
+ session_uuid TEXT UNIQUE NOT NULL REFERENCES sessions(session_uuid),
+ committed_utc TEXT NOT NULL,
+ retain_until_utc TEXT NOT NULL
+);
+CREATE TABLE session_owning_replays(
+ session_uuid TEXT NOT NULL REFERENCES sessions(session_uuid),
+ nonce TEXT NOT NULL,
+ request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64),
+ signature_sha256 TEXT NOT NULL CHECK(length(signature_sha256)=64),
+ timestamp_utc TEXT NOT NULL,
+ idempotency_key TEXT,
+ response_status INTEGER NOT NULL,
+ response_json TEXT NOT NULL,
+ expires_utc TEXT NOT NULL,
+ is_mutation INTEGER NOT NULL CHECK(is_mutation IN (0,1)),
+ action TEXT NOT NULL,
+ PRIMARY KEY(session_uuid,nonce)
+);
+CREATE TABLE session_key_rotations(
+ session_uuid TEXT NOT NULL REFERENCES sessions(session_uuid),
+ nonce TEXT NOT NULL,
+ old_key_id TEXT NOT NULL,
+ old_key_epoch INTEGER NOT NULL,
+ new_key_id TEXT NOT NULL,
+ new_key_epoch INTEGER NOT NULL,
+ event_id TEXT UNIQUE NOT NULL,
+ committed_utc TEXT NOT NULL,
+ PRIMARY KEY(session_uuid,nonce)
+);
+INSERT INTO registry_migrations VALUES(6,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 PRAGMA application_id=1414746695;
-PRAGMA user_version=5;
+PRAGMA user_version=6;

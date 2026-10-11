@@ -1,0 +1,74 @@
+{
+  "version": "townsquare.session-owning-request.v1",
+  "session_uuid": "123e4567-e89b-42d3-a456-426614174000",
+  "timestamp": "2026-10-11T05:00:00Z",
+  "key": {
+    "alg": "Ed25519",
+    "key_id": "ed25519:5a19a8c3bc4232c1145a25ecb27c8429234d1fe8394a52fa020db5001d6982ab",
+    "key_epoch": 1,
+    "public_key_b64url": "eNJnrcq4_xqln_vTZ0tcX117xrz8KkBMc_4OEGkbuE8"
+  },
+  "registration": {
+    "agent_id": "nimrod",
+    "provider": "codex",
+    "provider_session_id": "fixture-locator",
+    "seat_or_host": "sentinel1",
+    "runtime": "runtime",
+    "model": "model",
+    "initial_status": "ACTIVE",
+    "work_ref": "caf\u00e9",
+    "session_key": {
+      "alg": "Ed25519",
+      "key_id": "ed25519:5a19a8c3bc4232c1145a25ecb27c8429234d1fe8394a52fa020db5001d6982ab",
+      "key_epoch": 1,
+      "public_key_b64url": "eNJnrcq4_xqln_vTZ0tcX117xrz8KkBMc_4OEGkbuE8"
+    }
+  },
+  "registration_sha256": "552f145661d42630f06eaea4c4bb6c07cbb165717cee50fde7182c5d95e8816c",
+  "cases": [
+    {
+      "name": "signed_get",
+      "method": "GET",
+      "path": "/v1/sessions/123e4567-e89b-42d3-a456-426614174000",
+      "idempotency_key": null,
+      "body": null,
+      "nonce": "223e4567-e89b-42d3-a456-426614174000",
+      "body_sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+      "canonical_payload_b64url": "dG93bnNxdWFyZS5zZXNzaW9uLW93bmluZy1yZXF1ZXN0LnYxAEdFVAAvdjEvc2Vzc2lvbnMvMTIzZTQ1NjctZTg5Yi00MmQzLWE0NTYtNDI2NjE0MTc0MDAwADEyM2U0NTY3LWU4OWItNDJkMy1hNDU2LTQyNjYxNDE3NDAwMAAANzQyMzRlOThhZmU3NDk4ZmI1ZGFmMWYzNmFjMmQ3OGFjYzMzOTQ2NGY5NTA3MDNiOGMwMTk4OTJmOTgyYjkwYgBlZDI1NTE5LXYxAGVkMjU1MTk6NWExOWE4YzNiYzQyMzJjMTE0NWEyNWVjYjI3Yzg0MjkyMzRkMWZlODM5NGE1MmZhMDIwZGI1MDAxZDY5ODJhYgAxADEAMjAyNi0xMC0xMVQwNTowMDowMFoAMjIzZTQ1NjctZTg5Yi00MmQzLWE0NTYtNDI2NjE0MTc0MDAw",
+      "signature_b64url": "DxEhyxMiynd7JLT3qBZcIQMpO7gIhzvr250nHbCUBr4lJ1I5o-A902bXg_bKKdgrFm7ha_YjxY9mQzvpRoG-AA"
+    },
+    {
+      "name": "heartbeat",
+      "method": "POST",
+      "path": "/v1/sessions/123e4567-e89b-42d3-a456-426614174000/heartbeat",
+      "idempotency_key": "323e4567-e89b-42d3-a456-426614174000",
+      "body": {"status": "IDLE"},
+      "nonce": "423e4567-e89b-42d3-a456-426614174000",
+      "body_sha256": "941a556a6bc187913ed74f0e6d158045cc46dfecd445b4849be07aa8899d5456",
+      "canonical_payload_b64url": "dG93bnNxdWFyZS5zZXNzaW9uLW93bmluZy1yZXF1ZXN0LnYxAFBPU1QAL3YxL3Nlc3Npb25zLzEyM2U0NTY3LWU4OWItNDJkMy1hNDU2LTQyNjYxNDE3NDAwMC9oZWFydGJlYXQAMTIzZTQ1NjctZTg5Yi00MmQzLWE0NTYtNDI2NjE0MTc0MDAwADMyM2U0NTY3LWU4OWItNDJkMy1hNDU2LTQyNjYxNDE3NDAwMAA5NDFhNTU2YTZiYzE4NzkxM2VkNzRmMGU2ZDE1ODA0NWNjNDZkZmVjZDQ0NWI0ODQ5YmUwN2FhODg5OWQ1NDU2AGVkMjU1MTktdjEAZWQyNTUxOTo1YTE5YThjM2JjNDIzMmMxMTQ1YTI1ZWNiMjdjODQyOTIzNGQxZmU4Mzk0YTUyZmEwMjBkYjUwMDFkNjk4MmFiADEAMQAyMDI2LTEwLTExVDA1OjAwOjAwWgA0MjNlNDU2Ny1lODliLTQyZDMtYTQ1Ni00MjY2MTQxNzQwMDA",
+      "signature_b64url": "yXr06PfzGEtG_vYGzdNxoRQ0DHDos0H5Zrq0vgyF0X0N9DroXRPuEwkReoSrv1En75sUXYzOo0WH1SlkDBAlBA"
+    },
+    {
+      "name": "terminate",
+      "method": "POST",
+      "path": "/v1/sessions/123e4567-e89b-42d3-a456-426614174000/terminate",
+      "idempotency_key": "523e4567-e89b-42d3-a456-426614174000",
+      "body": {"terminal_status": "ENDED"},
+      "nonce": "623e4567-e89b-42d3-a456-426614174000",
+      "body_sha256": "e7f2b0f66b02497ef27aeffcee4c91df05cb053065040267dc18cb846ba492c7",
+      "canonical_payload_b64url": "dG93bnNxdWFyZS5zZXNzaW9uLW93bmluZy1yZXF1ZXN0LnYxAFBPU1QAL3YxL3Nlc3Npb25zLzEyM2U0NTY3LWU4OWItNDJkMy1hNDU2LTQyNjYxNDE3NDAwMC90ZXJtaW5hdGUAMTIzZTQ1NjctZTg5Yi00MmQzLWE0NTYtNDI2NjE0MTc0MDAwADUyM2U0NTY3LWU4OWItNDJkMy1hNDU2LTQyNjYxNDE3NDAwMABlN2YyYjBmNjZiMDI0OTdlZjI3YWVmZmNlZTRjOTFkZjA1Y2IwNTMwNjUwNDAyNjdkYzE4Y2I4NDZiYTQ5MmM3AGVkMjU1MTktdjEAZWQyNTUxOTo1YTE5YThjM2JjNDIzMmMxMTQ1YTI1ZWNiMjdjODQyOTIzNGQxZmU4Mzk0YTUyZmEwMjBkYjUwMDFkNjk4MmFiADEAMQAyMDI2LTEwLTExVDA1OjAwOjAwWgA2MjNlNDU2Ny1lODliLTQyZDMtYTQ1Ni00MjY2MTQxNzQwMDA",
+      "signature_b64url": "ueCTl6_cl2N0bylSKQmYSJ8JCvpiN6tENnDxBLnlZVmiubBmcOtVoi6R2lnAYtuBYR-Iiqkpx9aLGIDklqYfBw"
+    },
+    {
+      "name": "rotation",
+      "method": "POST",
+      "path": "/v1/sessions/123e4567-e89b-42d3-a456-426614174000/credential-rotations",
+      "idempotency_key": "723e4567-e89b-42d3-a456-426614174000",
+      "body": {"new_key":{"alg":"Ed25519","key_id":"ed25519:6a85178301e15c16f8535f0c9ff42bc340c43532bc2831f45862b9e46c84ba9c","key_epoch":2,"public_key_b64url":"axf2SaezD93qwlJCwVHAsWR4qLKGf_5cr8PM0qhr3NU"}},
+      "nonce": "823e4567-e89b-42d3-a456-426614174000",
+      "body_sha256": "2b0318589846da91289321e3a7a608b555fda0fe389a70e60ac263668227ff67",
+      "canonical_payload_b64url": "dG93bnNxdWFyZS5zZXNzaW9uLW93bmluZy1yZXF1ZXN0LnYxAFBPU1QAL3YxL3Nlc3Npb25zLzEyM2U0NTY3LWU4OWItNDJkMy1hNDU2LTQyNjYxNDE3NDAwMC9jcmVkZW50aWFsLXJvdGF0aW9ucwAxMjNlNDU2Ny1lODliLTQyZDMtYTQ1Ni00MjY2MTQxNzQwMDAANzIzZTQ1NjctZTg5Yi00MmQzLWE0NTYtNDI2NjE0MTc0MDAwADJiMDMxODU4OTg0NmRhOTEyODkzMjFlM2E3YTYwOGI1NTVmZGEwZmUzODlhNzBlNjBhYzI2MzY2ODIyN2ZmNjcAZWQyNTUxOS12MQBlZDI1NTE5OjVhMTlhOGMzYmM0MjMyYzExNDVhMjVlY2IyN2M4NDI5MjM0ZDFmZTgzOTRhNTJmYTAyMGRiNTAwMWQ2OTgyYWIAMQAxADIwMjYtMTAtMTFUMDU6MDA6MDBaADgyM2U0NTY3LWU4OWItNDJkMy1hNDU2LTQyNjYxNDE3NDAwMA",
+      "signature_b64url": "IUq0RpedlojPaV-s99DBDR_30ss6zG2T6lp2s7ils61T2gYUD1LYMfKZHH4uCd9YZkPNEA9u_yLoBwn_1WGiCQ"
+    }
+  ]
+}
