@@ -134,6 +134,59 @@ class OwningRequestTests(RegistryFixture):
   with mock.patch.object(self.app.time,'time',return_value=time.time()+1000):replay=self.call(private,session,'POST','/credential-rotations',body,'credential_rotate',nonce=nonce,idem=idem,timestamp=stamp)
   self.assertEqual(first,replay);self.assertEqual(after,self.counts());changed={'new_key':key_record(Ed25519PrivateKey.generate(),2)};status,response=self.call(private,session,'POST','/credential-rotations',changed,'credential_rotate',nonce=nonce,idem=idem,timestamp=stamp);self.assertEqual((409,'SESSION_ROTATION_CONFLICT'),(status,response['code']));self.assertEqual(after,self.counts());current=dict(session,revision=2,session_key_epoch=2,session_key_id=body['new_key']['key_id']);status,response=self.call(private,current,'POST','/heartbeat',{'status':'IDLE'},'heartbeat',idem=str(uuid.uuid4()),key=body['new_key']);self.assertEqual((401,'SESSION_SIGNATURE_INVALID'),(status,response['code']));status,response=self.call(replacement,current,'POST','/heartbeat',{'status':'IDLE'},'heartbeat',idem=str(uuid.uuid4()),key=body['new_key'],epoch=1);self.assertEqual((401,'SESSION_SIGNATURE_INVALID'),(status,response['code']));status,ended=self.call(replacement,current,'POST','/terminate',{'terminal_status':'ENDED'},'terminate',idem=str(uuid.uuid4()),key=body['new_key']);self.assertEqual((200,'ENDED',3),(status,ended['status'],ended['revision']))
 
+class OwnershipRouteTests(RegistryFixture):
+ def setUp(self):
+  super().setUp();self.private,self.session_row=self.session();db=self.db()
+  try:self.locator=db.execute('SELECT provider_session_id FROM sessions WHERE session_uuid=?',(self.session_row['session_uuid'],)).fetchone()[0]
+  finally:db.close()
+  self.lookup_token=secrets.token_urlsafe(32);self.legacy_token=secrets.token_urlsafe(32);self.operator_token=secrets.token_urlsafe(32);self.lookup_path=Path(self.tmp.name)/'lookup.sha256';self.legacy_path=Path(self.tmp.name)/'legacy';self.lookup_path.write_text(hashlib.sha256(self.lookup_token.encode()).hexdigest(),encoding='ascii');self.legacy_path.write_text(self.legacy_token,encoding='ascii');self.app.LOOKUP_TOKEN_SHA256_FILE=str(self.lookup_path);self.app.TOKEN_FILE=str(self.legacy_path);self.old_operator=os.environ.get('REGISTRY_OPERATOR_TOKEN');os.environ['REGISTRY_OPERATOR_TOKEN']=self.operator_token;self.server=self.app.ThreadingHTTPServer(('127.0.0.1',0),self.app.Handler);self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
+ def tearDown(self):
+  self.server.shutdown();self.server.server_close();self.thread.join(3)
+  if self.old_operator is None:os.environ.pop('REGISTRY_OPERATOR_TOKEN',None)
+  else:os.environ['REGISTRY_OPERATOR_TOKEN']=self.old_operator
+  super().tearDown()
+ def request(self,path,headers=None):
+  connection=http.client.HTTPConnection('127.0.0.1',self.server.server_address[1],timeout=3)
+  try:
+   connection.request('GET',path,headers=headers or {});response=connection.getresponse();raw=response.read();return response.status,{key.lower():value for key,value in response.getheaders()},raw,json.loads(raw)
+  finally:connection.close()
+ def signed(self,path):return dict(self.headers(self.private,self.session_row,'GET',path,None).items())
+ def test_lookup_current_and_signature_only_owned_routes(self):
+  base=f"/v1/sessions/{self.session_row['session_uuid']}";status,headers,raw,current=self.request(base,{'Authorization':'Bearer '+self.lookup_token});self.assertEqual(200,status);self.assertEqual('no-store',headers.get('cache-control'));self.assertEqual(self.session_row['session_uuid'],current['session_uuid']);self.assertNotIn(self.locator.encode(),raw)
+  status,_,raw,history=self.request(base+'/history',self.signed(base+'/history'));self.assertEqual(200,status);self.assertEqual(['register'],[event['action'] for event in history['events']]);self.assertNotIn(self.locator.encode(),raw)
+  status,headers,_,locator=self.request(base+'/provider-locator',self.signed(base+'/provider-locator'));self.assertEqual(200,status);self.assertEqual('no-store',headers.get('cache-control'));self.assertEqual(self.locator,locator['provider_session_id'])
+ def test_legacy_lookup_and_operator_route_negatives_are_zero_write_and_redacted(self):
+  base=f"/v1/sessions/{self.session_row['session_uuid']}";before=self.counts();operator={'X-Registry-Operator-Token':self.operator_token};cases=((base,{'Authorization':'Bearer '+self.legacy_token},401),(base+'/history',{'Authorization':'Bearer '+self.legacy_token},401),(base+'/provider-locator',{'Authorization':'Bearer '+self.legacy_token},404),(base+'/history',{'Authorization':'Bearer '+self.lookup_token},401),(base+'/provider-locator',{'Authorization':'Bearer '+self.lookup_token},404),(base,operator,401),(base+'/history',operator,401),(base+'/provider-locator',operator,404),(base+'/provider-locator',{'Authorization':'SessionSignature invalid',**operator},401))
+  for path,headers,wanted in cases:
+   status,response_headers,raw,_=self.request(path,headers);self.assertEqual(wanted,status);self.assertEqual('no-store',response_headers.get('cache-control'));self.assertNotIn(self.locator.encode(),raw);self.assertNotIn(self.legacy_token.encode(),raw);self.assertNotIn(self.lookup_token.encode(),raw);self.assertNotIn(self.operator_token.encode(),raw)
+  self.assertEqual(before,self.counts())
+
+class ListenerConfigTests(unittest.TestCase):
+ @classmethod
+ def setUpClass(cls):cls.app=load_app()
+ def config(self,host='0.0.0.0',port=8793,public_url='http://session-registry:8793'):
+  value={'schema':'townsquare.session-registry-listener.v1','bind_host':host,'bind_port':port,'public_url':public_url};pin=hashlib.sha256(self.app._canonical(value).encode()).hexdigest();return {'REGISTRY_SESSION_BIND_HOST':host,'REGISTRY_SESSION_BIND_PORT':str(port),'REGISTRY_SESSION_PUBLIC_URL':public_url,'REGISTRY_SESSION_LISTENER_SHA256':pin}
+ def test_release_pinned_listener_is_explicit_and_has_no_unsafe_default(self):
+  self.assertEqual(('0.0.0.0',8793),self.app.session_listener_config(self.config()))
+  for missing in self.config():
+   value=self.config();value.pop(missing)
+   with self.assertRaisesRegex(RuntimeError,'configuration invalid'):self.app.session_listener_config(value)
+ def test_every_legacy_8789_url_form_and_changed_pin_fail_closed_and_redacted(self):
+  for url in ('http://0.0.0.0:8789','http://127.0.0.1:8789','http://localhost:8789','http://registry:8789','http://[::1]:8789'):
+   with self.assertRaisesRegex(RuntimeError,'configuration invalid') as raised:self.app.session_listener_config(self.config(port=8789,public_url=url))
+   self.assertNotIn(url,str(raised.exception))
+  changed=self.config();changed['REGISTRY_SESSION_PUBLIC_URL']='http://session-registry:8794'
+  with self.assertRaisesRegex(RuntimeError,'configuration invalid'):self.app.session_listener_config(changed)
+ def test_startup_refuses_invalid_listener_before_socket_creation(self):
+  server=mock.Mock()
+  with mock.patch.object(self.app,'require_manual_delivery_mode'),mock.patch.object(self.app,'compatible',return_value=True),mock.patch.object(self.app,'ThreadingHTTPServer',server),mock.patch.object(self.app.sys,'argv',['app.py']),mock.patch.dict(self.app.os.environ,{},clear=True):
+   with self.assertRaisesRegex(RuntimeError,'configuration invalid'):self.app.main()
+  server.assert_not_called()
+ def test_startup_uses_only_the_validated_release_tuple(self):
+  server=mock.Mock()
+  with mock.patch.object(self.app,'require_manual_delivery_mode'),mock.patch.object(self.app,'compatible',return_value=True),mock.patch.object(self.app,'ThreadingHTTPServer',server),mock.patch.object(self.app.sys,'argv',['app.py']),mock.patch.dict(self.app.os.environ,self.config(),clear=True):self.app.main()
+  server.assert_called_once_with(('0.0.0.0',8793),self.app.Handler);server.return_value.serve_forever.assert_called_once_with()
+
 class FixtureAndMigrationTests(unittest.TestCase):
  def test_public_fixture_is_byte_exact_and_identity_coherent(self):
   app=load_app();fixture=json.loads((ROOT/'tests'/'fixtures'/'session_ed25519_v1_cases.json').read_text(encoding='utf-8'));public=base64.urlsafe_b64decode(fixture['key']['public_key_b64url']+'=');self.assertEqual('ed25519:'+hashlib.sha256(public).hexdigest(),fixture['key']['key_id']);self.assertEqual(hashlib.sha256(app._canonical(fixture['registration']).encode()).hexdigest(),fixture['registration_sha256']);self.assertEqual(('nimrod','codex','sentinel1'),tuple(fixture['registration'][name] for name in ('agent_id','provider','seat_or_host')))

@@ -239,5 +239,23 @@ class SessionRegistryS2Tests(unittest.TestCase):
             self.assertFalse(self.operator_token.encode() in content, "generated credential entered a Git-tracked artifact")
 
 
+def _successor(case, name):
+    """Preserve inherited labels while evaluating the corrected ownership boundary."""
+    def test(self):
+        case.setUpClass()
+        result = unittest.TestResult()
+        case(name).run(result)
+        self.assertEqual([], result.errors)
+        self.assertEqual([], result.failures)
+        self.assertEqual([], result.skipped)
+    return test
+
+
+from tests import test_session_registry_ed25519 as successor
+SessionRegistryS2Tests.test_authenticated_current_and_ordered_history_are_redacted_facts_only = _successor(successor.OwnershipRouteTests, "test_lookup_current_and_signature_only_owned_routes")
+SessionRegistryS2Tests.test_locator_requires_current_token_and_all_self_assertions_are_not_found = _successor(successor.OwnershipRouteTests, "test_legacy_lookup_and_operator_route_negatives_are_zero_write_and_redacted")
+SessionRegistryS2Tests.test_generated_secrets_do_not_escape_errors_logs_audit_idempotency_or_git = _successor(successor.OwnershipRouteTests, "test_legacy_lookup_and_operator_route_negatives_are_zero_write_and_redacted")
+
+
 if __name__ == "__main__":
     unittest.main()

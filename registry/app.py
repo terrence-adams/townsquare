@@ -153,6 +153,20 @@ def _utc(): return time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
 def _utc_at(epoch): return time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime(epoch))
 def _canonical(value): return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'))
 def _sha256_text(value): return hashlib.sha256(value.encode('utf-8')).hexdigest()
+def session_listener_config(environ=None):
+ values=os.environ if environ is None else environ
+ host=values.get('REGISTRY_SESSION_BIND_HOST');port_text=values.get('REGISTRY_SESSION_BIND_PORT');public_url=values.get('REGISTRY_SESSION_PUBLIC_URL');pinned=values.get('REGISTRY_SESSION_LISTENER_SHA256')
+ try:
+  if not isinstance(host,str) or not 0<len(host)<=253 or any(char.isspace() or ord(char)<0x21 for char in host) or any(char in host for char in '/\\@?#'):raise ValueError()
+  if not isinstance(port_text,str) or not re.fullmatch(r'[1-9][0-9]{0,4}',port_text):raise ValueError()
+  port=int(port_text)
+  if port>65535 or port==8789:raise ValueError()
+  parsed=urlsplit(public_url)
+  if parsed.scheme!='http' or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.path or parsed.query or parsed.fragment or parsed.port!=port or parsed.port==8789:raise ValueError()
+  canonical=_canonical({'schema':'townsquare.session-registry-listener.v1','bind_host':host,'bind_port':port,'public_url':public_url})
+  if not isinstance(pinned,str) or not _SHA256.fullmatch(pinned) or not hmac.compare_digest(_sha256_text(canonical),pinned):raise ValueError()
+ except (TypeError,ValueError):raise RuntimeError('session Registry listener configuration invalid') from None
+ return host,port
 def _nonempty_string(value,limit=512): return isinstance(value,str) and 0<len(value)<=limit and unicodedata.is_normalized('NFC',value) and all(not 0xd800<=ord(char)<=0xdfff for char in value)
 def _provider_session_id(value): return _nonempty_string(value) and all(0x20<=ord(char)<=0x7e for char in value)
 def _optional_string(value,limit=512): return value is None or _nonempty_string(value,limit)
@@ -291,6 +305,7 @@ def owning_session_request(db,headers,method,path,session_uuid,body,action):
   now=_utc()
   if method=='GET':
    if action=='history':response={'session_uuid':session_uuid,'events':[_redacted_history(event) for event in db.execute('SELECT * FROM session_journal WHERE session_uuid=? ORDER BY seq',(session_uuid,))]}
+   elif action=='provider_locator':response={'session_uuid':row['session_uuid'],'provider':row['provider'],'provider_session_id':row['provider_session_id']}
    else:response=_redacted_session(row)
    db.execute('INSERT INTO session_owning_replays VALUES(?,?,?,?,?,?,?,?,?,?,?)',(session_uuid,signed['nonce'],signed['request_sha256'],signed['signature_sha256'],signed['timestamp'],None,200,_canonical(response),_utc_at(time.time()+600),0,action));db.commit();return 200,response
   if row['status'] in ('ENDED','LOST'):return _signed_error(db,'SESSION_REVISION_CONFLICT',409,'session lifecycle conflict')
@@ -383,20 +398,19 @@ class Handler(BaseHTTPRequestHandler):
   if session_match:
    session_uuid,view=session_match.groups(); sensitive=view=='provider-locator'
    if not _UUID4_RE.fullmatch(session_uuid):return self.reply(404,{'detail':'not found'},True)
-   legacy=_legacy_authorized(self.headers);lookup=_lookup_authorized(self.headers);scheme,_=_authorization(self.headers);signed=scheme=='SessionSignature'
-   if sensitive and (not legacy or not _operator_authorized(self.headers)): return self.reply(404,{'detail':'not found'},True)
-   if view=='history' and not signed and not legacy:return self.reply(401,{'detail':'unauthorized','code':'SESSION_SIGNATURE_INVALID'},True)
-   if not sensitive and not (legacy or lookup or signed):return self.reply(401,{'detail':'unauthorized'},True)
+   lookup=_lookup_authorized(self.headers);scheme,_=_authorization(self.headers);signed=scheme=='SessionSignature'
+   if sensitive and not signed:return self.reply(404,{'detail':'not found'},True)
+   if view=='history' and not signed:return self.reply(401,{'detail':'unauthorized','code':'SESSION_SIGNATURE_INVALID'},True)
+   if view is None and not (lookup or signed):return self.reply(401,{'detail':'unauthorized'},True)
    d=None
    try:
     d=connect()
     if signed:
-     status,out=owning_session_request(d,self.headers,'GET',self.path,session_uuid,None,'history' if view=='history' else 'get')
+     action='history' if view=='history' else 'provider_locator' if sensitive else 'get'
+     status,out=owning_session_request(d,self.headers,'GET',self.path,session_uuid,None,action)
      return self.reply(status,out,True)
     row=d.execute('SELECT * FROM sessions WHERE session_uuid=?',(session_uuid,)).fetchone()
     if not row:return self.reply(404,{'detail':'not found'},sensitive)
-    if sensitive:return self.reply(200,{'session_uuid':row['session_uuid'],'provider':row['provider'],'provider_session_id':row['provider_session_id']},True)
-    if view=='history':return self.reply(200,{'session_uuid':session_uuid,'events':[_redacted_history(event) for event in d.execute('SELECT * FROM session_journal WHERE session_uuid=? ORDER BY seq',(session_uuid,))]},True)
     return self.reply(200,_redacted_session(row),True)
    except Exception:return self.reply(503,{'detail':'session lookup unavailable'},sensitive)
    finally:
@@ -469,5 +483,5 @@ def main():
  if sys.argv[1:]==['--deliver-audit-once']:
   deliver_once();return
  if sys.argv[1:]: raise SystemExit('usage: app.py [--deliver-audit-once]')
- ThreadingHTTPServer(("0.0.0.0",8789),Handler).serve_forever()
+ ThreadingHTTPServer(session_listener_config(),Handler).serve_forever()
 if __name__=="__main__":main()

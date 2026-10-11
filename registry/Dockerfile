@@ -49,5 +49,4 @@ COPY --chown=10003:10003 shared /app/shared
 COPY --chown=10003:10003 canary/__init__.py canary/preexec.py /app/canary/
 RUN chmod 0444 /opt/townsquare/release/r7-identity.json && find /app /opt/townsquare -type f -exec chmod a-w {} +
 USER 10003:10003
-EXPOSE 8789
 CMD ["python","-m","canary.preexec","--","python","/app/app.py"]

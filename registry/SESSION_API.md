@@ -7,9 +7,10 @@ its SHA-256-derived key ID, and its epoch. A private seed is never accepted,
 persisted, logged, journaled, or returned.
 
 All JSON request bodies are closed: unknown fields are rejected. Responses and
-ordinary history omit provider locators and all credential verifiers. The
-provider-locator view remains available only through the existing operator
-authorization path and returns `Cache-Control: no-store`.
+ordinary history omit provider locators and all credential verifiers. Session
+history and provider-locator ownership routes accept only a valid
+`SessionSignature`; neither the legacy Registry Bearer nor an operator header
+can authorize them. Every session response carries `Cache-Control: no-store`.
 
 ## Enrollment
 
@@ -87,6 +88,7 @@ response even after the timestamp window; changed nonce reuse fails. It covers:
 - `POST /v1/sessions/{session_uuid}/credential-rotations`
 - `GET /v1/sessions/{session_uuid}`
 - `GET /v1/sessions/{session_uuid}/history`
+- `GET /v1/sessions/{session_uuid}/provider-locator`
 
 Rotation is signed by the current key and has body
 `{"new_key":{"alg":"Ed25519","key_id":"...","key_epoch":<current+1>,"public_key_b64url":"..."}}`.
@@ -99,12 +101,34 @@ only the exact stored rotation replay; changed reuse returns
 `GET /v1/sessions/{session_uuid}` accepts a lookup-only Bearer credential. The
 Registry configuration supplies only its lowercase SHA-256 verifier through
 `REGISTRY_LOOKUP_TOKEN_SHA256_FILE`; the broker retains the clear credential.
-This scope may use redacted session GET routes and cannot register, heartbeat,
-terminate, rotate credentials, or retrieve `/provider-locator`.
+This scope may use only the redacted current-session GET and cannot read
+history, register, heartbeat, terminate, rotate credentials, or retrieve
+`/provider-locator`.
 
-An owning signature may read only its own redacted session and history.
-Enrollment credentials cannot read sessions. The existing Registry API Bearer
-and canary-proof behavior remains available for current administrative clients.
+An owning signature may read only its own current record, history, and provider
+locator. Enrollment credentials cannot read sessions. The legacy Registry API
+Bearer and operator header remain valid only for their non-session endpoints;
+they do not authorize any `/v1/sessions/{session_uuid}` GET route.
+
+## Protected listener contract
+
+The Session Registry has no listener default. Startup requires all four
+release-pinned settings:
+
+- `REGISTRY_SESSION_BIND_HOST`
+- `REGISTRY_SESSION_BIND_PORT`
+- `REGISTRY_SESSION_PUBLIC_URL`
+- `REGISTRY_SESSION_LISTENER_SHA256`
+
+The digest is lowercase SHA-256 of compact sorted-key JSON with exactly
+`schema`, `bind_host`, integer `bind_port`, and `public_url`, where `schema` is
+`townsquare.session-registry-listener.v1`. The URL is credential-free HTTP with
+an explicit port equal to the bind port and no path, query, or fragment. Missing
+or malformed fields, a changed digest, and every host representation resolving
+to legacy port `8789` fail before a socket is created. Errors never echo the
+configured URL or digest. The release must supply and pin a non-8789 protected
+listener/upstream; test servers may continue to bind an ephemeral loopback port
+by constructing `ThreadingHTTPServer` directly.
 
 ## Release identity and migration
 
