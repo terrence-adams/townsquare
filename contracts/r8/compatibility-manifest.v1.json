@@ -1,0 +1,218 @@
+{
+  "manifest": "townsquare-notification-compatibility/1",
+  "bundle_id": "townsquare-contracts-r8",
+  "bundle_status": "PROVISIONAL_INCOMPLETE",
+  "acceptance_claimed": false,
+  "hash_algorithm": "SHA-256",
+  "member_hash_scope": "exact file bytes",
+  "self_reference_policy": "compatibility-manifest.v1.json is excluded from members to avoid recursive self-hashing",
+  "members": [
+    {
+      "path": "DESIGN-NOTE.md",
+      "kind": "design-note",
+      "sha256": "9629593aae3c1a8f63b410d5e8eaba513df9e25b9f9d3f3b04730aa2e9a9d2cd",
+      "bytes": 4912
+    },
+    {
+      "path": "delivery-ack.v1.schema.json",
+      "kind": "json-schema",
+      "contract": "delivery-ack/1",
+      "sha256": "c506adbd8a335fa26a32f65e021ba0960f726abad85e764a4df70e7efaa3455d",
+      "bytes": 4994
+    },
+    {
+      "path": "delivery-claim.v1.schema.json",
+      "kind": "json-schema",
+      "contract": "delivery-claim/1",
+      "sha256": "ba62b268c3e2edbbc3a0a03323d55bffc9f15b7cc57deaaf9d834dee56e256d2",
+      "bytes": 7219
+    },
+    {
+      "path": "delivery-deposit.v1.schema.json",
+      "kind": "json-schema",
+      "contract": "delivery-deposit/1",
+      "sha256": "e010bb33083b98cace3a9d670943ceec1202fb2ed72f2083d35f100c14965f37",
+      "bytes": 5236
+    },
+    {
+      "path": "delivery-fail.v1.schema.json",
+      "kind": "json-schema",
+      "contract": "delivery-fail/1",
+      "sha256": "334b01dd917ff28b9f0f5f347f145fdf51fda48409bc84a2ef2e4f69d3c55539",
+      "bytes": 5790
+    },
+    {
+      "path": "delivery-redrive.v1.schema.json",
+      "kind": "json-schema",
+      "contract": "delivery-redrive/1",
+      "sha256": "b3929a5b49ba70ced907f2a3005508f7c47e10ad36b8ccbe0096969b949aa01e",
+      "bytes": 4762
+    },
+    {
+      "path": "delivery-view.v1.schema.json",
+      "kind": "json-schema",
+      "contract": "delivery-view/1",
+      "sha256": "350213d29023d775d37c92aaea451b8721a7fb0422886e8d545ac9531b5ad24a",
+      "bytes": 5995
+    },
+    {
+      "path": "notice-pointer.v1.schema.json",
+      "kind": "json-schema",
+      "contract": "notice-pointer/1",
+      "sha256": "4bca7cce8c3e0be5271e02e9f69757d1d413017440a7be105976eb221d1ad55c",
+      "bytes": 2629
+    },
+    {
+      "path": "protocol-registry.v1.json",
+      "kind": "protocol-registry",
+      "contract": "townsquare-notification-protocol/1",
+      "sha256": "5e7061c3366a6b4ff955b4097fcc16ebf33f569bce802ec7dfee925999baf6ff",
+      "bytes": 13448
+    },
+    {
+      "path": "registry-routing.v1.schema.json",
+      "kind": "json-schema",
+      "contract": "registry-routing/1",
+      "sha256": "39761ad4de04be19b68c94b91cea0bec7040e84a18bd53886e5950dc62202f87",
+      "bytes": 4539
+    },
+    {
+      "path": "target-ref.v1.schema.json",
+      "kind": "json-schema",
+      "contract": "target-ref/1",
+      "sha256": "05d845493eb4255dbff1af37657b454dd60e66dc0c62845dcaf3927715e3cdba",
+      "bytes": 554
+    }
+  ],
+  "required_before_freeze": {
+    "member_classes_not_yet_hashed": [
+      "positive-fixture-corpus",
+      "negative-fixture-corpus",
+      "fixture-registry"
+    ],
+    "required_reviews_not_claimed": [
+      "independent-doctrine-acceptance",
+      "independent-security-acceptance"
+    ],
+    "freeze_rule": "add every fixture and registry artifact to members, recompute all exact-byte hashes, set bundle_status only from the accepted Story 189 event, and keep acceptance_claimed false until that event exists"
+  },
+  "proof_profiles": [
+    {
+      "name": "SIGNED_JCS_SHA256",
+      "contract": "registry-routing/1",
+      "requirement": "known authority_id, issuer_id, key_id, Ed25519 signature, valid canonical_sha256, valid recipients_sha256, and non-rolled-back watermark"
+    },
+    {
+      "name": "AUTHENTICATED_SERVICE_CHANNEL",
+      "contract": "registry-routing/1",
+      "requirement": "known authority_id, issuer_id, authenticated_service_id, verified channel binding, valid canonical_sha256, valid recipients_sha256, and non-rolled-back watermark"
+    }
+  ],
+  "contract_compatibility": [
+    {
+      "producer": "ledger-v15-notice-intent",
+      "consumer": "registry-v3-routing",
+      "contract": "target-ref",
+      "minimum": 1,
+      "maximum": 1,
+      "unknown_version": "FAIL_CLOSED_AND_PARK_MATERIALIZATION"
+    },
+    {
+      "producer": "registry-v3-routing",
+      "consumer": "ledger-v15-materializer",
+      "contract": "registry-routing",
+      "minimum": 1,
+      "maximum": 1,
+      "unknown_version": "FAIL_CLOSED_AND_PARK_MATERIALIZATION"
+    },
+    {
+      "producer": "ledger-v15-delivery",
+      "consumer": "host-courier-v1",
+      "contract": "notice-pointer",
+      "minimum": 1,
+      "maximum": 1,
+      "unknown_version": "FAIL_CLOSED_AND_REPORT_BOUNDED_FAILURE"
+    },
+    {
+      "producer": "ledger-v15-delivery",
+      "consumer": "authorized-delivery-client-v1",
+      "contract": "delivery-claim",
+      "minimum": 1,
+      "maximum": 1,
+      "unknown_version": "FAIL_CLOSED"
+    },
+    {
+      "producer": "host-courier-v1",
+      "consumer": "ledger-v15-delivery",
+      "contract": "delivery-deposit",
+      "minimum": 1,
+      "maximum": 1,
+      "unknown_version": "FAIL_CLOSED"
+    },
+    {
+      "producer": "recipient-agent-v1",
+      "consumer": "ledger-v15-delivery",
+      "contract": "delivery-ack",
+      "minimum": 1,
+      "maximum": 1,
+      "unknown_version": "FAIL_CLOSED"
+    },
+    {
+      "producer": "authorized-delivery-client-v1",
+      "consumer": "ledger-v15-delivery",
+      "contract": "delivery-fail",
+      "minimum": 1,
+      "maximum": 1,
+      "unknown_version": "FAIL_CLOSED"
+    },
+    {
+      "producer": "authorized-redrive-client-v1",
+      "consumer": "ledger-v15-delivery",
+      "contract": "delivery-redrive",
+      "minimum": 1,
+      "maximum": 1,
+      "unknown_version": "FAIL_CLOSED"
+    },
+    {
+      "producer": "ledger-v15-delivery",
+      "consumer": "authorized-audit-client-v1",
+      "contract": "delivery-view",
+      "minimum": 1,
+      "maximum": 1,
+      "unknown_version": "FAIL_CLOSED_WITH_NON_DISCLOSURE"
+    }
+  ],
+  "rolling_upgrade_states": [
+    {
+      "state": "R7_BASELINE",
+      "registry_schema_heads": [
+        2
+      ],
+      "ledger_schema_heads": [
+        14
+      ],
+      "r8_delivery_enabled": false
+    },
+    {
+      "state": "REGISTRY_AHEAD",
+      "registry_schema_heads": [
+        3
+      ],
+      "ledger_schema_heads": [
+        14
+      ],
+      "r8_delivery_enabled": false
+    },
+    {
+      "state": "R8_ACTIVE",
+      "registry_schema_heads": [
+        3
+      ],
+      "ledger_schema_heads": [
+        15
+      ],
+      "r8_delivery_enabled": true
+    }
+  ],
+  "activation_rule": "R8_ACTIVE requires every exact member hash in the accepted final manifest; no component may infer acceptance from this provisional file"
+}

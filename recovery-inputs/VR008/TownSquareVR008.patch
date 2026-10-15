@@ -1,0 +1,271 @@
+diff --git a/contracts/r7/registry-schema.json b/contracts/r7/registry-schema.json
+index 8f984fc..eb08224 100644
+--- a/contracts/r7/registry-schema.json
++++ b/contracts/r7/registry-schema.json
+@@ -2,12 +2,12 @@
+   "schema_version": "1",
+   "domain": "registry",
+   "application_id": 1414746695,
+-  "user_version": 4,
+-  "head": "4",
++  "user_version": 5,
++  "head": "5",
+   "schema_path": "registry/schema.sql",
+-  "schema_sha256": "c613dc941bf6391f5e9c8434e35c54700536fc8b8ac028d97628bf3a07f5b0f2",
++  "schema_sha256": "7c817299ad0177a73a5c068ff0086f2d5caab22de4caa25d6798f48a41f4ae75",
+   "migrator_path": "registry/migrate.py",
+-  "migrator_sha256": "344a57ad98132cd95b80d6b02bbcf0224ca8357d5096d19e35bafb5fd401a77f",
++  "migrator_sha256": "2c55cbaffb861d712106b2619d7587a9da22c6d315791114c13f6c03cf2008ae",
+   "steps": [
+     {
+       "ordinal": 1,
+@@ -28,8 +28,13 @@
+       "ordinal": 4,
+       "id": "4",
+       "sha256": "fd4bba82400115ebe0b7f6ab60bb361c4b6afe96a44a9b36627e4d37e9fffea1"
++    },
++    {
++      "ordinal": 5,
++      "id": "5",
++      "sha256": "55270e822986a5303afdaa1068479535ad410c55805dc98c4b5fe65c263bea96"
+     }
+   ],
+-  "history_sha256": "11a17e81bed32d7bd7a8450d7c4fef93b413ae8e02772dc44ddca5cb2657a649",
+-  "canonical_schema_sha256": "cc2d88b7ed5577f8400473d786c1168bfb94a1c7ee1f91c112f6d8060a3e6983"
++  "history_sha256": "18d8c259567a4ccf2a3019878b8b0570b15be16c7afd7f777281beba90e3618a",
++  "canonical_schema_sha256": "e3ceaf9a8f387bac209aeac78c15311d3777e488631863478fa6f133a4cdcb59"
+ }
+diff --git a/registry/app.py b/registry/app.py
+index ec9228c..b54b90b 100644
+--- a/registry/app.py
++++ b/registry/app.py
+@@ -4,7 +4,7 @@ It deliberately uses only stdlib.  Ledger publication is asynchronous and
+ idempotent through the outbox; this service has no foreign key or transaction
+ against the Ledger database.
+ """
+-import hashlib,hmac,json,os,re,sqlite3,sys,time,uuid
++import base64,binascii,hashlib,hmac,json,os,re,sqlite3,sys,time,uuid
+ from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+ from pathlib import Path
+ from urllib.parse import urlsplit
+@@ -28,10 +28,10 @@ LEDGER_READINESS_TOKEN_FILE=os.environ.get("LEDGER_READINESS_TOKEN_FILE","/run/s
+ CANARY_NONCE_DIRECTORY=os.environ.get("REGISTRY_CANARY_NONCE_DIRECTORY","/var/lib/registry/canary-nonces")
+ def connect():
+  d=sqlite3.connect(DB,timeout=5,isolation_level=None); d.row_factory=sqlite3.Row; d.execute("PRAGMA foreign_keys=ON"); d.execute("PRAGMA journal_mode=WAL"); d.execute("PRAGMA synchronous=FULL"); d.execute("PRAGMA busy_timeout=5000")
+- if d.execute("PRAGMA application_id").fetchone()[0] != 1414746695 or d.execute("PRAGMA user_version").fetchone()[0] != 4:
++ if d.execute("PRAGMA application_id").fetchone()[0] != 1414746695 or d.execute("PRAGMA user_version").fetchone()[0] != 5:
+   d.close(); raise RuntimeError('Registry application_id/user_version mismatch')
+  return d
+-SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=4; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
++SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=5; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
+ def compatible():
+  if os.environ.get('REGISTRY_SERVICE_ID',SERVICE_ID)!=SERVICE_ID:return False
+  if os.environ.get('REGISTRY_SCHEMA_HEAD',str(SCHEMA_VERSION))!=str(SCHEMA_VERSION):return False
+@@ -110,6 +110,7 @@ def require_canary_test_proof(headers,body,action,object_id):
+   context_sha256=hashlib.sha256(canonical_bytes(body)).hexdigest(),
+  )
+ _PROVIDER=re.compile(r'^[a-z0-9._-]{1,64}$')
++_AGENT_ID=re.compile(r'^[a-z0-9](?:[a-z0-9._-]{0,127})$')
+ _SESSION_STATES={'STARTING','ACTIVE','IDLE','ENDED','LOST'}
+ def _utc(): return time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())
+ def _canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'))
+@@ -127,6 +128,52 @@ def _redacted_history(row):
+ def _operator_authorized(headers):
+  configured=operator_token(); provided=headers.get('X-Registry-Operator-Token','')
+  return bool(configured) and hmac.compare_digest(provided.encode(),configured.encode())
++def _dispatcher_public_key(value):
++ if not isinstance(value,str): return False
++ try:return len(base64.b64decode(value,validate=True))==32
++ except (binascii.Error,ValueError):return False
++def _resolved_route(row):
++ return {name:row[name] for name in ('agent_id','seat_or_host','session_uuid','transport','recipient_id','relay_capability','capability_version','dispatcher_key_id','dispatcher_public_key','route_revision','route_state','session_state','last_verified_utc')}
++def resolve_relay_route(db,agent_id):
++ row=db.execute("""SELECT r.agent_id,s.seat_or_host,r.session_uuid,r.transport,r.agent_id AS recipient_id,r.relay_capability,r.capability_version,r.dispatcher_key_id,r.dispatcher_public_key,r.route_revision,r.state AS route_state,s.status AS session_state,r.last_verified_utc,a.active,s.agent_id AS session_agent_id FROM relay_routes r JOIN agents a ON a.agent_id=r.agent_id JOIN sessions s ON s.session_uuid=r.session_uuid WHERE r.agent_id=?""",(agent_id,)).fetchone()
++ if not row:return 404,{'disposition':'ROUTE_NOT_FOUND'}
++ eligible=row['active']==1 and row['session_agent_id']==agent_id and bool(row['seat_or_host']) and row['route_state']=='ACTIVE' and row['session_state'] in ('ACTIVE','IDLE') and row['transport']=='revere.v1' and row['relay_capability']=='coordinator-contact' and bool(row['dispatcher_key_id']) and _dispatcher_public_key(row['dispatcher_public_key'])
++ return (200,_resolved_route(row)) if eligible else (409,{'disposition':'ROUTE_INELIGIBLE'})
++def _route_request_valid(body,action):
++ if not isinstance(body,dict):return False
++ if action=='disable':return set(body)=={'expected_route_revision'} and isinstance(body['expected_route_revision'],int) and not isinstance(body['expected_route_revision'],bool) and body['expected_route_revision']>0
++ required={'session_uuid','capability_version','dispatcher_key_id','dispatcher_public_key','expected_route_revision'}
++ return set(body)==required and isinstance(body['expected_route_revision'],int) and not isinstance(body['expected_route_revision'],bool) and body['expected_route_revision']>=0 and _nonempty_string(body['capability_version'],64) and _nonempty_string(body['dispatcher_key_id'],128) and _dispatcher_public_key(body['dispatcher_public_key']) and bool(re.fullmatch(r'[0-9a-f-]{36}',body['session_uuid']))
++def mutate_relay_route(db,principal,key,agent_id,body,action):
++ if not _AGENT_ID.fullmatch(agent_id) or not _route_request_valid(body,action):return 400,{'detail':'invalid relay route request'}
++ request_hash=hashlib.sha256(_canonical({'agent_id':agent_id,'action':action,'body':body}).encode()).hexdigest()
++ db.execute('BEGIN IMMEDIATE')
++ old=db.execute('SELECT * FROM requests WHERE principal=? AND idem_key=?',(principal,key)).fetchone()
++ if old:
++  if old['request_hash']!=request_hash:db.rollback();return 409,{'detail':'idempotency key reused with different request'}
++  db.rollback();return old['response_status'],json.loads(old['response_json'])
++ try:
++  current=db.execute('SELECT * FROM relay_routes WHERE agent_id=?',(agent_id,)).fetchone(); expected=body['expected_route_revision']
++  if not current and action=='disable':db.rollback();return 404,{'disposition':'ROUTE_NOT_FOUND'}
++  actual=current['route_revision'] if current else 0
++  if expected!=actual:db.rollback();return 409,{'disposition':'STALE_ROUTE','route_revision':actual}
++  if action=='bind':
++   session=db.execute('SELECT s.*,a.active FROM sessions s JOIN agents a ON a.agent_id=s.agent_id WHERE s.session_uuid=?',(body['session_uuid'],)).fetchone()
++   if not session or session['agent_id']!=agent_id:db.rollback();return 409,{'disposition':'ROUTE_MISMATCH'}
++   if not session['active'] or not session['seat_or_host'] or session['status'] not in ('ACTIVE','IDLE'):db.rollback();return 409,{'disposition':'ROUTE_INELIGIBLE'}
++   occupied=db.execute('SELECT agent_id FROM relay_routes WHERE session_uuid=? AND agent_id<>?',(body['session_uuid'],agent_id)).fetchone()
++   if occupied:db.rollback();return 409,{'disposition':'ROUTE_MISMATCH'}
++  now=_utc();revision=actual+1
++  if action=='bind':
++   db.execute("""INSERT INTO relay_routes(agent_id,session_uuid,transport,relay_capability,capability_version,dispatcher_key_id,dispatcher_public_key,state,route_revision,last_verified_utc,updated_utc) VALUES(?,?,'revere.v1','coordinator-contact',?,?,?,'ACTIVE',?,?,?) ON CONFLICT(agent_id) DO UPDATE SET session_uuid=excluded.session_uuid,transport=excluded.transport,relay_capability=excluded.relay_capability,capability_version=excluded.capability_version,dispatcher_key_id=excluded.dispatcher_key_id,dispatcher_public_key=excluded.dispatcher_public_key,state=excluded.state,route_revision=excluded.route_revision,last_verified_utc=excluded.last_verified_utc,updated_utc=excluded.updated_utc""",(agent_id,body['session_uuid'],body['capability_version'],body['dispatcher_key_id'],body['dispatcher_public_key'],revision,now,now))
++  else:db.execute("UPDATE relay_routes SET state='DISABLED',route_revision=?,updated_utc=? WHERE agent_id=?",(revision,now,agent_id))
++  route=db.execute('SELECT * FROM relay_routes WHERE agent_id=?',(agent_id,)).fetchone(); journal={'agent_id':agent_id,'session_uuid':route['session_uuid'],'transport':route['transport'],'relay_capability':route['relay_capability'],'capability_version':route['capability_version'],'dispatcher_key_id':route['dispatcher_key_id'],'dispatcher_public_key':route['dispatcher_public_key'],'route_revision':revision,'route_state':route['state'],'last_verified_utc':route['last_verified_utc']}
++  db.execute('INSERT INTO relay_route_journal(event_id,agent_id,action,body_json,committed_utc) VALUES(?,?,?,?,?)',(str(uuid.uuid4()),agent_id,action,_canonical(journal),now))
++  if action=='bind':status,response=resolve_relay_route(db,agent_id)
++  else:status,response=200,journal
++  db.execute('INSERT INTO requests(principal,idem_key,request_hash,response_json,response_status) VALUES(?,?,?,?,?)',(principal,key,request_hash,_canonical(response),status));db.commit();return status,response
++ except Exception:
++  db.rollback();raise
+ def _session_request_valid(body,action):
+  if not isinstance(body,dict): return False
+  if action=='register':
+@@ -221,15 +268,31 @@ class Handler(BaseHTTPRequestHandler):
+    except Exception:return self.reply(503,{'detail':'session lookup unavailable'},sensitive)
+    finally:
+     if d:d.close()
++  route_match=re.fullmatch(r'/v1/relay-routes/([a-z0-9][a-z0-9._-]{0,127})',urlsplit(self.path).path)
++  if route_match:
++   if self.headers.get('Authorization')!='Bearer '+token():return self.reply(401,{'detail':'unauthorized'})
++   d=None
++   try:d=connect();status,out=resolve_relay_route(d,route_match.group(1));return self.reply(status,out)
++   except Exception:return self.reply(503,{'disposition':'REGISTRY_UNAVAILABLE'})
++   finally:
++    if d:d.close()
+   self.reply(404,{"detail":"not found"})
+  def do_POST(self):
+   session_match=re.fullmatch(r'/v1/sessions/([0-9a-f-]{36})/(heartbeat|terminate)',self.path)
+-  if self.path!="/v1/agents" and not session_match and self.path!='/v1/sessions':return self.reply(404,{"detail":"not found"})
++  route_match=re.fullmatch(r'/v1/relay-routes/([a-z0-9][a-z0-9._-]{0,127})(?:/(disable))?',urlsplit(self.path).path)
++  if self.path!="/v1/agents" and not session_match and self.path!='/v1/sessions' and not route_match:return self.reply(404,{"detail":"not found"})
+   if self.headers.get("Authorization")!="Bearer "+token():return self.reply(401,{"detail":"unauthorized"})
++  if route_match and not _operator_authorized(self.headers):return self.reply(404,{'detail':'not found'},True)
+   key=self.headers.get("Idempotency-Key"); principal=self.headers.get("X-Registry-Principal")
+   if not key or not principal:return self.reply(400,{"detail":"Idempotency-Key and X-Registry-Principal required"})
+   try: body=json.loads(self.rfile.read(int(self.headers.get("Content-Length","0"))))
+   except Exception:return self.reply(400,{"detail":"invalid json"})
++  if route_match:
++   agent_id,disable=route_match.groups();action='disable' if disable else 'bind';d=None
++   try:d=connect();status,out=mutate_relay_route(d,principal,key,agent_id,body,action);return self.reply(status,out,True)
++   except Exception:return self.reply(503,{'detail':'relay route mutation unavailable'},True)
++   finally:
++    if d:d.close()
+   if self.path=='/v1/sessions':
+    try: require_canary_test_proof(self.headers,body,'registry:session:register',body.get('agent_id',''))
+    except CanaryAuthorityError as e:return self.reply(403,{"detail":str(e)})
+diff --git a/registry/migrate.py b/registry/migrate.py
+index 9e27d3a..fda9090 100644
+--- a/registry/migrate.py
++++ b/registry/migrate.py
+@@ -5,7 +5,7 @@ from pathlib import Path
+ DB=Path(os.environ['REGISTRY_DB']); LOCK=DB.with_suffix('.migration.lock')
+ ROOT=Path(__file__).resolve().parents[1]; SCHEMA=Path(__file__).with_name('schema.sql')
+ CONTRACT=ROOT/'contracts'/'r7'/'registry-schema.json'
+-APPLICATION_ID=1414746695; USER_VERSION=4
++APPLICATION_ID=1414746695; USER_VERSION=5
+ def _sha(path):
+  data=path.read_bytes().replace(b'\r\n',b'\n').replace(b'\r',b'\n')
+  return hashlib.sha256(data).hexdigest()
+@@ -17,6 +17,8 @@ def _statements(path):
+  if current.strip(): raise RuntimeError('partial Registry schema statement')
+  return statements
+ def _upgrade_statements(version):
++ if version == 4:
++  return tuple(statement for statement in _statements(SCHEMA) if statement.lstrip().upper().startswith(('CREATE TABLE RELAY_ROUTE','CREATE TRIGGER RELAY_ROUTE')))
+  if version == 3:
+   return tuple(statement for statement in _statements(SCHEMA) if statement.lstrip().upper().startswith('ALTER TABLE REQUESTS'))
+  if version == 2:
+@@ -27,7 +29,7 @@ def _upgrade_statements(version):
+ def _contract():
+  try: value=json.loads(CONTRACT.read_text(encoding='utf-8'))
+  except Exception as exc: raise RuntimeError('Registry schema contract unavailable') from exc
+- if value.get('application_id')!=APPLICATION_ID or value.get('user_version')!=USER_VERSION or value.get('head')!='4' or value.get('schema_sha256')!=_sha(SCHEMA) or value.get('migrator_sha256')!=_sha(Path(__file__)):
++ if value.get('application_id')!=APPLICATION_ID or value.get('user_version')!=USER_VERSION or value.get('head')!='5' or value.get('schema_sha256')!=_sha(SCHEMA) or value.get('migrator_sha256')!=_sha(Path(__file__)):
+   raise RuntimeError('Registry schema contract hash or identity mismatch')
+  return value
+ def canonical_schema_sha256(db):
+@@ -35,7 +37,7 @@ def canonical_schema_sha256(db):
+  return hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+ def verify(db):
+  contract=_contract(); versions=[r[0] for r in db.execute('SELECT version FROM registry_migrations ORDER BY version')]
+- if versions!=[1,2,3,4] or db.execute('PRAGMA application_id').fetchone()[0]!=APPLICATION_ID or db.execute('PRAGMA user_version').fetchone()[0]!=USER_VERSION: raise RuntimeError('Registry migration history or database identity mismatch')
++ if versions!=[1,2,3,4,5] or db.execute('PRAGMA application_id').fetchone()[0]!=APPLICATION_ID or db.execute('PRAGMA user_version').fetchone()[0]!=USER_VERSION: raise RuntimeError('Registry migration history or database identity mismatch')
+  if canonical_schema_sha256(db)!=contract.get('canonical_schema_sha256'): raise RuntimeError('Registry canonical schema digest mismatch')
+  return USER_VERSION
+ def migrate(db):
+@@ -46,17 +48,20 @@ def migrate(db):
+    for statement in _statements(SCHEMA): db.execute(statement)
+   else:
+    versions=[r[0] for r in db.execute('SELECT version FROM registry_migrations ORDER BY version')]
+-   if versions in ([1],[1,2],[1,2,3]):
++   if versions in ([1],[1,2],[1,2,3],[1,2,3,4]):
+     if versions==[1]:
+      for statement in _upgrade_statements(1): db.execute(statement)
+      db.execute("INSERT INTO registry_migrations VALUES(2,strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
+     if versions in ([1],[1,2]):
+      for statement in _upgrade_statements(2): db.execute(statement)
+      db.execute("INSERT INTO registry_migrations VALUES(3,strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
+-    for statement in _upgrade_statements(3): db.execute(statement)
+-    db.execute("INSERT INTO registry_migrations VALUES(4,strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
++    if versions in ([1],[1,2],[1,2,3]):
++     for statement in _upgrade_statements(3): db.execute(statement)
++     db.execute("INSERT INTO registry_migrations VALUES(4,strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
++    for statement in _upgrade_statements(4): db.execute(statement)
++    db.execute("INSERT INTO registry_migrations VALUES(5,strftime('%Y-%m-%dT%H:%M:%SZ','now'))")
+     db.execute(f'PRAGMA application_id={APPLICATION_ID}'); db.execute(f'PRAGMA user_version={USER_VERSION}')
+-   elif versions != [1,2,3,4]: raise RuntimeError(f'unsupported registry schema versions: {versions}')
++   elif versions != [1,2,3,4,5]: raise RuntimeError(f'unsupported registry schema versions: {versions}')
+   db.commit()
+  except Exception: db.rollback(); raise
+  return verify(db)
+diff --git a/registry/schema.sql b/registry/schema.sql
+index 0728cdb..5b99f01 100644
+--- a/registry/schema.sql
++++ b/registry/schema.sql
+@@ -53,5 +53,30 @@ CREATE TRIGGER session_journal_no_delete BEFORE DELETE ON session_journal BEGIN
+ INSERT INTO registry_migrations VALUES(3,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+ ALTER TABLE requests ADD COLUMN response_status INTEGER NOT NULL DEFAULT 200;
+ INSERT INTO registry_migrations VALUES(4,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
++CREATE TABLE relay_routes(
++ agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id),
++ session_uuid TEXT UNIQUE NOT NULL REFERENCES sessions(session_uuid),
++ transport TEXT NOT NULL CHECK(transport='revere.v1'),
++ relay_capability TEXT NOT NULL CHECK(relay_capability='coordinator-contact'),
++ capability_version TEXT NOT NULL,
++ dispatcher_key_id TEXT NOT NULL,
++ dispatcher_public_key TEXT NOT NULL,
++ state TEXT NOT NULL CHECK(state IN ('ACTIVE','DRAINING','DISABLED')),
++ route_revision INTEGER NOT NULL CHECK(route_revision>0),
++ last_verified_utc TEXT NOT NULL,
++ updated_utc TEXT NOT NULL
++);
++CREATE TABLE relay_route_journal(
++ seq INTEGER PRIMARY KEY AUTOINCREMENT,
++ event_id TEXT UNIQUE NOT NULL,
++ agent_id TEXT NOT NULL,
++ action TEXT NOT NULL CHECK(action IN ('bind','disable')),
++ body_json TEXT NOT NULL,
++ committed_utc TEXT NOT NULL
++);
++CREATE TRIGGER relay_route_revision_guard BEFORE UPDATE ON relay_routes WHEN NEW.route_revision<=OLD.route_revision BEGIN SELECT RAISE(ABORT,'relay route revision must increase'); END;
++CREATE TRIGGER relay_route_journal_no_update BEFORE UPDATE ON relay_route_journal BEGIN SELECT RAISE(ABORT,'relay route journal is append-only'); END;
++CREATE TRIGGER relay_route_journal_no_delete BEFORE DELETE ON relay_route_journal BEGIN SELECT RAISE(ABORT,'relay route journal is append-only'); END;
++INSERT INTO registry_migrations VALUES(5,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+ PRAGMA application_id=1414746695;
+-PRAGMA user_version=4;
++PRAGMA user_version=5;
+diff --git a/tests/test_session_registry_s1.py b/tests/test_session_registry_s1.py
+index 608f53b..b83bff7 100644
+--- a/tests/test_session_registry_s1.py
++++ b/tests/test_session_registry_s1.py
+@@ -192,7 +192,7 @@ class SessionRegistryS1Tests(unittest.TestCase):
+                 finally:
+                     if old is None: __import__("os").environ.pop("REGISTRY_DB", None)
+                     else: __import__("os").environ["REGISTRY_DB"] = old
+-                self.assertEqual([(1,), (2,), (3,), (4,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
++                self.assertEqual([(1,), (2,), (3,), (4,), (5,)], list(db.execute("SELECT version FROM registry_migrations ORDER BY version")))
+                 self.assertEqual({"sessions", "session_journal"}, {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('sessions','session_journal')")})
+                 self.assertIn("response_status", {row[1] for row in db.execute("PRAGMA table_info(requests)")})
+                 self.assertEqual(200, db.execute("SELECT response_status FROM requests WHERE principal='legacy'").fetchone()[0])

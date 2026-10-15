@@ -1,0 +1,267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:townsquare:contract:delivery-view:1",
+  "title": "TownSquare delivery-view/1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/recipientView"
+    },
+    {
+      "$ref": "#/$defs/auditorView"
+    }
+  ],
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "state": {
+      "enum": [
+        "PENDING",
+        "CLAIMED",
+        "RETRY_WAIT",
+        "MAILBOX_DEPOSITED",
+        "ACKNOWLEDGED",
+        "PARKED",
+        "WITHHELD",
+        "CANCELLED"
+      ]
+    },
+    "eventType": {
+      "enum": [
+        "MATERIALIZED",
+        "CLAIM_LEASED",
+        "ATTEMPTED",
+        "LEASE_EXPIRED",
+        "MAILBOX_DEPOSITED",
+        "FAILURE_REPORTED",
+        "RETRY_SCHEDULED",
+        "ACKNOWLEDGED",
+        "PARKED",
+        "WITHHELD",
+        "CANCELLED",
+        "REDRIVEN"
+      ]
+    },
+    "recipientView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "view",
+        "delivery_id",
+        "notice_id",
+        "event_id",
+        "generation",
+        "recipient_agent_id",
+        "recipient_seat_id",
+        "state",
+        "events"
+      ],
+      "properties": {
+        "contract": {
+          "const": "delivery-view/1"
+        },
+        "view": {
+          "const": "RECIPIENT"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/token"
+        },
+        "notice_id": {
+          "$ref": "#/$defs/token"
+        },
+        "event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recipient_agent_id": {
+          "$ref": "#/$defs/token"
+        },
+        "recipient_seat_id": {
+          "$ref": "#/$defs/token"
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/recipientEvent"
+          }
+        }
+      }
+    },
+    "recipientEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "delivery_event_id",
+        "event_type",
+        "recorded_at",
+        "correlation_id"
+      ],
+      "properties": {
+        "delivery_event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "event_type": {
+          "$ref": "#/$defs/eventType"
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/token"
+        },
+        "claim_id": {
+          "$ref": "#/$defs/token"
+        },
+        "lease_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "mailbox_record_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "auditorView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "view",
+        "delivery_id",
+        "notice_id",
+        "source_event_id",
+        "generation",
+        "recipient_agent_id",
+        "recipient_host_id",
+        "recipient_seat_id",
+        "registry_authority_id",
+        "registry_snapshot_id",
+        "registry_watermark",
+        "registry_recipient_sha256",
+        "state",
+        "events"
+      ],
+      "properties": {
+        "contract": {
+          "const": "delivery-view/1"
+        },
+        "view": {
+          "const": "AUDITOR"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/token"
+        },
+        "notice_id": {
+          "$ref": "#/$defs/token"
+        },
+        "source_event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recipient_agent_id": {
+          "$ref": "#/$defs/token"
+        },
+        "recipient_host_id": {
+          "$ref": "#/$defs/token"
+        },
+        "recipient_seat_id": {
+          "$ref": "#/$defs/token"
+        },
+        "registry_authority_id": {
+          "$ref": "#/$defs/token"
+        },
+        "registry_snapshot_id": {
+          "$ref": "#/$defs/token"
+        },
+        "registry_watermark": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "registry_recipient_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "state": {
+          "$ref": "#/$defs/state"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/auditorEvent"
+          }
+        }
+      }
+    },
+    "auditorEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "delivery_event_id",
+        "event_type",
+        "actor_principal_id",
+        "actor_subject_type",
+        "recorded_at",
+        "correlation_id"
+      ],
+      "properties": {
+        "delivery_event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "event_type": {
+          "$ref": "#/$defs/eventType"
+        },
+        "actor_principal_id": {
+          "$ref": "#/$defs/token"
+        },
+        "actor_subject_type": {
+          "enum": [
+            "AGENT",
+            "AGENT_DELEGATE",
+            "HOST_COURIER",
+            "SERVICE"
+          ]
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/token"
+        },
+        "claim_id": {
+          "$ref": "#/$defs/token"
+        },
+        "lease_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "request_body_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mailbox_record_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "linked_delivery_id": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:townsquare:contract:delivery-fail:1",
+  "title": "TownSquare delivery-fail/1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/result"
+    }
+  ],
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "failureCode": {
+      "enum": [
+        "POINTER_VALIDATION_FAILED",
+        "MAILBOX_UNAVAILABLE",
+        "MAILBOX_WRITE_FAILED",
+        "LOCAL_STORAGE_EXHAUSTED",
+        "TEMPORARY_IO",
+        "UNSUPPORTED_POINTER_VERSION"
+      ]
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "form",
+        "request_id",
+        "idempotency_key",
+        "request_body_sha256",
+        "delivery_id",
+        "claim_id",
+        "lease_epoch",
+        "failure_code",
+        "correlation_id"
+      ],
+      "properties": {
+        "contract": {
+          "const": "delivery-fail/1"
+        },
+        "form": {
+          "const": "REQUEST"
+        },
+        "request_id": {
+          "$ref": "#/$defs/token"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/token"
+        },
+        "request_body_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/token"
+        },
+        "claim_id": {
+          "$ref": "#/$defs/token"
+        },
+        "lease_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failure_code": {
+          "$ref": "#/$defs/failureCode"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "form",
+        "request_id",
+        "idempotency_key",
+        "request_body_sha256",
+        "delivery_id",
+        "delivery_event_id",
+        "claim_id",
+        "lease_epoch",
+        "recipient_agent_id",
+        "recipient_host_id",
+        "recipient_seat_id",
+        "failure_code",
+        "correlation_id",
+        "recorded_at",
+        "attempt_number",
+        "decision",
+        "state",
+        "next_available_at",
+        "subject"
+      ],
+      "properties": {
+        "contract": {
+          "const": "delivery-fail/1"
+        },
+        "form": {
+          "const": "RESULT"
+        },
+        "request_id": {
+          "$ref": "#/$defs/token"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/token"
+        },
+        "request_body_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "delivery_id": {
+          "$ref": "#/$defs/token"
+        },
+        "delivery_event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "claim_id": {
+          "$ref": "#/$defs/token"
+        },
+        "lease_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "recipient_agent_id": {
+          "$ref": "#/$defs/token"
+        },
+        "recipient_host_id": {
+          "$ref": "#/$defs/token"
+        },
+        "recipient_seat_id": {
+          "$ref": "#/$defs/token"
+        },
+        "failure_code": {
+          "$ref": "#/$defs/failureCode"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/token"
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "attempt_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "decision": {
+          "enum": [
+            "RETRY",
+            "PARK"
+          ]
+        },
+        "state": {
+          "enum": [
+            "RETRY_WAIT",
+            "PARKED"
+          ]
+        },
+        "next_available_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "subject": {
+          "$ref": "#/$defs/serverSubject"
+        }
+      }
+    },
+    "serverSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "credential_id",
+        "principal_id",
+        "subject_type",
+        "host_id",
+        "authorized_seat_ids",
+        "capabilities",
+        "binding_event_id",
+        "binding_revision",
+        "revocation_checked_at",
+        "revoked"
+      ],
+      "properties": {
+        "source": {
+          "const": "SERVER_BOUND"
+        },
+        "credential_id": {
+          "$ref": "#/$defs/token"
+        },
+        "principal_id": {
+          "$ref": "#/$defs/token"
+        },
+        "subject_type": {
+          "enum": [
+            "AGENT",
+            "HOST_COURIER",
+            "SERVICE"
+          ]
+        },
+        "host_id": {
+          "$ref": "#/$defs/token"
+        },
+        "authorized_seat_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "contains": {
+            "const": "townsquare.delivery.fail"
+          },
+          "minContains": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "binding_event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "binding_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revocation_checked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "revoked": {
+          "const": false
+        }
+      }
+    }
+  }
+}

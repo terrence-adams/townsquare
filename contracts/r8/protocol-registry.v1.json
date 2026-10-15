@@ -1,0 +1,420 @@
+{
+  "registry": "townsquare-notification-protocol/1",
+  "status": "PROVISIONAL_UNTIL_STORY_189_ACCEPTANCE",
+  "canonicalization": {
+    "profile": "RFC8785_JCS_SHA256_V1",
+    "media_type": "application/json",
+    "text_encoding": "UTF-8",
+    "digest_algorithm": "SHA-256",
+    "digest_encoding": "lowercase-hex",
+    "object_member_order": "RFC8785",
+    "routing_recipient_order": [
+      "agent_id",
+      "seat_id"
+    ],
+    "unordered_string_array_order": "ascending UTF-8 byte order",
+    "request_body_projection": "the closed REQUEST object with request_body_sha256 omitted",
+    "routing_canonical_projection": "the closed registry-routing/1 object with canonical_sha256 and proof.signature omitted",
+    "routing_recipients_projection": "the recipients array after routing_recipient_order sorting",
+    "routing_recipient_projection": "one closed recipient object"
+  },
+  "versions": [
+    {
+      "contract": "target-ref",
+      "minimum": 1,
+      "maximum": 1
+    },
+    {
+      "contract": "registry-routing",
+      "minimum": 1,
+      "maximum": 1
+    },
+    {
+      "contract": "notice-pointer",
+      "minimum": 1,
+      "maximum": 1
+    },
+    {
+      "contract": "delivery-claim",
+      "minimum": 1,
+      "maximum": 1
+    },
+    {
+      "contract": "delivery-deposit",
+      "minimum": 1,
+      "maximum": 1
+    },
+    {
+      "contract": "delivery-ack",
+      "minimum": 1,
+      "maximum": 1
+    },
+    {
+      "contract": "delivery-fail",
+      "minimum": 1,
+      "maximum": 1
+    },
+    {
+      "contract": "delivery-redrive",
+      "minimum": 1,
+      "maximum": 1
+    },
+    {
+      "contract": "delivery-view",
+      "minimum": 1,
+      "maximum": 1
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "townsquare.delivery.receive",
+      "meaning": "make one active subscribed agent seat eligible for materialized delivery"
+    },
+    {
+      "name": "townsquare.registry.routing.read",
+      "meaning": "read authenticated recipient-routing snapshots"
+    },
+    {
+      "name": "townsquare.delivery.claim",
+      "meaning": "claim only deliveries selected from the current server-bound subject"
+    },
+    {
+      "name": "townsquare.delivery.deposit",
+      "meaning": "record durable private-mailbox placement under a current claim fence"
+    },
+    {
+      "name": "townsquare.delivery.ack",
+      "meaning": "record explicit recipient or accepted agent-specific delegate acknowledgment"
+    },
+    {
+      "name": "townsquare.delivery.fail",
+      "meaning": "report one bounded sanitized transport failure under a current claim fence"
+    },
+    {
+      "name": "townsquare.delivery.redrive",
+      "meaning": "create one linked next-generation delivery without mutating original evidence"
+    },
+    {
+      "name": "townsquare.delivery.audit.read.recipient",
+      "meaning": "read the server-filtered audit projection for the bound recipient"
+    },
+    {
+      "name": "townsquare.delivery.audit.read.full",
+      "meaning": "read the server-filtered auditor projection"
+    },
+    {
+      "name": "townsquare.delivery.restricted.read",
+      "meaning": "receive restricted pointer metadata when the selected courier profile and policy both permit it"
+    }
+  ],
+  "delivery_states": [
+    "PENDING",
+    "CLAIMED",
+    "RETRY_WAIT",
+    "MAILBOX_DEPOSITED",
+    "ACKNOWLEDGED",
+    "PARKED",
+    "WITHHELD",
+    "CANCELLED"
+  ],
+  "delivery_events": [
+    "MATERIALIZED",
+    "CLAIM_LEASED",
+    "ATTEMPTED",
+    "LEASE_EXPIRED",
+    "MAILBOX_DEPOSITED",
+    "FAILURE_REPORTED",
+    "RETRY_SCHEDULED",
+    "ACKNOWLEDGED",
+    "PARKED",
+    "WITHHELD",
+    "CANCELLED",
+    "REDRIVEN"
+  ],
+  "state_transitions": [
+    {
+      "from": "PENDING",
+      "to": [
+        "CLAIMED",
+        "WITHHELD",
+        "CANCELLED"
+      ]
+    },
+    {
+      "from": "CLAIMED",
+      "to": [
+        "MAILBOX_DEPOSITED",
+        "RETRY_WAIT",
+        "PARKED",
+        "WITHHELD",
+        "CANCELLED"
+      ]
+    },
+    {
+      "from": "RETRY_WAIT",
+      "to": [
+        "CLAIMED",
+        "WITHHELD",
+        "CANCELLED"
+      ]
+    },
+    {
+      "from": "MAILBOX_DEPOSITED",
+      "to": [
+        "CLAIMED",
+        "ACKNOWLEDGED",
+        "WITHHELD",
+        "CANCELLED"
+      ]
+    },
+    {
+      "from": "ACKNOWLEDGED",
+      "to": []
+    },
+    {
+      "from": "PARKED",
+      "to": []
+    },
+    {
+      "from": "WITHHELD",
+      "to": []
+    },
+    {
+      "from": "CANCELLED",
+      "to": []
+    }
+  ],
+  "failure_codes": [
+    "POINTER_VALIDATION_FAILED",
+    "MAILBOX_UNAVAILABLE",
+    "MAILBOX_WRITE_FAILED",
+    "LOCAL_STORAGE_EXHAUSTED",
+    "TEMPORARY_IO",
+    "UNSUPPORTED_POINTER_VERSION"
+  ],
+  "errors": [
+    {
+      "code": "INVALID_REQUEST",
+      "http_status": 400,
+      "disclosure": "NORMAL"
+    },
+    {
+      "code": "CONTRACT_VERSION_UNSUPPORTED",
+      "http_status": 400,
+      "disclosure": "NORMAL"
+    },
+    {
+      "code": "IDEMPOTENCY_PAYLOAD_MISMATCH",
+      "http_status": 409,
+      "disclosure": "NORMAL"
+    },
+    {
+      "code": "CLAIM_FENCE_INVALID",
+      "http_status": 409,
+      "disclosure": "CONCEALED_AS_NOT_FOUND_WHEN_RESOURCE_IDENTITY_IS_NOT_VISIBLE"
+    },
+    {
+      "code": "CLAIM_EXPIRED",
+      "http_status": 409,
+      "disclosure": "CONCEALED_AS_NOT_FOUND_WHEN_RESOURCE_IDENTITY_IS_NOT_VISIBLE"
+    },
+    {
+      "code": "SUBJECT_REVOKED",
+      "http_status": 403,
+      "disclosure": "CONCEALED_AS_NOT_FOUND_WHEN_RESOURCE_IDENTITY_IS_NOT_VISIBLE"
+    },
+    {
+      "code": "CAPABILITY_DENIED",
+      "http_status": 403,
+      "disclosure": "CONCEALED_AS_NOT_FOUND_WHEN_RESOURCE_IDENTITY_IS_NOT_VISIBLE"
+    },
+    {
+      "code": "SNAPSHOT_PROOF_INVALID",
+      "http_status": 409,
+      "disclosure": "AUDIT_ONLY"
+    },
+    {
+      "code": "SNAPSHOT_ROLLBACK",
+      "http_status": 409,
+      "disclosure": "AUDIT_ONLY"
+    },
+    {
+      "code": "ROUTING_UNAVAILABLE",
+      "http_status": 503,
+      "disclosure": "NORMAL"
+    },
+    {
+      "code": "DELIVERY_STATE_CONFLICT",
+      "http_status": 409,
+      "disclosure": "CONCEALED_AS_NOT_FOUND_WHEN_RESOURCE_IDENTITY_IS_NOT_VISIBLE"
+    },
+    {
+      "code": "NOT_FOUND",
+      "http_status": 404,
+      "disclosure": "EXTERNAL_EQUIVALENCE_FOR_UNKNOWN_RESTRICTED_OR_CROSS_SUBJECT"
+    }
+  ],
+  "non_disclosure": {
+    "detail_response": {
+      "http_status": 404,
+      "body_keys": [
+        "code",
+        "request_id"
+      ],
+      "code": "NOT_FOUND"
+    },
+    "list_response": {
+      "hidden_rows_removed_before_pagination": true,
+      "hidden_rows_affect_count": false,
+      "hidden_rows_affect_cursor": false
+    },
+    "log_rule": "use only request_id, external code, and sanitized policy reason; omit target, recipient, notice, delivery, count, and cursor metadata",
+    "timing_equalization": "POST_MVP_NOT_REQUIRED_BY_R8"
+  },
+  "identity_and_revocation": {
+    "authority_source": "SERVER_BOUND_CREDENTIAL_CONTEXT",
+    "server_bound_fields": [
+      "credential_id",
+      "principal_id",
+      "subject_type",
+      "host_id",
+      "authorized_seat_ids",
+      "capabilities",
+      "binding_event_id",
+      "binding_revision"
+    ],
+    "caller_authority_fields_allowed": false,
+    "caller_mismatch_behavior": "REJECT_AND_AUDIT_WITH_NON_DISCLOSURE",
+    "revocation_check": "CURRENT binding and revocation are checked on every claim, deposit, acknowledgment, fail, redrive, and view",
+    "revoked_during_lease": "reject mutation under the lease, preserve history, and append the server-selected WITHHELD or CANCELLED disposition"
+  },
+  "snapshot_evidence": {
+    "required_fields": [
+      "authority_id",
+      "snapshot_id",
+      "watermark",
+      "canonical_sha256",
+      "recipients_sha256",
+      "proof",
+      "issued_at"
+    ],
+    "accepted_proof_modes": [
+      "SIGNED_JCS_SHA256",
+      "AUTHENTICATED_SERVICE_CHANNEL"
+    ],
+    "anti_rollback_key": "authority_id",
+    "last_accepted_watermark_rule": "reject a lower watermark; accept an equal watermark only when canonical_sha256 is identical; atomically persist a higher watermark with the materialization",
+    "invalid_or_unavailable_behavior": "park materialization and audit; never fall back to v2 opaque data"
+  },
+  "materialization": {
+    "recipient_set": "freeze on first successful materialization from one authenticated snapshot",
+    "recipient_uniqueness": "agent_id and seat_id are each unique in a routing result; ambiguous or duplicate active ownership fails closed",
+    "uniqueness_key": [
+      "notice_id",
+      "recipient_agent_id",
+      "generation"
+    ],
+    "initial_generation": 0,
+    "delivery_id_derivation": "d- plus lowercase SHA-256 hex of RFC8785 JCS over [delivery-id/1, notice_id, recipient_agent_id, generation]",
+    "host_target_rule": "expand to each active eligible subscribed agent seat on that host; the host never becomes a recipient delivery",
+    "agent_target_rule": "resolve exactly the addressed active eligible subscribed agent seat; never include sibling agents",
+    "partial_fanout_rule": "rollback the full materialization",
+    "later_join_rule": "requires an authorized redrive generation"
+  },
+  "idempotency": {
+    "scope": [
+      "server_bound_principal_id",
+      "operation_contract",
+      "idempotency_key"
+    ],
+    "matching_request": "return the original stored result without a second state transition",
+    "mismatching_request": "reject with IDEMPOTENCY_PAYLOAD_MISMATCH",
+    "comparison": "compare request_body_sha256 computed from the canonical request_body_projection"
+  },
+  "leases": {
+    "clock": "SERVER_TIME_ONLY",
+    "fence": [
+      "claim_id",
+      "lease_epoch"
+    ],
+    "mutation_binding": [
+      "server_bound_subject",
+      "delivery_id",
+      "recipient_seat_id",
+      "claim_id",
+      "lease_epoch",
+      "request_body_sha256"
+    ],
+    "expiry": "append LEASE_EXPIRED and make the same delivery reclaimable with a strictly greater lease_epoch",
+    "stale_or_cross_claim": "reject and audit without disclosing delivery existence"
+  },
+  "retry": {
+    "clock": "SERVER_TIME_ONLY",
+    "policy": "capped backoff with an implementation-declared finite cap; the exact duration is not frozen by Story 189",
+    "client_authority": "failure reporter cannot select retry, park, cancel, withhold, or next_available_at",
+    "server_authority": "Ledger alone selects RETRY or PARK and appends the corresponding event",
+    "poison_non_starvation": "claim selection excludes PARKED and not-yet-available deliveries",
+    "silent_drop_allowed": false,
+    "offline_rule": "offline time does not consume a failure attempt; the delivery remains pending or retryable"
+  },
+  "receipts": [
+    {
+      "stage": "CLAIM_LEASED",
+      "meaning": "temporary transport lease; not a delivery receipt"
+    },
+    {
+      "stage": "ATTEMPTED",
+      "meaning": "transport attempt; not a delivery receipt"
+    },
+    {
+      "stage": "MAILBOX_DEPOSITED",
+      "meaning": "pointer durably persisted to the recipient private mailbox; not recipient acknowledgment"
+    },
+    {
+      "stage": "ACKNOWLEDGED",
+      "meaning": "explicit idempotent receipt by the recipient agent or accepted agent-specific delegate; not understanding, acceptance, action, or completion"
+    }
+  ],
+  "redrive": {
+    "required_capability": "townsquare.delivery.redrive",
+    "authority": "SERVER_ONLY_AFTER_AUTHORIZATION",
+    "result": "create exactly one new delivery with generation original_generation plus one and link both delivery IDs",
+    "original_evidence": "immutable and terminal",
+    "idempotency": "same canonical request returns the original new-generation result"
+  },
+  "views": {
+    "RECIPIENT": {
+      "required_capability": "townsquare.delivery.audit.read.recipient",
+      "scope": "only the server-bound recipient delivery and sanitized events",
+      "actor_identity_visible": false
+    },
+    "AUDITOR": {
+      "required_capability": "townsquare.delivery.audit.read.full",
+      "scope": "source, routing, recipient, actor, fence, digest, correlation, and time evidence",
+      "work_content_visible": false
+    }
+  },
+  "courier_profiles": {
+    "HOST_COURIER": {
+      "admission": "dedicated courier identity plus proven enforceable private per-seat mailbox ACL isolation",
+      "claim_scope": "only server-bound authorized_seat_ids on server-bound host_id",
+      "restricted_visibility": "only pointer metadata required for deposit and only with townsquare.delivery.restricted.read",
+      "acknowledgment_allowed": false
+    },
+    "DIRECT_AGENT": {
+      "admission": "server-bound agent identity for one recipient seat",
+      "required_when": "host mailbox isolation is unproven or restricted policy forbids courier visibility",
+      "claim_scope": "only the server-bound agent seat",
+      "acknowledgment_allowed": true
+    },
+    "automatic_fallback": false,
+    "pinning": "profile is pinned in routing and delivery evidence and revalidated at live canary admission"
+  },
+  "authority_boundaries": {
+    "registry": "routing eligibility and authenticated snapshot evidence",
+    "ledger": "notice intent, frozen recipients, delivery state, attempts, receipts, retry, parking, and audit history",
+    "courier": "pointer transport and bounded sanitized failure reporting only",
+    "vertical": "work hierarchy, lifecycle, and acceptance; notification events cannot create or close work",
+    "revere": "optional post-MVP wake acceleration only; no durable state or receipt authority"
+  }
+}
