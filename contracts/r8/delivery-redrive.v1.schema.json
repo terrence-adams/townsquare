@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:townsquare:contract:delivery-redrive:1",
+  "title": "TownSquare delivery-redrive/1",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/result"
+    }
+  ],
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "form",
+        "request_id",
+        "idempotency_key",
+        "request_body_sha256",
+        "original_delivery_id",
+        "correlation_id"
+      ],
+      "properties": {
+        "contract": {
+          "const": "delivery-redrive/1"
+        },
+        "form": {
+          "const": "REQUEST"
+        },
+        "request_id": {
+          "$ref": "#/$defs/token"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/token"
+        },
+        "request_body_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "original_delivery_id": {
+          "$ref": "#/$defs/token"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "form",
+        "request_id",
+        "idempotency_key",
+        "request_body_sha256",
+        "original_delivery_id",
+        "original_generation",
+        "original_state",
+        "new_delivery_id",
+        "new_generation",
+        "notice_id",
+        "recipient_agent_id",
+        "delivery_event_id",
+        "correlation_id",
+        "recorded_at",
+        "subject"
+      ],
+      "properties": {
+        "contract": {
+          "const": "delivery-redrive/1"
+        },
+        "form": {
+          "const": "RESULT"
+        },
+        "request_id": {
+          "$ref": "#/$defs/token"
+        },
+        "idempotency_key": {
+          "$ref": "#/$defs/token"
+        },
+        "request_body_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "original_delivery_id": {
+          "$ref": "#/$defs/token"
+        },
+        "original_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "original_state": {
+          "enum": [
+            "PARKED",
+            "WITHHELD",
+            "CANCELLED"
+          ]
+        },
+        "new_delivery_id": {
+          "$ref": "#/$defs/token"
+        },
+        "new_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "notice_id": {
+          "$ref": "#/$defs/token"
+        },
+        "recipient_agent_id": {
+          "$ref": "#/$defs/token"
+        },
+        "delivery_event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/token"
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "subject": {
+          "$ref": "#/$defs/serverSubject"
+        }
+      }
+    },
+    "serverSubject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "credential_id",
+        "principal_id",
+        "subject_type",
+        "host_id",
+        "authorized_seat_ids",
+        "capabilities",
+        "binding_event_id",
+        "binding_revision",
+        "revocation_checked_at",
+        "revoked"
+      ],
+      "properties": {
+        "source": {
+          "const": "SERVER_BOUND"
+        },
+        "credential_id": {
+          "$ref": "#/$defs/token"
+        },
+        "principal_id": {
+          "$ref": "#/$defs/token"
+        },
+        "subject_type": {
+          "enum": [
+            "AGENT",
+            "SERVICE"
+          ]
+        },
+        "host_id": {
+          "$ref": "#/$defs/token"
+        },
+        "authorized_seat_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "capabilities": {
+          "type": "array",
+          "contains": {
+            "const": "townsquare.delivery.redrive"
+          },
+          "minContains": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "binding_event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "binding_revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revocation_checked_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "revoked": {
+          "const": false
+        }
+      }
+    }
+  }
+}

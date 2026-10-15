@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:townsquare:contract:registry-routing:1",
+  "title": "TownSquare registry-routing/1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "authority_id",
+    "snapshot_id",
+    "watermark",
+    "issued_at",
+    "target",
+    "canonical_sha256",
+    "recipients_sha256",
+    "proof",
+    "recipients"
+  ],
+  "properties": {
+    "contract": {
+      "const": "registry-routing/1"
+    },
+    "authority_id": {
+      "$ref": "#/$defs/token"
+    },
+    "snapshot_id": {
+      "$ref": "#/$defs/token"
+    },
+    "watermark": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "target": {
+      "$ref": "#/$defs/targetRef"
+    },
+    "canonical_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "recipients_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "proof": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/signedProof"
+        },
+        {
+          "$ref": "#/$defs/serviceProof"
+        }
+      ]
+    },
+    "recipients": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/recipient"
+      }
+    }
+  },
+  "$defs": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "targetRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract",
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "contract": {
+          "const": "target-ref/1"
+        },
+        "kind": {
+          "enum": [
+            "AGENT",
+            "HOST"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/token"
+        }
+      }
+    },
+    "signedProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "issuer_id",
+        "key_id",
+        "algorithm",
+        "signature"
+      ],
+      "properties": {
+        "mode": {
+          "const": "SIGNED_JCS_SHA256"
+        },
+        "issuer_id": {
+          "$ref": "#/$defs/token"
+        },
+        "key_id": {
+          "$ref": "#/$defs/token"
+        },
+        "algorithm": {
+          "enum": [
+            "Ed25519"
+          ]
+        },
+        "signature": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      }
+    },
+    "serviceProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "issuer_id",
+        "authenticated_service_id",
+        "channel_binding_sha256"
+      ],
+      "properties": {
+        "mode": {
+          "const": "AUTHENTICATED_SERVICE_CHANNEL"
+        },
+        "issuer_id": {
+          "$ref": "#/$defs/token"
+        },
+        "authenticated_service_id": {
+          "$ref": "#/$defs/token"
+        },
+        "channel_binding_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "recipient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agent_id",
+        "host_id",
+        "seat_id",
+        "principal_id",
+        "binding_event_id",
+        "subscription_event_id",
+        "status",
+        "eligibility",
+        "capabilities",
+        "courier_profile"
+      ],
+      "properties": {
+        "agent_id": {
+          "$ref": "#/$defs/token"
+        },
+        "host_id": {
+          "$ref": "#/$defs/token"
+        },
+        "seat_id": {
+          "$ref": "#/$defs/token"
+        },
+        "principal_id": {
+          "$ref": "#/$defs/token"
+        },
+        "binding_event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "subscription_event_id": {
+          "$ref": "#/$defs/token"
+        },
+        "status": {
+          "const": "ACTIVE"
+        },
+        "eligibility": {
+          "const": "ELIGIBLE"
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "contains": {
+            "const": "townsquare.delivery.receive"
+          },
+          "minContains": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/token"
+          }
+        },
+        "courier_profile": {
+          "enum": [
+            "HOST_COURIER",
+            "DIRECT_AGENT"
+          ]
+        }
+      }
+    }
+  }
+}
