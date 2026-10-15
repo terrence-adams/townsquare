@@ -582,7 +582,7 @@ class AuditWorkerTests(unittest.TestCase):
                 if statement.lstrip().upper().startswith("INSERT INTO REGISTRY_MIGRATIONS VALUES(6,"): break
             db.execute(f"PRAGMA application_id={migrate.APPLICATION_ID}"); db.execute("PRAGMA user_version=6")
             migrate.migrate(db)
-            self.assertEqual(10, db.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(11, db.execute("PRAGMA user_version").fetchone()[0])
             self.assertEqual((1, None), tuple(db.execute("SELECT singleton,heartbeat_utc FROM audit_worker_state").fetchone()))
             db.close()
             contract = json.loads((ROOT / "contracts" / "r7" / "registry-schema.json").read_text(encoding="utf-8"))

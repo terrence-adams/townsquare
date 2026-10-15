@@ -289,5 +289,30 @@ CREATE TABLE audit_boot_epoch_history(
  claimed_utc TEXT NOT NULL
 );
 INSERT INTO registry_migrations VALUES(10,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
+CREATE TABLE relay_routes(
+ agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id),
+ session_uuid TEXT UNIQUE NOT NULL REFERENCES sessions(session_uuid),
+ transport TEXT NOT NULL CHECK(transport='revere.v1'),
+ relay_capability TEXT NOT NULL CHECK(relay_capability='coordinator-contact'),
+ capability_version TEXT NOT NULL,
+ dispatcher_key_id TEXT NOT NULL,
+ dispatcher_public_key TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('ACTIVE','DRAINING','DISABLED')),
+ route_revision INTEGER NOT NULL CHECK(route_revision>0),
+ last_verified_utc TEXT NOT NULL,
+ updated_utc TEXT NOT NULL
+);
+CREATE TABLE relay_route_journal(
+ seq INTEGER PRIMARY KEY AUTOINCREMENT,
+ event_id TEXT UNIQUE NOT NULL,
+ agent_id TEXT NOT NULL,
+ action TEXT NOT NULL CHECK(action IN ('bind','disable')),
+ body_json TEXT NOT NULL,
+ committed_utc TEXT NOT NULL
+);
+CREATE TRIGGER relay_route_revision_guard BEFORE UPDATE ON relay_routes WHEN NEW.route_revision<=OLD.route_revision BEGIN SELECT RAISE(ABORT,'relay route revision must increase'); END;
+CREATE TRIGGER relay_route_journal_no_update BEFORE UPDATE ON relay_route_journal BEGIN SELECT RAISE(ABORT,'relay route journal is append-only'); END;
+CREATE TRIGGER relay_route_journal_no_delete BEFORE DELETE ON relay_route_journal BEGIN SELECT RAISE(ABORT,'relay route journal is append-only'); END;
+INSERT INTO registry_migrations VALUES(11,strftime('%Y-%m-%dT%H:%M:%SZ','now'));
 PRAGMA application_id=1414746695;
-PRAGMA user_version=10;
+PRAGMA user_version=11;

@@ -32,7 +32,7 @@ def connect():
  if d.execute("PRAGMA application_id").fetchone()[0] != 1414746695 or d.execute("PRAGMA user_version").fetchone()[0] != DATABASE_SCHEMA_VERSION:
   d.close(); raise RuntimeError('Registry application_id/user_version mismatch')
  return d
-SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; DATABASE_SCHEMA_VERSION=10; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
+SERVICE_ID='townsquare-registry-v0'; SCHEMA_VERSION=2; DATABASE_SCHEMA_VERSION=11; AUDIT_CONTRACT_VERSION='registry-ledger-audit-v1'
 AUDIT_INTERVAL_ENV='REGISTRY_AUDIT_INTERVAL_SECONDS';AUDIT_RELEASE_INTERVAL_SECONDS=30;AUDIT_CYCLE_LIMIT=100;AUDIT_LEASE_SECONDS=30
 AUDIT_ROLES=(
  ('ledger_audit','REGISTRY_LEDGER_AUDIT_TOKEN_FILE','REGISTRY_LEDGER_AUDIT_CREDENTIAL_REVISION'),
@@ -659,6 +659,54 @@ def cleanup_session_artifacts(db,now=None):
   expired=[row[0] for row in db.execute('SELECT grant_id FROM session_enrollments WHERE consumed_utc IS NULL AND expires_utc<=? ORDER BY grant_id LIMIT 500',(cutoff,))];db.executemany('DELETE FROM session_enrollments WHERE grant_id=?',((value,) for value in expired))
   remaining=500-len(expired);retained=[row[0] for row in db.execute('SELECT r.grant_id FROM session_registration_replays r JOIN sessions s ON s.session_uuid=r.session_uuid WHERE r.retain_until_utc<=? AND s.status IN ("ENDED","LOST") ORDER BY r.grant_id LIMIT ?',(now,remaining))];db.executemany('DELETE FROM session_registration_replays WHERE grant_id=?',((value,) for value in retained));db.executemany('DELETE FROM session_enrollments WHERE grant_id=?',((value,) for value in retained));db.execute('DELETE FROM session_owning_replays WHERE rowid IN (SELECT rowid FROM session_owning_replays WHERE is_mutation=0 AND expires_utc<=? ORDER BY rowid LIMIT 500)',(now,));db.commit();return len(expired)+len(retained)
  except Exception:db.rollback();raise
+_AGENT_ID=re.compile(r'^[a-z0-9](?:[a-z0-9._-]{0,127})$')
+def _dispatcher_public_key(value):
+ if not isinstance(value,str):return False
+ try:return len(base64.b64decode(value,validate=True))==32
+ except ValueError:return False
+def _resolved_route(row):
+ return {name:row[name] for name in ('agent_id','seat_or_host','session_uuid','transport','recipient_id','relay_capability','capability_version','dispatcher_key_id','dispatcher_public_key','route_revision','route_state','session_state','last_verified_utc')}
+def resolve_relay_route(db,agent_id):
+ row=db.execute("""SELECT r.agent_id,s.seat_or_host,r.session_uuid,r.transport,r.agent_id AS recipient_id,r.relay_capability,r.capability_version,r.dispatcher_key_id,r.dispatcher_public_key,r.route_revision,r.state AS route_state,s.status AS session_state,r.last_verified_utc,a.active,s.agent_id AS session_agent_id FROM relay_routes r JOIN agents a ON a.agent_id=r.agent_id JOIN sessions s ON s.session_uuid=r.session_uuid WHERE r.agent_id=?""",(agent_id,)).fetchone()
+ if not row:return 404,{'disposition':'ROUTE_NOT_FOUND'}
+ eligible=row['active']==1 and row['session_agent_id']==agent_id and bool(row['seat_or_host']) and row['route_state']=='ACTIVE' and row['session_state'] in ('ACTIVE','IDLE') and row['transport']=='revere.v1' and row['relay_capability']=='coordinator-contact' and bool(row['dispatcher_key_id']) and _dispatcher_public_key(row['dispatcher_public_key'])
+ return (200,_resolved_route(row)) if eligible else (409,{'disposition':'ROUTE_INELIGIBLE'})
+def _route_revision_valid(value,minimum):return isinstance(value,int) and not isinstance(value,bool) and value>=minimum
+def _route_request_valid(body,action):
+ if not isinstance(body,dict):return False
+ if action=='disable':return set(body)=={'expected_route_revision'} and _route_revision_valid(body['expected_route_revision'],1)
+ return set(body)=={'session_uuid','capability_version','dispatcher_key_id','dispatcher_public_key','expected_route_revision'} and _route_revision_valid(body['expected_route_revision'],0) and _nonempty_string(body['capability_version'],64) and _nonempty_string(body['dispatcher_key_id'],128) and _dispatcher_public_key(body['dispatcher_public_key']) and isinstance(body['session_uuid'],str) and bool(_UUID4_RE.fullmatch(body['session_uuid']))
+def mutate_relay_route(db,principal,key,agent_id,body,action):
+ """Operator-only bind/disable of an agent's coordinator relay route; never touches session or agent state."""
+ if not _nonempty_string(key,128) or not _nonempty_string(principal,128) or not _AGENT_ID.fullmatch(agent_id) or not _route_request_valid(body,action):return 400,{'detail':'invalid relay route request'}
+ request_hash=hashlib.sha256(_canonical({'agent_id':agent_id,'action':action,'body':body}).encode()).hexdigest()
+ db.execute('BEGIN IMMEDIATE')
+ try:
+  old=db.execute('SELECT * FROM requests WHERE principal=? AND idem_key=?',(principal,key)).fetchone()
+  if old:
+   db.rollback()
+   if old['request_hash']!=request_hash:return 409,{'detail':'idempotency key reused with different request'}
+   return old['response_status'],json.loads(old['response_json'])
+  current=db.execute('SELECT * FROM relay_routes WHERE agent_id=?',(agent_id,)).fetchone();expected=body['expected_route_revision']
+  if not current and action=='disable':db.rollback();return 404,{'disposition':'ROUTE_NOT_FOUND'}
+  actual=current['route_revision'] if current else 0
+  if expected!=actual:db.rollback();return 409,{'disposition':'STALE_ROUTE','route_revision':actual}
+  if action=='bind':
+   session=db.execute('SELECT s.*,a.active FROM sessions s JOIN agents a ON a.agent_id=s.agent_id WHERE s.session_uuid=?',(body['session_uuid'],)).fetchone()
+   if not session or session['agent_id']!=agent_id:db.rollback();return 409,{'disposition':'ROUTE_MISMATCH'}
+   if not session['active'] or not session['seat_or_host'] or session['status'] not in ('ACTIVE','IDLE'):db.rollback();return 409,{'disposition':'ROUTE_INELIGIBLE'}
+   if db.execute('SELECT 1 FROM relay_routes WHERE session_uuid=? AND agent_id<>?',(body['session_uuid'],agent_id)).fetchone():db.rollback();return 409,{'disposition':'ROUTE_MISMATCH'}
+  now=_utc();revision=actual+1
+  if action=='bind':
+   db.execute("""INSERT INTO relay_routes(agent_id,session_uuid,transport,relay_capability,capability_version,dispatcher_key_id,dispatcher_public_key,state,route_revision,last_verified_utc,updated_utc) VALUES(?,?,'revere.v1','coordinator-contact',?,?,?,'ACTIVE',?,?,?) ON CONFLICT(agent_id) DO UPDATE SET session_uuid=excluded.session_uuid,transport=excluded.transport,relay_capability=excluded.relay_capability,capability_version=excluded.capability_version,dispatcher_key_id=excluded.dispatcher_key_id,dispatcher_public_key=excluded.dispatcher_public_key,state=excluded.state,route_revision=excluded.route_revision,last_verified_utc=excluded.last_verified_utc,updated_utc=excluded.updated_utc""",(agent_id,body['session_uuid'],body['capability_version'],body['dispatcher_key_id'],body['dispatcher_public_key'],revision,now,now))
+  else:db.execute("UPDATE relay_routes SET state='DISABLED',route_revision=?,updated_utc=? WHERE agent_id=?",(revision,now,agent_id))
+  route=db.execute('SELECT * FROM relay_routes WHERE agent_id=?',(agent_id,)).fetchone()
+  journal={'agent_id':agent_id,'session_uuid':route['session_uuid'],'transport':route['transport'],'relay_capability':route['relay_capability'],'capability_version':route['capability_version'],'dispatcher_key_id':route['dispatcher_key_id'],'dispatcher_public_key':route['dispatcher_public_key'],'route_revision':revision,'route_state':route['state'],'last_verified_utc':route['last_verified_utc']}
+  db.execute('INSERT INTO relay_route_journal(event_id,agent_id,action,body_json,committed_utc) VALUES(?,?,?,?,?)',(str(uuid.uuid4()),agent_id,action,_canonical(journal),now))
+  status,response=resolve_relay_route(db,agent_id) if action=='bind' else (200,journal)
+  db.execute('INSERT INTO requests(principal,idem_key,request_hash,response_json,response_status) VALUES(?,?,?,?,?)',(principal,key,request_hash,_canonical(response),status));db.commit();return status,response
+ except Exception:
+  db.rollback();raise
 def mutate_session(db,principal,key,body,action):
  """Preserved S1 internal/admin lifecycle; it never creates an owning credential."""
  valid=isinstance(body,dict) and ((action=='register' and {'agent_id','provider','provider_session_id','initial_status'}<=set(body)) or (action=='heartbeat' and body.get('status') in ('ACTIVE','IDLE')) or (action=='terminate' and body.get('terminal_status') in ('ENDED','LOST')))
@@ -744,11 +792,32 @@ class Handler(BaseHTTPRequestHandler):
    except Exception:return self.reply(503,{'detail':'session lookup unavailable'},sensitive)
    finally:
     if d:d.close()
+  route_match=re.fullmatch(r'/v1/relay-routes/([a-z0-9][a-z0-9._-]{0,127})',self.path)
+  if route_match:
+   if not (_lookup_authorized(self.headers) or _legacy_authorized(self.headers)):return self.reply(401,{'detail':'unauthorized'},True)
+   d=None
+   try:d=connect();status,out=resolve_relay_route(d,route_match.group(1));return self.reply(status,out,True)
+   except Exception:return self.reply(503,{'disposition':'REGISTRY_UNAVAILABLE'},True)
+   finally:
+    if d:d.close()
   self.reply(404,{"detail":"not found"},self.path.startswith('/v1/sessions/'))
  def do_POST(self):
   session_match=re.fullmatch(r'/v1/sessions/([0-9a-f-]{36})/(heartbeat|terminate)',self.path)
   rotation_match=re.fullmatch(r'/v1/sessions/([0-9a-f-]{36})/credential-rotations',self.path)
   enrollment_path=self.path=='/v1/session-enrollments'
+  route_match=re.fullmatch(r'/v1/relay-routes/([a-z0-9][a-z0-9._-]{0,127})(?:/(disable))?',self.path)
+  if route_match:
+   if self.client_address[0] not in ('127.0.0.1','::1') or not _operator_authorized(self.headers):return self.reply(404,{'detail':'not found'},True)
+   if not _legacy_authorized(self.headers):return self.reply(401,{'detail':'unauthorized'},True)
+   key=_single_header(self.headers,'Idempotency-Key');principal=_single_header(self.headers,'X-Registry-Principal')
+   if not key or not principal:return self.reply(400,{'detail':'Idempotency-Key and X-Registry-Principal required'},True)
+   body=self.read_json()
+   if body is None:return self.reply(400,{'detail':'invalid json'},True)
+   agent_id,disable=route_match.groups();d=None
+   try:d=connect();status,out=mutate_relay_route(d,principal,key,agent_id,body,'disable' if disable else 'bind');return self.reply(status,out,True)
+   except Exception:return self.reply(503,{'detail':'relay route mutation unavailable'},True)
+   finally:
+    if d:d.close()
   if self.path!="/v1/agents" and not session_match and not rotation_match and self.path!='/v1/sessions' and not enrollment_path:return self.reply(404,{"detail":"not found"},self.path.startswith('/v1/session'))
   if enrollment_path and (self.client_address[0] not in ('127.0.0.1','::1') or not _operator_authorized(self.headers)):
    return self.reply(404,{"detail":"not found"},True)
